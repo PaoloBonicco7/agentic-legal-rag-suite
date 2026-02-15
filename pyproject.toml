@@ -11,7 +11,16 @@ dependencies = [
     "requests>=2.32.0,<3.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
     "jupyter>=1.1.1,<2.0.0",
-    "ipykernel>=6.29.0,<7.0.0"
+    "ipykernel>=6.29.0,<7.0.0",
+    "beautifulsoup4 (>=4.14.3,<5.0.0)",
+    "lxml (>=6.0.2,<7.0.0)"
+]
+
+[project.optional-dependencies]
+# Optional: more robust HTML parsing backend. The code falls back to stdlib if not installed.
+html = [
+    "beautifulsoup4>=4.12.0,<5.0.0",
+    "lxml>=5.0.0,<6.0.0"
 ]
 
 
