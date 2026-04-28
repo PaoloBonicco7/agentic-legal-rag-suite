@@ -1,25 +1,51 @@
 # agentic-legal-rag-suite
-Modular Agentic RAG for legal purposes: iterative retrieval loops (retrieve→self-evaluate→refine) over 3k HTML laws. Includes RAG-ready data extraction, hybrid search (lexical+semantic), MCQ benchmark evaluation, and full step-by-step tracing with citations.
 
-## Dataset (HTML → RAG-ready JSONL)
-The ingestion pipeline lives in `laws_ingestion/` and converts `data/leggi-html/*.html` into a flat JSONL dataset
-(`laws/articles/passages/notes/edges/chunks` + `manifest.json`). See `laws_ingestion/README.md` for HTML structure
-and extraction details.
+Suite sperimentale per pipeline Legal RAG su normativa HTML: preprocessing deterministico, indexing Qdrant e baseline RAG con valutazione.
 
-## Quick setup (Poetry + Notebook Utopia)
+## Struttura repo
+- `src/laws_ingestion/`: ingestion deterministic HTML -> dataset strutturato + pipeline notebook 03.
+- `src/legal_indexing/`: chunk refinement, embeddings, indexing Qdrant e runtime RAG.
+- `baselines/`: baseline retrieval/benchmarking (es. BM25).
+- `notebooks/`: notebook sperimentali e walkthrough.
+- `docs/`: documentazione operativa corrente.
+- `docs/archive/`: documentazione storica/legacy (non source of truth).
+- `data/evaluation/`: dataset benchmark (`questions.csv`, `questions_no_hint.csv`).
 
-1. Create environment and install dependencies:
-   ```bash
-   poetry install --no-root
-   ```
-2. Configure API key:
-   ```bash
-   cp .env.example .env
-   # then set UTOPIA_API_KEY in .env
-   ```
-3. Start Jupyter:
-   ```bash
-   poetry run jupyter notebook
-   ```
-4. Open and run:
-   `notebooks/utopia_api_smoke_test.ipynb`
+## Notebook principali
+- `notebooks/03_laws_graph_pipeline.ipynb`
+- `notebooks/04_qdrant_indexing_pipeline.ipynb`
+- `notebooks/05_langgraph_rag_pipeline.ipynb`
+- `notebooks/evaluation/02_evalutation_no_rag.ipynb`
+
+## Setup rapido
+```bash
+poetry install
+cp .env.example .env
+```
+
+## CLI / moduli Python
+Il progetto e' notebook-centric e usa codice in `src/`.
+
+Per eseguire i moduli direttamente:
+```bash
+PYTHONPATH=src poetry run python -m legal_indexing --help
+PYTHONPATH=src poetry run python -m laws_ingestion --help
+```
+
+Esempio indexing:
+```bash
+UTOPIA_API_KEY=... PYTHONPATH=src poetry run python -m legal_indexing --subset-limit 500
+```
+
+## Config ambiente (Utopia)
+Variabili principali:
+- `UTOPIA_API_KEY`
+- `UTOPIA_BASE_URL`
+- `UTOPIA_EMBED_API_MODE` (`auto|openai|ollama`)
+- `UTOPIA_EMBED_URL`
+- `UTOPIA_EMBED_MODEL`
+- `UTOPIA_CHAT_MODEL`
+- `UTOPIA_JUDGE_MODEL`
+
+## Documentazione
+Indice documentazione corrente: `docs/index.md`.

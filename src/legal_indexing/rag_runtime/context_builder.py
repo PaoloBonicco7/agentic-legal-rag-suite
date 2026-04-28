@@ -62,7 +62,9 @@ def build_context(
     max_per_law = max(2, min(4, max_chunks // 2))
     max_per_article = 2
 
-    for rank, doc in enumerate(retrieved[:max_chunks], start=1):
+    for rank, doc in enumerate(retrieved, start=1):
+        if len(selected) >= max_chunks:
+            break
         law_key = str(doc.law_id or "").strip()
         article_key = str(doc.article_id or "").strip()
         if law_key and law_seen_counts.get(law_key, 0) >= max_per_law:

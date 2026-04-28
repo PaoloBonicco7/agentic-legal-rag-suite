@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from laws_ingestion.utils import compute_dataset_id, normalize_article_label, parse_italian_date
+from laws_ingestion.core.utils import compute_dataset_id, normalize_article_label, parse_italian_date
 
 
 class TestUtils(unittest.TestCase):

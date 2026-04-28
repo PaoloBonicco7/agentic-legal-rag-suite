@@ -14,7 +14,7 @@ from legal_indexing.qdrant_store import (
     get_vector_size,
 )
 
-from .config import RagRuntimeConfig
+from .config import AdvancedRerankConfig, RagRuntimeConfig
 from .context_builder import ContextBuildResult, build_context
 from .graph_adapter import LegalGraphAdapter
 from .index_contract import IndexContract, resolve_index_contract
@@ -31,6 +31,7 @@ from .llm import (
 from .metadata_filters import (
     MetadataFilterDecision,
     build_metadata_filter,
+    is_relation_query,
     resolve_metadata_filter_decision,
 )
 from .prompts import build_rag_system_prompt, build_rag_user_prompt
@@ -65,6 +66,10 @@ class RagState(TypedDict, total=False):
     normalized_query: str
     rewritten_queries: list[str]
     metadata_filter_decision: dict[str, Any]
+    metadata_query_filter_decision: dict[str, Any]
+    relation_query: bool
+    metadata_hard_law_filter_applied: bool
+    metadata_hard_article_filter_applied: bool
     query_filter: Any
     filters_used: dict[str, Any]
     retrieval_batches: list[dict[str, Any]]
@@ -227,6 +232,21 @@ def _parse_metadata_decision(payload: dict[str, Any] | None) -> MetadataFilterDe
     )
 
 
+def _is_legally_specific_query(query: str) -> bool:
+    query_low = str(query or "").lower()
+    specific_markers = (
+        "art.",
+        "articolo",
+        "comma",
+        "l.r.",
+        "legge regionale",
+        "d.lgs.",
+        "law:",
+        "#art:",
+    )
+    return any(marker in query_low for marker in specific_markers)
+
+
 def _build_context_provenance_map(state: RagState) -> dict[str, dict[str, Any]]:
     source_tags = _build_source_tags_map(state)
     rerank_rows = {
@@ -272,7 +292,14 @@ def prepare_runtime(
 
     created_client = client is None
     if client is None:
-        client = QdrantClient(path=str(contract.qdrant_path))
+        qdrant_url = str(config.qdrant_url or "").strip()
+        if config.qdrant_prefer_remote and qdrant_url:
+            client = QdrantClient(
+                url=qdrant_url,
+                api_key=(str(config.qdrant_api_key).strip() or None),
+            )
+        else:
+            client = QdrantClient(path=str(contract.qdrant_path))
 
     assert client is not None
     if not client.collection_exists(collection_name=contract.collection_name):
@@ -496,26 +523,54 @@ def _build_nodes(
             default_view=config.view_filter,
             resolved_references=resolved_refs,
         )
-        query_filter = build_metadata_filter(config.payload_fields, decision)
+        relation_query = is_relation_query(query, decision=decision)
+        query_filter_decision = decision
+        if (
+            relation_query
+            and config.advanced.metadata_filtering.relax_law_article_filters_on_relation_queries
+        ):
+            query_filter_decision = MetadataFilterDecision(
+                view=decision.view,
+                law_status=decision.law_status,
+                law_ids=tuple(),
+                relation_types=decision.relation_types,
+                article_ids=tuple(),
+                year_from=decision.year_from,
+                year_to=decision.year_to,
+                applied_heuristics=decision.applied_heuristics,
+            )
+        query_filter = build_metadata_filter(config.payload_fields, query_filter_decision)
 
         return {
             "metadata_filter_decision": decision.to_dict(),
+            "metadata_query_filter_decision": query_filter_decision.to_dict(),
+            "relation_query": relation_query,
+            "metadata_hard_law_filter_applied": bool(query_filter_decision.law_ids),
+            "metadata_hard_article_filter_applied": bool(query_filter_decision.article_ids),
             "query_filter": query_filter,
             "filters_used": {
-                "view": decision.view,
-                "law_status": decision.law_status,
-                "law_ids": list(decision.law_ids),
-                "relation_types": list(decision.relation_types),
-                "year_from": decision.year_from,
-                "year_to": decision.year_to,
+                "view": query_filter_decision.view,
+                "law_status": query_filter_decision.law_status,
+                "law_ids": list(query_filter_decision.law_ids),
+                "relation_types": list(query_filter_decision.relation_types),
+                "year_from": query_filter_decision.year_from,
+                "year_to": query_filter_decision.year_to,
                 "metadata_mode": config.advanced.metadata_filtering.mode,
+                "relation_query": relation_query,
+                "metadata_seed_law_ids": list(decision.law_ids),
+                "metadata_seed_article_ids": list(decision.article_ids),
+                "metadata_hard_law_filter_applied": bool(query_filter_decision.law_ids),
+                "metadata_hard_article_filter_applied": bool(query_filter_decision.article_ids),
             },
             "trace": _append_trace(
                 state,
                 {
                     "node": "build_metadata_filter",
                     "mode": config.advanced.metadata_filtering.mode,
+                    "relation_query": relation_query,
                     "heuristics": list(decision.applied_heuristics),
+                    "hard_law_filter_applied": bool(query_filter_decision.law_ids),
+                    "hard_article_filter_applied": bool(query_filter_decision.article_ids),
                     "resolved_law_refs": len((resolved_refs.law_ids if resolved_refs else tuple())),
                     "resolved_article_refs": len(
                         (resolved_refs.article_ids if resolved_refs else tuple())
@@ -617,25 +672,54 @@ def _build_nodes(
             }
 
         normalized_query = str(state.get("normalized_query") or "")
-        query_low = normalized_query.lower()
-        specific_markers = ("art.", "articolo", "comma", "l.r.", "legge regionale", "d.lgs.", "n.")
-        query_is_specific = any(m in query_low for m in specific_markers) or any(
-            ch.isdigit() for ch in query_low
+        metadata_decision = _parse_metadata_decision(
+            state.get("metadata_filter_decision")
+            if isinstance(state.get("metadata_filter_decision"), dict)
+            else None
         )
+        relation_query = bool(state.get("relation_query"))
+        if not relation_query:
+            relation_query = is_relation_query(normalized_query, decision=metadata_decision)
+        query_is_specific = _is_legally_specific_query(normalized_query)
         seed_law_ids = {d.law_id for d in base_docs if d.law_id}
-        dynamic_related_cap = int(config.advanced.graph_expansion.max_related_laws)
+        graph_cfg = config.advanced.graph_expansion
+        dynamic_related_cap = int(graph_cfg.max_related_laws)
+        dynamic_graph_top_k = int(graph_cfg.graph_retrieval_top_k)
         expansion_enabled = True
-        if query_is_specific and len(seed_law_ids) <= 1:
-            dynamic_related_cap = max(1, dynamic_related_cap // 2)
-            # For highly specific queries with a single strong seed law, skip noisy expansion.
-            if len(base_docs) >= 1 and (base_docs[0].law_id in seed_law_ids):
+        reason = "default"
+        specific_query_mode_applied = "full"
+        if (
+            relation_query
+            and graph_cfg.force_on_relation_queries
+        ):
+            expansion_enabled = True
+            reason = "forced_relation_query"
+            specific_query_mode_applied = "full"
+        elif query_is_specific and len(seed_law_ids) <= 1:
+            specific_query_mode = str(graph_cfg.specific_query_mode or "minimal").strip().lower()
+            specific_query_mode_applied = specific_query_mode
+            if specific_query_mode == "disable":
                 expansion_enabled = False
+                reason = "gated_specific_query"
+            elif specific_query_mode == "minimal":
+                dynamic_related_cap = min(
+                    dynamic_related_cap,
+                    int(graph_cfg.specific_query_max_related_laws),
+                )
+                dynamic_graph_top_k = min(
+                    dynamic_graph_top_k,
+                    int(graph_cfg.specific_query_graph_retrieval_top_k),
+                )
+                reason = "gated_specific_query"
+            else:
+                reason = "gated_specific_query"
 
         if not expansion_enabled:
             return {
                 "graph_expansion": {
                     "enabled": False,
-                    "reason": "gated_specific_query",
+                    "reason": reason,
+                    "specific_query_mode_applied": specific_query_mode_applied,
                     "graph_retrieved_count": 0,
                 },
                 "trace": _append_trace(
@@ -643,8 +727,10 @@ def _build_nodes(
                     {
                         "node": "graph_expand",
                         "enabled": False,
-                        "reason": "gated_specific_query",
+                        "reason": reason,
+                        "specific_query_mode_applied": specific_query_mode_applied,
                         "graph_retrieved_count": 0,
+                        "relation_query": relation_query,
                     },
                 ),
             }
@@ -656,13 +742,25 @@ def _build_nodes(
 
         graph_docs: list[RetrievedChunk] = []
         base_filter = state.get("query_filter")
+        if metadata_decision is not None:
+            graph_base_decision = MetadataFilterDecision(
+                view=metadata_decision.view,
+                law_status=metadata_decision.law_status,
+                law_ids=tuple(),
+                relation_types=metadata_decision.relation_types,
+                article_ids=tuple(),
+                year_from=metadata_decision.year_from,
+                year_to=metadata_decision.year_to,
+                applied_heuristics=metadata_decision.applied_heuristics,
+            )
+            base_filter = build_metadata_filter(config.payload_fields, graph_base_decision)
 
         if expansion.related_law_ids:
             law_filter = build_law_filter(config.payload_fields, expansion.related_law_ids)
             if config.advanced.hybrid.enabled:
                 law_hybrid = resources.retriever.query_hybrid(
                     normalized_query,
-                    top_k=config.advanced.graph_expansion.graph_retrieval_top_k,
+                    top_k=dynamic_graph_top_k,
                     query_filter=merge_filters(base_filter, law_filter),
                     score_threshold=config.retrieval_score_threshold,
                     threshold_direction=config.score_threshold_direction,
@@ -674,7 +772,7 @@ def _build_nodes(
                     graph_docs,
                     resources.retriever.query(
                         normalized_query,
-                        top_k=config.advanced.graph_expansion.graph_retrieval_top_k,
+                        top_k=dynamic_graph_top_k,
                         query_filter=merge_filters(base_filter, law_filter),
                         score_threshold=config.retrieval_score_threshold,
                         threshold_direction=config.score_threshold_direction,
@@ -692,7 +790,7 @@ def _build_nodes(
             if config.advanced.hybrid.enabled:
                 article_hybrid = resources.retriever.query_hybrid(
                     normalized_query,
-                    top_k=config.advanced.graph_expansion.graph_retrieval_top_k,
+                    top_k=dynamic_graph_top_k,
                     query_filter=merge_filters(base_filter, article_filter),
                     score_threshold=config.retrieval_score_threshold,
                     threshold_direction=config.score_threshold_direction,
@@ -704,7 +802,7 @@ def _build_nodes(
                     graph_docs,
                     resources.retriever.query(
                         normalized_query,
-                        top_k=config.advanced.graph_expansion.graph_retrieval_top_k,
+                        top_k=dynamic_graph_top_k,
                         query_filter=merge_filters(base_filter, article_filter),
                         score_threshold=config.retrieval_score_threshold,
                         threshold_direction=config.score_threshold_direction,
@@ -720,7 +818,7 @@ def _build_nodes(
             {
                 "name": "graph",
                 "query": normalized_query,
-                "top_k": config.advanced.graph_expansion.graph_retrieval_top_k,
+                "top_k": dynamic_graph_top_k,
                 "retrieved_chunk_ids": [d.chunk_id for d in graph_docs],
                 "retrieved_count": len(graph_docs),
             }
@@ -732,6 +830,9 @@ def _build_nodes(
             "graph_expansion": {
                 **expansion.to_dict(),
                 "enabled": True,
+                "reason": reason,
+                "specific_query_mode_applied": specific_query_mode_applied,
+                "relation_query": relation_query,
                 "graph_retrieved_count": len(graph_docs),
             },
             "trace": _append_trace(
@@ -741,6 +842,9 @@ def _build_nodes(
                     "seed_count": len(base_docs),
                     "graph_retrieved_count": len(graph_docs),
                     "total_after_merge": len(merged_docs),
+                    "reason": reason,
+                    "specific_query_mode_applied": specific_query_mode_applied,
+                    "relation_query": relation_query,
                 },
             ),
         }
@@ -785,14 +889,30 @@ def _build_nodes(
         metadata_decision = _parse_metadata_decision(
             state.get("metadata_filter_decision") if isinstance(state.get("metadata_filter_decision"), dict) else None
         )
+        relation_query = bool(state.get("relation_query"))
+        normalized_query = str(state.get("normalized_query") or "")
+        if not relation_query:
+            relation_query = is_relation_query(normalized_query, decision=metadata_decision)
         source_map = _build_source_tags_map(state)
+        rerank_cfg = config.advanced.rerank
+        if relation_query:
+            rerank_cfg = AdvancedRerankConfig(
+                enabled=rerank_cfg.enabled,
+                weight_retrieval_score=1.0,
+                weight_graph_bonus=0.35,
+                weight_metadata_bonus=0.10,
+                weight_lexical_overlap=0.10,
+                weight_sparse_score=0.25,
+                tie_breaker=rerank_cfg.tie_breaker,
+            )
 
         rerank_out = rerank_candidates(
-            str(state.get("normalized_query") or ""),
+            normalized_query,
             docs,
-            config=config.advanced.rerank,
+            config=rerank_cfg,
             source_tags_by_chunk=source_map,
             metadata_decision=metadata_decision,
+            relation_query=relation_query,
         )
 
         return {
@@ -804,6 +924,14 @@ def _build_nodes(
                     "node": "rerank_candidates",
                     "candidates": len(docs),
                     "enabled": True,
+                    "relation_query": relation_query,
+                    "weights": {
+                        "weight_retrieval_score": rerank_cfg.weight_retrieval_score,
+                        "weight_graph_bonus": rerank_cfg.weight_graph_bonus,
+                        "weight_metadata_bonus": rerank_cfg.weight_metadata_bonus,
+                        "weight_lexical_overlap": rerank_cfg.weight_lexical_overlap,
+                        "weight_sparse_score": rerank_cfg.weight_sparse_score,
+                    },
                 },
             ),
         }
@@ -879,6 +1007,18 @@ def _build_nodes(
             answer_model = RagAnswer(answer="", citations=[], needs_more_context=True)
             raw_text = ""
 
+        context_summary_payload = (
+            state.get("context_summary") if isinstance(state.get("context_summary"), dict) else {}
+        )
+        context_ids = set((context_summary_payload or {}).get("included_chunk_ids") or [])
+        if not context_ids:
+            context_ids = {doc.chunk_id for doc in list(state.get("retrieved") or [])}
+        context_included_count = (
+            int(context_summary_payload.get("included_count"))
+            if context_summary_payload.get("included_count") is not None
+            else len(context_ids)
+        )
+
         if is_empty_structured_answer(answer_model):
             was_empty_before_guard = True
             if guard_cfg.mark_empty_as_pipeline_error:
@@ -927,9 +1067,59 @@ def _build_nodes(
                     needs_more_context=True,
                 )
 
-        context_ids = set((state.get("context_summary") or {}).get("included_chunk_ids") or [])
-        if not context_ids:
-            context_ids = {doc.chunk_id for doc in list(state.get("retrieved") or [])}
+        strong_retrieval = (
+            retrieval_mode == "hybrid"
+            and len(retrieved) >= 12
+            and int(context_included_count) >= 8
+        )
+        if (
+            not is_empty_structured_answer(answer_model)
+            and answer_model.needs_more_context
+            and strong_retrieval
+            and guard_cfg.retry_on_needs_more_context
+        ):
+            retry_count = int(guard_cfg.max_needs_more_retries)
+            sample_ids = sorted(context_ids)[:5]
+            sample_hint = ", ".join(sample_ids)
+            for attempt in range(1, retry_count + 1):
+                retry_prompt = (
+                    f"{base_user_prompt}\n\n"
+                    "Tentativo best-effort obbligatorio: con il contesto disponibile devi fornire comunque "
+                    "una risposta utile e concreta.\n"
+                    "Vincoli: `answer` non vuoto; in `citations` includi almeno un `chunk_id` presente nel "
+                    "contesto; usa `needs_more_context=true` solo se restano lacune sostanziali.\n"
+                    f"Esempi di chunk_id validi: {sample_hint}"
+                )
+                try:
+                    retry_model, retry_raw = _invoke_answer(
+                        retry_prompt,
+                        stage=f"retry_needs_more_context_{attempt}",
+                    )
+                except Exception as exc:
+                    _record_error(
+                        "generate_answer_structured_retry_needs_more_context",
+                        f"retry_{attempt}:{type(exc).__name__}: {exc}",
+                    )
+                    continue
+                if is_empty_structured_answer(retry_model):
+                    if guard_cfg.mark_empty_as_pipeline_error:
+                        _record_error(
+                            "generate_answer_structured_retry_needs_more_context",
+                            f"empty_answer_detected:retry_{attempt}",
+                        )
+                    continue
+                retry_citations = [cid for cid in retry_model.citations if cid in context_ids]
+                if context_ids and not retry_citations:
+                    _record_error(
+                        "generate_answer_structured_retry_needs_more_context",
+                        f"missing_valid_citation:retry_{attempt}",
+                    )
+                    continue
+                answer_model = retry_model
+                raw_text = retry_raw
+                answer_source = "retry_needs_more_context"
+                break
+
         citations = [cid for cid in answer_model.citations if cid in context_ids]
 
         answer_payload = RagAnswer(
@@ -1090,20 +1280,57 @@ def _build_retrieval_context_graph(
     resources: RuntimeResources,
     *,
     llm: SupportsInvoke | SupportsRunSync | None = None,
+    pipeline_mode: str = "naive",
 ) -> Any:
     from langgraph.graph import END, START, StateGraph
 
     nodes = _build_nodes(config, resources, llm=llm)
     graph = StateGraph(RagState)
-    graph.add_node("normalize_query", nodes["normalize_query"])
-    graph.add_node("retrieve_top_k", nodes["retrieve_top_k"])
-    graph.add_node("build_context", nodes["build_context"])
+    if pipeline_mode == "advanced":
+        graph.add_node("normalize_query", nodes["normalize_query"])
+        graph.add_node("rewrite_or_decompose_query", nodes["rewrite_or_decompose_query"])
+        graph.add_node("build_metadata_filter", nodes["build_metadata_filter"])
+        graph.add_node("retrieve_multi", nodes["retrieve_multi"])
+        graph.add_node("graph_expand", nodes["graph_expand"])
+        graph.add_node("rerank_candidates", nodes["rerank_candidates"])
+        graph.add_node("build_context", nodes["build_context"])
 
-    graph.add_edge(START, "normalize_query")
-    graph.add_edge("normalize_query", "retrieve_top_k")
-    graph.add_edge("retrieve_top_k", "build_context")
-    graph.add_edge("build_context", END)
+        graph.add_edge(START, "normalize_query")
+        graph.add_edge("normalize_query", "rewrite_or_decompose_query")
+        graph.add_edge("rewrite_or_decompose_query", "build_metadata_filter")
+        graph.add_edge("build_metadata_filter", "retrieve_multi")
+        graph.add_edge("retrieve_multi", "graph_expand")
+        graph.add_edge("graph_expand", "rerank_candidates")
+        graph.add_edge("rerank_candidates", "build_context")
+        graph.add_edge("build_context", END)
+    else:
+        graph.add_node("normalize_query", nodes["normalize_query"])
+        graph.add_node("retrieve_top_k", nodes["retrieve_top_k"])
+        graph.add_node("build_context", nodes["build_context"])
+
+        graph.add_edge(START, "normalize_query")
+        graph.add_edge("normalize_query", "retrieve_top_k")
+        graph.add_edge("retrieve_top_k", "build_context")
+        graph.add_edge("build_context", END)
     return graph.compile()
+
+
+def build_rag_retrieval_context_graph(
+    config: RagRuntimeConfig,
+    resources: RuntimeResources,
+    *,
+    llm: SupportsInvoke | SupportsRunSync | None = None,
+    pipeline_mode: str = "naive",
+) -> Any:
+    if pipeline_mode not in {"naive", "advanced"}:
+        raise ValueError("pipeline_mode must be one of: naive, advanced")
+    effective_cfg = resources.config.with_overrides(pipeline_mode=pipeline_mode)
+    return _build_retrieval_context_graph(
+        effective_cfg,
+        resources,
+        llm=llm,
+        pipeline_mode=pipeline_mode,
+    )
 
 
 def run_rag_retrieval_context(
@@ -1112,15 +1339,19 @@ def run_rag_retrieval_context(
     *,
     resources: RuntimeResources | None = None,
     llm: SupportsInvoke | SupportsRunSync | None = None,
+    pipeline_mode: str = "naive",
+    compiled_app: Any | None = None,
 ) -> dict[str, Any]:
-    """Run only retrieval/context steps of naive RAG (no answer generation)."""
+    """Run retrieval/context-only stages (no answer generation)."""
 
     created_resources = resources is None
     runtime = resources or prepare_runtime(config)
     try:
-        config = runtime.config.with_overrides(pipeline_mode="naive")
+        if pipeline_mode not in {"naive", "advanced"}:
+            raise ValueError("pipeline_mode must be one of: naive, advanced")
+        config = runtime.config.with_overrides(pipeline_mode=pipeline_mode)
         effective_llm = llm
-        if effective_llm is None:
+        if effective_llm is None and pipeline_mode == "naive":
             # _build_nodes builds answer node dependencies eagerly.
             # Inject a no-op invoke model to avoid requiring runtime LLM setup
             # when we only need retrieval/context stages.
@@ -1129,8 +1360,26 @@ def run_rag_retrieval_context(
                     return "{}"
 
             effective_llm = _NoopInvoke()  # type: ignore[assignment]
+        retrieval_order = (
+            [
+                "normalize_query",
+                "rewrite_or_decompose_query",
+                "build_metadata_filter",
+                "retrieve_multi",
+                "graph_expand",
+                "rerank_candidates",
+                "build_context",
+            ]
+            if pipeline_mode == "advanced"
+            else ["normalize_query", "retrieve_top_k", "build_context"]
+        )
         try:
-            app = _build_retrieval_context_graph(config, runtime, llm=effective_llm)
+            app = compiled_app or _build_retrieval_context_graph(
+                config,
+                runtime,
+                llm=effective_llm,
+                pipeline_mode=pipeline_mode,
+            )
             state: RagState = app.invoke(
                 {"question": question, "trace": [], "pipeline_errors": []}
             )
@@ -1141,7 +1390,7 @@ def run_rag_retrieval_context(
                     runtime,
                     question=question,
                     llm=effective_llm,
-                    order=["normalize_query", "retrieve_top_k", "build_context"],
+                    order=retrieval_order,
                 )
                 state["pipeline_errors"] = _append_pipeline_error(
                     state,
@@ -1153,7 +1402,7 @@ def run_rag_retrieval_context(
 
         return {
             "question": question,
-            "pipeline_mode": "naive",
+            "pipeline_mode": pipeline_mode,
             "stage": "retrieval_context_only",
             "state": state,
             "retrieved_preview": retrieval_preview(list(state.get("retrieved") or [])),
@@ -1190,13 +1439,14 @@ def run_rag_question(
     *,
     resources: RuntimeResources | None = None,
     llm: SupportsInvoke | SupportsRunSync | None = None,
+    compiled_app: Any | None = None,
 ) -> dict[str, Any]:
     created_resources = resources is None
     runtime = resources or prepare_runtime(config)
     try:
         config = runtime.config
         try:
-            app = build_rag_graph(config, runtime, llm=llm)
+            app = compiled_app or build_rag_graph(config, runtime, llm=llm)
             state: RagState = app.invoke(
                 {"question": question, "trace": [], "pipeline_errors": []}
             )

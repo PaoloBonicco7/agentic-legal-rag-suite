@@ -37,10 +37,17 @@ def summarize_filters(state: dict[str, Any]) -> dict[str, Any]:
         "view_filter": filters.get("view", "none"),
         "law_status_filter": filters.get("law_status"),
         "law_ids_filter": list(filters.get("law_ids") or []),
+        "metadata_seed_law_ids": list(filters.get("metadata_seed_law_ids") or []),
         "relation_types_filter": list(filters.get("relation_types") or []),
+        "metadata_seed_article_ids": list(filters.get("metadata_seed_article_ids") or []),
         "year_from": filters.get("year_from"),
         "year_to": filters.get("year_to"),
         "metadata_mode": filters.get("metadata_mode"),
+        "relation_query": bool(filters.get("relation_query")),
+        "metadata_hard_law_filter_applied": bool(filters.get("metadata_hard_law_filter_applied")),
+        "metadata_hard_article_filter_applied": bool(
+            filters.get("metadata_hard_article_filter_applied")
+        ),
         "metadata_heuristics": list(metadata_decision.get("applied_heuristics") or []),
         "raw_filter_present": bool(state.get("query_filter") is not None),
     }

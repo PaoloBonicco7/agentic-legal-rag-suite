@@ -15,6 +15,7 @@ MetadataFilterMode = Literal["off", "explicit_only", "hybrid"]
 RerankTieBreaker = Literal["chunk_id", "retrieval_score"]
 HybridFusionMethod = Literal["rrf", "weighted_sum"]
 HybridQueryAnalyzer = Literal["it_default", "it_legal"]
+GraphSpecificQueryMode = Literal["disable", "minimal", "full"]
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class AdvancedRewriteConfig:
 class AdvancedMetadataFilteringConfig:
     mode: MetadataFilterMode = "hybrid"
     enable_heuristics: bool = True
+    relax_law_article_filters_on_relation_queries: bool = True
     explicit_view: ViewFilter | None = None
     explicit_law_status: str | None = None
     explicit_law_ids: tuple[str, ...] = ()
@@ -96,6 +98,9 @@ class AdvancedMetadataFilteringConfig:
         return cls(
             mode=str(payload.get("mode", "hybrid")).strip().lower(),  # type: ignore[arg-type]
             enable_heuristics=bool(payload.get("enable_heuristics", True)),
+            relax_law_article_filters_on_relation_queries=bool(
+                payload.get("relax_law_article_filters_on_relation_queries", True)
+            ),
             explicit_view=payload.get("explicit_view"),
             explicit_law_status=(
                 str(payload.get("explicit_law_status")).strip()
@@ -174,6 +179,10 @@ class AdvancedGraphExpansionConfig:
     max_related_laws: int = 8
     graph_retrieval_top_k: int = 6
     include_related_articles: bool = True
+    force_on_relation_queries: bool = True
+    specific_query_mode: GraphSpecificQueryMode = "minimal"
+    specific_query_max_related_laws: int = 2
+    specific_query_graph_retrieval_top_k: int = 2
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AdvancedGraphExpansionConfig":
@@ -182,6 +191,12 @@ class AdvancedGraphExpansionConfig:
             max_related_laws=int(payload.get("max_related_laws", 8)),
             graph_retrieval_top_k=int(payload.get("graph_retrieval_top_k", 6)),
             include_related_articles=bool(payload.get("include_related_articles", True)),
+            force_on_relation_queries=bool(payload.get("force_on_relation_queries", True)),
+            specific_query_mode=str(payload.get("specific_query_mode", "minimal")).strip().lower(),  # type: ignore[arg-type]
+            specific_query_max_related_laws=int(payload.get("specific_query_max_related_laws", 2)),
+            specific_query_graph_retrieval_top_k=int(
+                payload.get("specific_query_graph_retrieval_top_k", 2)
+            ),
         )
 
     def validate(self) -> None:
@@ -189,6 +204,18 @@ class AdvancedGraphExpansionConfig:
             raise ValueError("advanced.graph_expansion.max_related_laws must be > 0")
         if self.graph_retrieval_top_k <= 0:
             raise ValueError("advanced.graph_expansion.graph_retrieval_top_k must be > 0")
+        if self.specific_query_mode not in {"disable", "minimal", "full"}:
+            raise ValueError(
+                "advanced.graph_expansion.specific_query_mode must be disable, minimal or full"
+            )
+        if self.specific_query_max_related_laws <= 0:
+            raise ValueError(
+                "advanced.graph_expansion.specific_query_max_related_laws must be > 0"
+            )
+        if self.specific_query_graph_retrieval_top_k <= 0:
+            raise ValueError(
+                "advanced.graph_expansion.specific_query_graph_retrieval_top_k must be > 0"
+            )
 
 
 @dataclass(frozen=True)
@@ -231,6 +258,8 @@ class AdvancedRerankConfig:
 class AdvancedAnswerGuardConfig:
     retry_on_empty_answer: bool = True
     max_empty_retries: int = 1
+    retry_on_needs_more_context: bool = True
+    max_needs_more_retries: int = 1
     fallback_message_it: str = (
         "Non dispongo di elementi sufficienti nel contesto recuperato per una risposta "
         "affidabile; servono più riferimenti normativi specifici."
@@ -246,6 +275,8 @@ class AdvancedAnswerGuardConfig:
         return cls(
             retry_on_empty_answer=bool(payload.get("retry_on_empty_answer", True)),
             max_empty_retries=int(payload.get("max_empty_retries", 1)),
+            retry_on_needs_more_context=bool(payload.get("retry_on_needs_more_context", True)),
+            max_needs_more_retries=int(payload.get("max_needs_more_retries", 1)),
             fallback_message_it=str(
                 payload.get("fallback_message_it")
                 or (
@@ -266,6 +297,8 @@ class AdvancedAnswerGuardConfig:
     def validate(self) -> None:
         if self.max_empty_retries < 0:
             raise ValueError("advanced.answer_guard.max_empty_retries must be >= 0")
+        if self.max_needs_more_retries < 0:
+            raise ValueError("advanced.answer_guard.max_needs_more_retries must be >= 0")
         if not self.fallback_message_it.strip():
             raise ValueError("advanced.answer_guard.fallback_message_it cannot be empty")
         if not self.fallback_message_en.strip():
@@ -375,6 +408,11 @@ class AdvancedRagConfig:
 class RagRuntimeConfig:
     dataset_dir: Path = Path("data/laws_dataset_clean")
     qdrant_path: Path = Path("data/indexes/qdrant")
+    qdrant_url: str | None = os.getenv("QDRANT_URL", "") or None
+    qdrant_api_key: str = os.getenv("QDRANT_API_KEY", "")
+    qdrant_prefer_remote: bool = (
+        str(os.getenv("QDRANT_PREFER_REMOTE", "1")).strip().lower() not in {"0", "false", "no"}
+    )
     indexing_artifacts_root: Path = Path("data/qdrant_indexing")
     indexing_run_id: str | None = None
     collection_name: str | None = None
@@ -462,6 +500,12 @@ class RagRuntimeConfig:
             )
         if self.view_filter not in {"none", "current", "historical"}:
             raise ValueError(f"view_filter={self.view_filter!r} is not supported")
+        if self.qdrant_url is not None:
+            url = str(self.qdrant_url).strip()
+            if not url:
+                raise ValueError("qdrant_url must be None or a non-empty string")
+            if not (url.startswith("http://") or url.startswith("https://")):
+                raise ValueError("qdrant_url must start with http:// or https://")
         self.advanced.validate()
 
     def resolve_path(self, path: Path) -> Path:

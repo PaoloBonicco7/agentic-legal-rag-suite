@@ -15,6 +15,7 @@ def _write_indexing_summary(
     qdrant_path: Path,
     hybrid_index: dict | None = None,
     index_contract: dict | None = None,
+    collection: dict | None = None,
 ) -> Path:
     run_dir = artifacts_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -27,6 +28,7 @@ def _write_indexing_summary(
         },
         "hybrid_index": hybrid_index or {},
         "index_contract": index_contract or {},
+        "collection": collection or {},
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
@@ -186,3 +188,22 @@ def test_index_contract_reads_eval_coverage_fields(tmp_path: Path) -> None:
     assert contract.eval_reference_coverage == 0.98
     assert contract.missing_references_sample == ("Legge regionale 1 gennaio 2024, n. 1",)
     assert contract.payload_field_coverage == {"law_id": 1.0, "article_id": 1.0}
+
+
+def test_index_contract_reads_collection_points_count(tmp_path: Path) -> None:
+    artifacts_root = tmp_path / "artifacts"
+    qdrant = tmp_path / "qdrant"
+    _write_indexing_summary(
+        artifacts_root,
+        "20260223_160000",
+        collection_name="collection_points",
+        qdrant_path=qdrant,
+        collection={
+            "collection_name": "collection_points",
+            "points_count_exact": 1234,
+        },
+    )
+
+    cfg = RagRuntimeConfig(indexing_artifacts_root=artifacts_root, qdrant_path=qdrant)
+    contract = resolve_index_contract(cfg)
+    assert contract.collection_points_count == 1234

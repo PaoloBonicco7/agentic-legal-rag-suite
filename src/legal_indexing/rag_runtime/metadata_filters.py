@@ -36,6 +36,15 @@ _RELATION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("sostitu", ("REPLACES", "REPLACED_BY")),
     ("inser", ("INSERTS", "INSERTED_BY")),
 )
+_RELATION_QUERY_MARKERS: tuple[str, ...] = (
+    "abrog",
+    "modific",
+    "sostitu",
+    "inser",
+    "derog",
+    "integra",
+    "novell",
+)
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,13 @@ class MetadataFilterDecision:
             "year_to": self.year_to,
             "applied_heuristics": list(self.applied_heuristics),
         }
+
+
+def is_relation_query(query: str, *, decision: MetadataFilterDecision | None = None) -> bool:
+    if decision is not None and decision.relation_types:
+        return True
+    query_low = str(query or "").lower()
+    return any(marker in query_low for marker in _RELATION_QUERY_MARKERS)
 
 
 def _infer_temporal(query: str) -> tuple[int | None, int | None, tuple[str, ...]]:

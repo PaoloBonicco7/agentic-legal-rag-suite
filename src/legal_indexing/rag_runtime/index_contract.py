@@ -21,6 +21,7 @@ class IndexContract:
     sparse_enabled: bool = False
     sparse_vector_name: str | None = None
     sparse_artifacts_path: Path | None = None
+    collection_points_count: int | None = None
     eval_reference_coverage: float | None = None
     missing_references_sample: tuple[str, ...] = tuple()
     payload_field_coverage: dict[str, float] | None = None
@@ -41,6 +42,7 @@ class IndexContract:
             "sparse_artifacts_path": (
                 str(self.sparse_artifacts_path) if self.sparse_artifacts_path else None
             ),
+            "collection_points_count": self.collection_points_count,
             "eval_reference_coverage": self.eval_reference_coverage,
             "missing_references_sample": list(self.missing_references_sample),
             "payload_field_coverage": (
@@ -129,6 +131,23 @@ def _index_contract_block(payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _collection_points_count(payload: dict[str, Any]) -> int | None:
+    collection = payload.get("collection")
+    if not isinstance(collection, dict):
+        return None
+    for raw in (
+        collection.get("points_count_exact"),
+        ((collection.get("collection_info") or {}).get("points_count")),
+    ):
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except Exception:
+            continue
+    return None
+
+
 def resolve_index_contract(config: RagRuntimeConfig) -> IndexContract:
     config.validate()
 
@@ -144,6 +163,7 @@ def resolve_index_contract(config: RagRuntimeConfig) -> IndexContract:
             sparse_enabled=False,
             sparse_vector_name=None,
             sparse_artifacts_path=None,
+            collection_points_count=None,
         )
 
     artifacts_root = config.resolved_indexing_artifacts_root
@@ -196,6 +216,7 @@ def resolve_index_contract(config: RagRuntimeConfig) -> IndexContract:
             else None
         ),
         sparse_artifacts_path=sparse_artifacts_path,
+        collection_points_count=_collection_points_count(payload),
         eval_reference_coverage=(
             float(index_contract["eval_reference_coverage"])
             if index_contract.get("eval_reference_coverage") is not None

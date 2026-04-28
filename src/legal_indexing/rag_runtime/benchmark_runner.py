@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
+import time
 from typing import Any, Callable, Sequence
 
 import pandas as pd
@@ -19,12 +23,228 @@ from .benchmarking import (
     validate_judge_output,
     validate_mcq_output,
 )
-from .langgraph_app import RuntimeResources, run_rag_question
+from .langgraph_app import (
+    RuntimeResources,
+    build_rag_graph,
+    build_rag_retrieval_context_graph,
+    run_rag_question,
+    run_rag_retrieval_context,
+)
 from .schemas import JudgeResult, McqAnswer, schema_to_json_dict
 
 
 RagRunner = Callable[[str], dict[str, Any]]
 StructuredChatFn = Callable[..., dict[str, Any]]
+
+
+def _sorted_unique_positions(positions: Sequence[int]) -> list[int]:
+    return sorted({int(pos) for pos in positions})
+
+
+def _normalize_for_fingerprint(value: Any) -> Any:
+    if is_dataclass(value):
+        return _normalize_for_fingerprint(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _normalize_for_fingerprint(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_for_fingerprint(v) for v in value]
+    if isinstance(value, set):
+        return sorted([_normalize_for_fingerprint(v) for v in value], key=lambda x: str(x))
+    return value
+
+
+def _stable_sha256(payload: Any) -> str:
+    normalized = _normalize_for_fingerprint(payload)
+    body = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _is_transient_chat_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if "timeout" in text:
+        return True
+    if "connection" in text:
+        return True
+    if "http 429" in text:
+        return True
+    if "http 500" in text or "http 502" in text or "http 503" in text or "http 504" in text:
+        return True
+    return False
+
+
+def _is_transient_error_text(text: str) -> bool:
+    low = str(text or "").lower()
+    if not low:
+        return False
+    if "timeout" in low:
+        return True
+    if "connection" in low:
+        return True
+    if "http 429" in low:
+        return True
+    if "http 500" in low or "http 502" in low or "http 503" in low or "http 504" in low:
+        return True
+    return False
+
+
+def _call_structured_with_retry(
+    *,
+    post_chat_fn: StructuredChatFn,
+    api_url: str,
+    headers: dict[str, str],
+    payload_schema: dict[str, Any],
+    prompt: str,
+    model: str,
+    timeout_sec: int,
+    max_retries: int,
+    retry_backoff_sec: float,
+) -> dict[str, Any]:
+    attempts = max(0, int(max_retries)) + 1
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return post_chat_fn(
+                api_url=api_url,
+                headers=headers,
+                payload_schema=payload_schema,
+                prompt=prompt,
+                model=model,
+                timeout=timeout_sec,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            last_exc = exc
+            if attempt >= attempts or not _is_transient_chat_error(exc):
+                raise
+            sleep_seconds = max(0.0, float(retry_backoff_sec)) * float(attempt)
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+    assert last_exc is not None
+    raise last_exc
+
+
+def _build_checkpoint_meta(
+    *,
+    runtime: RuntimeResources,
+    chat_model: str,
+    judge_model: str,
+    timeout_sec: int,
+    max_workers: int,
+    post_chat_max_retries: int,
+    post_chat_retry_backoff_sec: float,
+    positions: Sequence[int],
+) -> dict[str, Any]:
+    config_fingerprint = _stable_sha256(
+        {
+            "runtime_config": getattr(runtime, "config", None),
+            "chat_model": str(chat_model),
+            "judge_model": str(judge_model),
+            "timeout_sec": int(timeout_sec),
+            "max_workers": int(max_workers),
+            "post_chat_max_retries": int(post_chat_max_retries),
+            "post_chat_retry_backoff_sec": float(post_chat_retry_backoff_sec),
+        }
+    )
+    positions_sorted = _sorted_unique_positions(positions)
+    positions_fingerprint = _stable_sha256(positions_sorted)
+    return {
+        "schema_version": "2",
+        "config_fingerprint": config_fingerprint,
+        "positions_fingerprint": positions_fingerprint,
+    }
+
+
+def _load_checkpoint_rows(
+    path: Path,
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]], dict[str, Any] | None]:
+    mcq_rows: dict[int, dict[str, Any]] = {}
+    no_hint_rows: dict[int, dict[str, Any]] = {}
+    meta_row: dict[str, Any] | None = None
+    if not path.exists():
+        return mcq_rows, no_hint_rows, meta_row
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except Exception:
+                continue
+            section = str(payload.get("section") or "").strip().lower()
+            row = payload.get("row")
+            if section == "meta":
+                if isinstance(row, dict):
+                    meta_row = row
+                continue
+            if not isinstance(row, dict):
+                continue
+            try:
+                pos = int(row.get("pos"))
+            except Exception:
+                continue
+            if section == "mcq":
+                mcq_rows[pos] = row
+            elif section == "no_hint":
+                no_hint_rows[pos] = row
+    return mcq_rows, no_hint_rows, meta_row
+
+
+def _append_checkpoint_meta(path: Path, *, meta: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"section": "meta", "row": meta}, ensure_ascii=False) + "\n")
+
+
+def _validate_checkpoint_meta(
+    *,
+    checkpoint_file: Path,
+    loaded_meta: dict[str, Any] | None,
+    expected_meta: dict[str, Any],
+    has_loaded_rows: bool,
+) -> None:
+    if loaded_meta is None:
+        if has_loaded_rows:
+            raise RuntimeError(
+                "Legacy checkpoint without meta/fingerprint detected; resume is not supported. "
+                f"Delete checkpoint file and rerun: {checkpoint_file}"
+            )
+        return
+
+    if str(loaded_meta.get("schema_version") or "") != "2":
+        raise RuntimeError(
+            "Checkpoint schema mismatch for resume. "
+            f"Expected schema_version=2 in {checkpoint_file}"
+        )
+
+    if str(loaded_meta.get("config_fingerprint") or "") != str(
+        expected_meta.get("config_fingerprint") or ""
+    ):
+        raise RuntimeError(
+            "Checkpoint config fingerprint mismatch; resume blocked to avoid mixed runs. "
+            f"Delete checkpoint file and rerun: {checkpoint_file}"
+        )
+
+    if str(loaded_meta.get("positions_fingerprint") or "") != str(
+        expected_meta.get("positions_fingerprint") or ""
+    ):
+        raise RuntimeError(
+            "Checkpoint positions fingerprint mismatch; resume blocked to avoid mixed runs. "
+            f"Delete checkpoint file and rerun: {checkpoint_file}"
+        )
+
+
+def _append_checkpoint_rows(path: Path, *, section: str, rows: Sequence[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(
+                json.dumps({"section": section, "pos": int(row.get("pos", -1)), "row": row}, ensure_ascii=False)
+                + "\n"
+            )
 
 
 def _compute_reference_law_hit(
@@ -60,6 +280,45 @@ def _extract_retrieved_law_ids(rag_state: dict[str, Any]) -> list[str]:
         if cur:
             out.append(cur)
     return out
+
+
+def _extract_chunk_law_pairs(rag_state: dict[str, Any]) -> list[tuple[str, str]]:
+    retrieved = rag_state.get("retrieved") or []
+    if not isinstance(retrieved, list):
+        return []
+
+    out: list[tuple[str, str]] = []
+    for doc in retrieved:
+        chunk_id = ""
+        law_id = ""
+        if isinstance(doc, dict):
+            chunk_id = str(doc.get("chunk_id") or "").strip()
+            law_id = str(doc.get("law_id") or (doc.get("payload") or {}).get("law_id") or "").strip()
+        else:
+            chunk_id = str(getattr(doc, "chunk_id", "") or "").strip()
+            law_id = str(getattr(doc, "law_id", "") or "").strip()
+            if not law_id:
+                payload = getattr(doc, "payload", None) or {}
+                law_id = str(payload.get("law_id") or "").strip()
+        if chunk_id or law_id:
+            out.append((chunk_id, law_id))
+    return out
+
+
+def _compute_unique_law_counts(
+    *,
+    rag_state: dict[str, Any],
+    context_summary: dict[str, Any] | None,
+) -> tuple[int, int]:
+    pairs = _extract_chunk_law_pairs(rag_state)
+    unique_retrieved = {law_id for _, law_id in pairs if law_id}
+    included_chunk_ids = set((context_summary or {}).get("included_chunk_ids") or [])
+    if not included_chunk_ids:
+        return len(unique_retrieved), len(unique_retrieved)
+    unique_context = {
+        law_id for chunk_id, law_id in pairs if law_id and chunk_id and chunk_id in included_chunk_ids
+    }
+    return len(unique_retrieved), len(unique_context)
 
 
 def _compute_reference_metrics(
@@ -168,8 +427,35 @@ def resolve_eval_positions(
 
 
 def _default_rag_runner(runtime: RuntimeResources) -> RagRunner:
+    compiled_app = build_rag_graph(runtime.config, runtime)
+
     def _runner(question: str) -> dict[str, Any]:
-        return run_rag_question(runtime.config, question, resources=runtime)
+        return run_rag_question(
+            runtime.config,
+            question,
+            resources=runtime,
+            compiled_app=compiled_app,
+        )
+
+    return _runner
+
+
+def _default_retrieval_context_runner(runtime: RuntimeResources) -> RagRunner:
+    pipeline_mode = str(runtime.config.pipeline_mode or "naive")
+    compiled_app = build_rag_retrieval_context_graph(
+        runtime.config,
+        runtime,
+        pipeline_mode=pipeline_mode,
+    )
+
+    def _runner(question: str) -> dict[str, Any]:
+        return run_rag_retrieval_context(
+            runtime.config,
+            question,
+            resources=runtime,
+            pipeline_mode=pipeline_mode,
+            compiled_app=compiled_app,
+        )
 
     return _runner
 
@@ -180,15 +466,21 @@ def run_mcq_benchmark(
     mcq_rows: list[dict[str, str]],
     no_hint_rows: list[dict[str, str]],
     rag_runner: RagRunner,
+    rag_retrieval_runner: RagRunner | None = None,
     post_chat_fn: StructuredChatFn,
     api_url: str,
     headers: dict[str, str],
     chat_model: str,
     timeout_sec: int,
+    max_workers: int = 3,
+    post_chat_max_retries: int = 2,
+    post_chat_retry_backoff_sec: float = 0.5,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
+    retrieval_runner = rag_retrieval_runner or rag_runner
+    positions_sorted = _sorted_unique_positions(positions)
 
-    for pos in positions:
+    def _run_position(pos: int) -> dict[str, Any]:
         record = align_record(int(pos), no_hint_rows, mcq_rows)
 
         predicted_label = ""
@@ -199,7 +491,7 @@ def run_mcq_benchmark(
         rag_errors: list[Any] = []
 
         try:
-            rag_result = rag_runner(record["question_mcq_full"])
+            rag_result = retrieval_runner(record["question_mcq_full"])
             context_text = str((rag_result.get("state") or {}).get("context") or "")
         except Exception as exc:
             context_text = ""
@@ -209,6 +501,9 @@ def run_mcq_benchmark(
             rag_errors = list(((rag_result.get("state") or {}).get("pipeline_errors") or []))
         state_payload = (rag_result or {}).get("state") or {}
         retrieved_state = state_payload.get("retrieved") or []
+        filters_summary = (rag_result or {}).get("filters_summary") or {}
+        graph_payload = (rag_result or {}).get("graph_expansion") or {}
+        rewritten_queries = (rag_result or {}).get("rewritten_queries") or []
         retrieval_mode = str(state_payload.get("retrieval_mode") or "dense_only")
         dense_retrieved_count = int(state_payload.get("dense_retrieved_count") or 0)
         sparse_retrieved_count = int(state_payload.get("sparse_retrieved_count") or 0)
@@ -225,6 +520,10 @@ def run_mcq_benchmark(
             and context_summary.get("included_count") is not None
             else None
         )
+        unique_laws_retrieved, unique_laws_in_context = _compute_unique_law_counts(
+            rag_state=state_payload if isinstance(state_payload, dict) else {},
+            context_summary=context_summary if isinstance(context_summary, dict) else None,
+        )
 
         if error is None:
             try:
@@ -233,13 +532,16 @@ def run_mcq_benchmark(
                     + "\n\nContesto RAG (usa questo contesto come base informativa):\n"
                     + context_text
                 )
-                call_out = post_chat_fn(
+                call_out = _call_structured_with_retry(
+                    post_chat_fn=post_chat_fn,
                     api_url=api_url,
                     headers=headers,
                     payload_schema=schema_to_json_dict(McqAnswer),
                     prompt=prompt,
                     model=chat_model,
-                    timeout=timeout_sec,
+                    timeout_sec=timeout_sec,
+                    max_retries=post_chat_max_retries,
+                    retry_backoff_sec=post_chat_retry_backoff_sec,
                 )
                 raw_structured = call_out["structured"]
                 mcq_obj = validate_mcq_output(raw_structured)
@@ -264,10 +566,41 @@ def run_mcq_benchmark(
             "sparse_retrieved_count": sparse_retrieved_count,
             "fusion_overlap_count": fusion_overlap_count,
             "context_included_count": context_included_count,
+            "rewrite_count": len(rewritten_queries) if isinstance(rewritten_queries, list) else 0,
+            "metadata_heuristics": list(filters_summary.get("metadata_heuristics") or []),
+            "metadata_hard_law_filter_applied": bool(
+                filters_summary.get("metadata_hard_law_filter_applied")
+            ),
+            "metadata_hard_article_filter_applied": bool(
+                filters_summary.get("metadata_hard_article_filter_applied")
+            ),
+            "graph_enabled": bool(graph_payload.get("enabled")),
+            "graph_reason": str(graph_payload.get("reason") or ""),
+            "graph_retrieved_count": int(graph_payload.get("graph_retrieved_count") or 0),
+            "unique_laws_retrieved": unique_laws_retrieved,
+            "unique_laws_in_context": unique_laws_in_context,
             "rag_pipeline_errors": rag_errors,
         }
-        results.append(item)
+        return item
 
+    results: list[dict[str, Any]] = []
+    workers = max(1, int(max_workers))
+    if workers <= 1:
+        for pos in positions_sorted:
+            item = _run_position(pos)
+            results.append(item)
+            if on_result is not None:
+                on_result(item)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_run_position, pos): pos for pos in positions_sorted}
+            for future in as_completed(futures):
+                item = future.result()
+                results.append(item)
+                if on_result is not None:
+                    on_result(item)
+
+    results.sort(key=lambda row: int(row.get("pos") or -1))
     return results
 
 
@@ -283,10 +616,14 @@ def run_no_hint_benchmark(
     judge_model: str,
     timeout_sec: int,
     law_catalog: LawCatalog | None = None,
+    max_workers: int = 3,
+    post_chat_max_retries: int = 2,
+    post_chat_retry_backoff_sec: float = 0.5,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
+    positions_sorted = _sorted_unique_positions(positions)
 
-    for pos in positions:
+    def _run_position(pos: int) -> dict[str, Any]:
         record = align_record(int(pos), no_hint_rows, mcq_rows)
 
         rag_answer_text = ""
@@ -312,6 +649,9 @@ def run_no_hint_benchmark(
             error = f"rag_error: {type(exc).__name__}: {exc}"
         state_payload = (rag_result or {}).get("state") or {}
         retrieved_state = state_payload.get("retrieved") or []
+        filters_summary = (rag_result or {}).get("filters_summary") or {}
+        graph_payload = (rag_result or {}).get("graph_expansion") or {}
+        rewritten_queries = (rag_result or {}).get("rewritten_queries") or []
         retrieval_mode = str(state_payload.get("retrieval_mode") or "dense_only")
         dense_retrieved_count = int(state_payload.get("dense_retrieved_count") or 0)
         sparse_retrieved_count = int(state_payload.get("sparse_retrieved_count") or 0)
@@ -328,6 +668,10 @@ def run_no_hint_benchmark(
             and context_summary.get("included_count") is not None
             else None
         )
+        unique_laws_retrieved, unique_laws_in_context = _compute_unique_law_counts(
+            rag_state=state_payload if isinstance(state_payload, dict) else {},
+            context_summary=context_summary if isinstance(context_summary, dict) else None,
+        )
         ref_metrics = _compute_reference_metrics(
             expected_reference=record.get("ground_truth_reference_law"),
             rag_state=state_payload if isinstance(state_payload, dict) else {},
@@ -336,13 +680,16 @@ def run_no_hint_benchmark(
 
         if error is None:
             try:
-                judge_out = post_chat_fn(
+                judge_out = _call_structured_with_retry(
+                    post_chat_fn=post_chat_fn,
                     api_url=api_url,
                     headers=headers,
                     payload_schema=schema_to_json_dict(JudgeResult),
                     prompt=build_judge_prompt(record, rag_answer_text),
                     model=judge_model,
-                    timeout=timeout_sec,
+                    timeout_sec=timeout_sec,
+                    max_retries=post_chat_max_retries,
+                    retry_backoff_sec=post_chat_retry_backoff_sec,
                 )
                 raw_judge = judge_out["structured"]
                 judge_obj = validate_judge_output(raw_judge)
@@ -371,6 +718,19 @@ def run_no_hint_benchmark(
             "sparse_retrieved_count": sparse_retrieved_count,
             "fusion_overlap_count": fusion_overlap_count,
             "context_included_count": context_included_count,
+            "rewrite_count": len(rewritten_queries) if isinstance(rewritten_queries, list) else 0,
+            "metadata_heuristics": list(filters_summary.get("metadata_heuristics") or []),
+            "metadata_hard_law_filter_applied": bool(
+                filters_summary.get("metadata_hard_law_filter_applied")
+            ),
+            "metadata_hard_article_filter_applied": bool(
+                filters_summary.get("metadata_hard_article_filter_applied")
+            ),
+            "graph_enabled": bool(graph_payload.get("enabled")),
+            "graph_reason": str(graph_payload.get("reason") or ""),
+            "graph_retrieved_count": int(graph_payload.get("graph_retrieved_count") or 0),
+            "unique_laws_retrieved": unique_laws_retrieved,
+            "unique_laws_in_context": unique_laws_in_context,
             "rag_pipeline_errors": rag_errors,
             "rag_answer_source": rag_answer_source,
             "rag_was_empty_before_guard": rag_was_empty_before_guard,
@@ -381,8 +741,26 @@ def run_no_hint_benchmark(
             "expected_law_ids": ref_metrics["expected_law_ids"],
         }
         item["failure_category"] = _categorize_failure_category(item)
-        results.append(item)
+        return item
 
+    results: list[dict[str, Any]] = []
+    workers = max(1, int(max_workers))
+    if workers <= 1:
+        for pos in positions_sorted:
+            item = _run_position(pos)
+            results.append(item)
+            if on_result is not None:
+                on_result(item)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_run_position, pos): pos for pos in positions_sorted}
+            for future in as_completed(futures):
+                item = future.result()
+                results.append(item)
+                if on_result is not None:
+                    on_result(item)
+
+    results.sort(key=lambda row: int(row.get("pos") or -1))
     return results
 
 
@@ -398,23 +776,114 @@ def run_advanced_benchmark(
     judge_model: str,
     timeout_sec: int = 120,
     rag_runner: RagRunner | None = None,
+    rag_retrieval_runner: RagRunner | None = None,
     post_chat_fn: StructuredChatFn = post_structured_chat,
+    max_workers: int = 3,
+    post_chat_max_retries: int = 2,
+    post_chat_retry_backoff_sec: float = 0.5,
+    checkpoint_path: Path | None = None,
+    checkpoint_every: int = 10,
+    resume: bool = False,
 ) -> dict[str, Any]:
-    rag_runner = rag_runner or _default_rag_runner(runtime)
+    if rag_runner is None:
+        rag_runner = _default_rag_runner(runtime)
+    if rag_retrieval_runner is None:
+        try:
+            rag_retrieval_runner = _default_retrieval_context_runner(runtime)
+        except Exception:
+            rag_retrieval_runner = rag_runner
 
-    mcq_results = run_mcq_benchmark(
-        positions=positions,
+    positions_sorted = _sorted_unique_positions(positions)
+    expected_checkpoint_meta = _build_checkpoint_meta(
+        runtime=runtime,
+        chat_model=chat_model,
+        judge_model=judge_model,
+        timeout_sec=timeout_sec,
+        max_workers=max_workers,
+        post_chat_max_retries=post_chat_max_retries,
+        post_chat_retry_backoff_sec=post_chat_retry_backoff_sec,
+        positions=positions_sorted,
+    )
+    checkpoint_file: Path | None = None
+    if checkpoint_path is not None:
+        checkpoint_file = Path(checkpoint_path).resolve()
+        if checkpoint_file.exists() and not resume:
+            checkpoint_file.unlink()
+
+    loaded_mcq_rows: dict[int, dict[str, Any]] = {}
+    loaded_no_hint_rows: dict[int, dict[str, Any]] = {}
+    checkpoint_meta_written = False
+    if checkpoint_file is not None and resume:
+        loaded_mcq_rows, loaded_no_hint_rows, loaded_meta = _load_checkpoint_rows(checkpoint_file)
+        _validate_checkpoint_meta(
+            checkpoint_file=checkpoint_file,
+            loaded_meta=loaded_meta,
+            expected_meta=expected_checkpoint_meta,
+            has_loaded_rows=bool(loaded_mcq_rows or loaded_no_hint_rows),
+        )
+        if loaded_meta is not None:
+            checkpoint_meta_written = True
+        selected_positions = set(positions_sorted)
+        loaded_mcq_rows = {
+            pos: row for pos, row in loaded_mcq_rows.items() if pos in selected_positions
+        }
+        loaded_no_hint_rows = {
+            pos: row for pos, row in loaded_no_hint_rows.items() if pos in selected_positions
+        }
+    elif checkpoint_file is not None:
+        _append_checkpoint_meta(checkpoint_file, meta=expected_checkpoint_meta)
+        checkpoint_meta_written = True
+
+    pending_mcq_positions = [pos for pos in positions_sorted if pos not in loaded_mcq_rows]
+    pending_no_hint_positions = [pos for pos in positions_sorted if pos not in loaded_no_hint_rows]
+    checkpoint_batch_size = max(1, int(checkpoint_every))
+    mcq_checkpoint_buffer: list[dict[str, Any]] = []
+    no_hint_checkpoint_buffer: list[dict[str, Any]] = []
+
+    def _flush_checkpoint(*, force: bool = False) -> None:
+        if checkpoint_file is None:
+            return
+        nonlocal checkpoint_meta_written
+        if not checkpoint_meta_written:
+            _append_checkpoint_meta(checkpoint_file, meta=expected_checkpoint_meta)
+            checkpoint_meta_written = True
+        if force or len(mcq_checkpoint_buffer) >= checkpoint_batch_size:
+            _append_checkpoint_rows(checkpoint_file, section="mcq", rows=mcq_checkpoint_buffer)
+            mcq_checkpoint_buffer.clear()
+        if force or len(no_hint_checkpoint_buffer) >= checkpoint_batch_size:
+            _append_checkpoint_rows(checkpoint_file, section="no_hint", rows=no_hint_checkpoint_buffer)
+            no_hint_checkpoint_buffer.clear()
+
+    def _on_mcq_row(row: dict[str, Any]) -> None:
+        if checkpoint_file is None:
+            return
+        mcq_checkpoint_buffer.append(row)
+        _flush_checkpoint(force=False)
+
+    def _on_no_hint_row(row: dict[str, Any]) -> None:
+        if checkpoint_file is None:
+            return
+        no_hint_checkpoint_buffer.append(row)
+        _flush_checkpoint(force=False)
+
+    mcq_new_results = run_mcq_benchmark(
+        positions=pending_mcq_positions,
         mcq_rows=mcq_rows,
         no_hint_rows=no_hint_rows,
         rag_runner=rag_runner,
+        rag_retrieval_runner=rag_retrieval_runner,
         post_chat_fn=post_chat_fn,
         api_url=api_url,
         headers=headers,
         chat_model=chat_model,
         timeout_sec=timeout_sec,
+        max_workers=max_workers,
+        post_chat_max_retries=post_chat_max_retries,
+        post_chat_retry_backoff_sec=post_chat_retry_backoff_sec,
+        on_result=_on_mcq_row,
     )
-    no_hint_results = run_no_hint_benchmark(
-        positions=positions,
+    no_hint_new_results = run_no_hint_benchmark(
+        positions=pending_no_hint_positions,
         mcq_rows=mcq_rows,
         no_hint_rows=no_hint_rows,
         rag_runner=rag_runner,
@@ -424,7 +893,22 @@ def run_advanced_benchmark(
         judge_model=judge_model,
         timeout_sec=timeout_sec,
         law_catalog=getattr(runtime, "law_catalog", None),
+        max_workers=max_workers,
+        post_chat_max_retries=post_chat_max_retries,
+        post_chat_retry_backoff_sec=post_chat_retry_backoff_sec,
+        on_result=_on_no_hint_row,
     )
+    _flush_checkpoint(force=True)
+
+    merged_mcq = dict(loaded_mcq_rows)
+    for row in mcq_new_results:
+        merged_mcq[int(row.get("pos") or -1)] = row
+    mcq_results = [merged_mcq[pos] for pos in sorted(merged_mcq.keys())]
+
+    merged_no_hint = dict(loaded_no_hint_rows)
+    for row in no_hint_new_results:
+        merged_no_hint[int(row.get("pos") or -1)] = row
+    no_hint_results = [merged_no_hint[pos] for pos in sorted(merged_no_hint.keys())]
 
     mcq_summary = build_dataset_summary("RAG-ADV-MCQ", mcq_results, score_key="score")
     no_hint_summary = build_dataset_summary(
@@ -476,6 +960,13 @@ def run_advanced_benchmark(
     top1_true = 0
     precision_values: list[float] = []
     ref_hit_by_level: dict[str, dict[str, int]] = {}
+    graph_reason_counts: dict[str, int] = {}
+    graph_enabled_count = 0
+    graph_positive_count = 0
+    rewrite_count_values: list[int] = []
+    metadata_hard_law_filter_applied_count = 0
+    unique_laws_retrieved_values: list[int] = []
+    unique_laws_in_context_values: list[int] = []
     for row in no_hint_results:
         category = str(row.get("failure_category") or "")
         if category:
@@ -486,6 +977,17 @@ def run_advanced_benchmark(
 
         mode = str(row.get("retrieval_mode") or "dense_only")
         retrieval_mode_counts[mode] = retrieval_mode_counts.get(mode, 0) + 1
+        graph_reason = str(row.get("graph_reason") or "")
+        graph_reason_counts[graph_reason] = graph_reason_counts.get(graph_reason, 0) + 1
+        if bool(row.get("graph_enabled")):
+            graph_enabled_count += 1
+        if int(row.get("graph_retrieved_count") or 0) > 0:
+            graph_positive_count += 1
+        rewrite_count_values.append(int(row.get("rewrite_count") or 0))
+        if bool(row.get("metadata_hard_law_filter_applied")):
+            metadata_hard_law_filter_applied_count += 1
+        unique_laws_retrieved_values.append(int(row.get("unique_laws_retrieved") or 0))
+        unique_laws_in_context_values.append(int(row.get("unique_laws_in_context") or 0))
 
         if row.get("reference_law_hit") is not None:
             ref_hit_known += 1
@@ -516,11 +1018,82 @@ def run_advanced_benchmark(
         for level, vals in sorted(ref_hit_by_level.items())
     }
 
+    mcq_pipeline_error_rows_legacy = sum(1 for row in mcq_results if row.get("rag_pipeline_errors"))
+    no_hint_pipeline_error_rows_legacy = sum(
+        1 for row in no_hint_results if row.get("rag_pipeline_errors")
+    )
+    no_hint_hard_error_rows = sum(
+        1 for row in no_hint_results if str(row.get("error") or "").strip()
+    )
+    no_hint_soft_guard_event_rows = sum(
+        1
+        for row in no_hint_results
+        if bool(row.get("rag_pipeline_errors")) and not str(row.get("error") or "").strip()
+    )
+
+    no_hint_guard_empty_first_pass_count = 0
+    no_hint_guard_retry_needs_more_context_count = 0
+    no_hint_guard_missing_valid_citation_count = 0
+    for row in no_hint_results:
+        errors = row.get("rag_pipeline_errors") or []
+        if not isinstance(errors, list):
+            continue
+        for event in errors:
+            if not isinstance(event, dict):
+                continue
+            stage = str(event.get("stage") or "").strip()
+            err = str(event.get("error") or "").strip()
+            if err == "empty_answer_detected:first_pass":
+                no_hint_guard_empty_first_pass_count += 1
+            if stage == "generate_answer_structured_retry_needs_more_context":
+                no_hint_guard_retry_needs_more_context_count += 1
+            if err.startswith("missing_valid_citation"):
+                no_hint_guard_missing_valid_citation_count += 1
+
+    transient_error_rows = sum(
+        1
+        for row in [*mcq_results, *no_hint_results]
+        if _is_transient_error_text(str(row.get("error") or ""))
+    )
+    total_rows = len(mcq_results) + len(no_hint_results)
+    transient_error_rate = (transient_error_rows / total_rows) if total_rows > 0 else 0.0
+    recommended_max_workers = (
+        3 if (transient_error_rate > 0.03 and int(max_workers) > 3) else int(max_workers)
+    )
+
     diagnostics = {
-        "mcq_pipeline_error_rows": sum(1 for row in mcq_results if row.get("rag_pipeline_errors")),
-        "no_hint_pipeline_error_rows": sum(
-            1 for row in no_hint_results if row.get("rag_pipeline_errors")
+        "benchmark_max_workers": int(max_workers),
+        "benchmark_applied_max_workers": int(max_workers),
+        "benchmark_recommended_max_workers_next_run": recommended_max_workers,
+        "benchmark_post_chat_max_retries": int(post_chat_max_retries),
+        "benchmark_checkpoint_path": str(checkpoint_file) if checkpoint_file is not None else None,
+        "benchmark_checkpoint_resume": bool(resume),
+        "benchmark_checkpoint_schema_version": str(expected_checkpoint_meta["schema_version"]),
+        "benchmark_checkpoint_config_fingerprint": str(
+            expected_checkpoint_meta["config_fingerprint"]
         ),
+        "benchmark_checkpoint_positions_fingerprint": str(
+            expected_checkpoint_meta["positions_fingerprint"]
+        ),
+        "mcq_checkpoint_loaded_rows": len(loaded_mcq_rows),
+        "no_hint_checkpoint_loaded_rows": len(loaded_no_hint_rows),
+        "mcq_pipeline_error_rows": mcq_pipeline_error_rows_legacy,
+        "no_hint_pipeline_error_rows": no_hint_pipeline_error_rows_legacy,
+        "no_hint_hard_error_rows": no_hint_hard_error_rows,
+        "no_hint_soft_guard_event_rows": no_hint_soft_guard_event_rows,
+        "no_hint_guard_empty_first_pass_count": no_hint_guard_empty_first_pass_count,
+        "no_hint_guard_retry_needs_more_context_count": no_hint_guard_retry_needs_more_context_count,
+        "no_hint_guard_missing_valid_citation_count": no_hint_guard_missing_valid_citation_count,
+        "transient_error_rows": transient_error_rows,
+        "transient_error_rate": transient_error_rate,
+        "legacy_aggregate_notes": {
+            "mcq_pipeline_error_rows": (
+                "Legacy aggregate: counts rows with rag_pipeline_errors; includes non-fatal guard events."
+            ),
+            "no_hint_pipeline_error_rows": (
+                "Legacy aggregate: counts rows with rag_pipeline_errors; includes non-fatal guard events."
+            ),
+        },
         "no_hint_empty_detected_count": sum(
             1 for row in no_hint_results if row.get("rag_was_empty_before_guard")
         ),
@@ -545,6 +1118,25 @@ def run_advanced_benchmark(
             else None
         ),
         "no_hint_reference_hit_rate_by_level": reference_hit_by_level,
+        "no_hint_graph_enabled_count": graph_enabled_count,
+        "no_hint_graph_retrieved_positive_count": graph_positive_count,
+        "no_hint_graph_reason_counts": graph_reason_counts,
+        "no_hint_avg_rewrite_count": (
+            sum(rewrite_count_values) / len(rewrite_count_values)
+            if rewrite_count_values
+            else 0.0
+        ),
+        "no_hint_metadata_hard_law_filter_applied_count": metadata_hard_law_filter_applied_count,
+        "no_hint_unique_laws_retrieved_avg": (
+            sum(unique_laws_retrieved_values) / len(unique_laws_retrieved_values)
+            if unique_laws_retrieved_values
+            else 0.0
+        ),
+        "no_hint_unique_laws_in_context_avg": (
+            sum(unique_laws_in_context_values) / len(unique_laws_in_context_values)
+            if unique_laws_in_context_values
+            else 0.0
+        ),
     }
 
     return {
@@ -579,6 +1171,10 @@ def persist_benchmark_artifacts(
     payload = {
         "run_stamp_utc": run_stamp,
         "mode": mode,
+        "run_id": index_contract.get("run_id"),
+        "collection_points_count": index_contract.get("collection_points_count"),
+        "eval_reference_coverage": index_contract.get("eval_reference_coverage"),
+        "qdrant_url_used": config_payload.get("qdrant_url"),
         "config": config_payload,
         "index_contract": index_contract,
         "mcq_summary": benchmark_payload["mcq_summary"],
