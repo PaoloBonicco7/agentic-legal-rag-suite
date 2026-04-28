@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-legal-rag-suite"
+version = "0.1.0"
+description = "Minimal, reproducible Legal RAG research codebase for a thesis project."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "beautifulsoup4>=4.14",
+    "lxml>=6.0",
+    "pandas>=2.2",
+    "pydantic>=2.10",
+    "python-dotenv>=1.0",
+    "tqdm>=4.67",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pre-commit>=4.0",
+    "pytest>=8.4",
+    "pytest-cov>=6.0",
+    "ruff>=0.14",
+]
+notebooks = [
+    "ipykernel>=7.0",
+    "jupyter>=1.1",
+    "matplotlib>=3.10",
+]
+rag = [
+    "langchain>=1.0",
+    "langchain-openai>=1.0",
+    "langgraph>=1.0",
+    "openai>=2.0",
+    "qdrant-client>=1.15",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/legal_rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["legal_rag"]
+strict = true
+warn_unused_configs = true

@@ -1,14 +1,29 @@
 OLD/
 
-# Keep source data versioned:
-data/laws_html/
-data/evaluation/
+# Local environment and OS/editor files.
+.venv/
+.DS_Store
+
+# Python caches and tool output.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Generated data and runtime artifacts should stay out of Git.
+data/laws_html/
 data/laws_dataset/
 data/laws_dataset_clean/
 data/indexes/
+data/indexing_runs/
 data/qdrant_indexing/
+data/rag_runs/
 notebooks/data/
 notebooks/rag_pipeline/artifacts/
 notebooks/rag_pipeline/checkpoints/
+
+# Evaluation source data is intentionally versioned:
+# - data/evaluation/
