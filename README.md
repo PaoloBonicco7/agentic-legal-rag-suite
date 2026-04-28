@@ -38,6 +38,31 @@ Runs should be reproducible from a fresh clone using the versioned source data. 
 
 Outputs used in the thesis or shared with the research team should be traceable to their input data, configuration, and pipeline step.
 
+## Development Setup
+
+This project uses `uv` for dependency management.
+
+Install the base development and notebook environment:
+
+```bash
+uv sync --group dev --group notebooks
+```
+
+Install the optional RAG dependencies when working on retrieval or generation:
+
+```bash
+uv sync --group dev --group notebooks --group rag
+```
+
+Run the basic checks:
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+```
+
 ## Documentation Model
 
 Each major pipeline step should have two documents:
