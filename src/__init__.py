@@ -1,1 +1,0 @@
-"""Project source root namespace."""

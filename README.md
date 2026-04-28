@@ -1,51 +1,54 @@
-# agentic-legal-rag-suite
+# Agentic Legal RAG Suite
 
-Suite sperimentale per pipeline Legal RAG su normativa HTML: preprocessing deterministico, indexing Qdrant e baseline RAG con valutazione.
+A reproducible, thesis-oriented Legal RAG project that turns a legal corpus and evaluation questions into a clear end-to-end question answering workflow.
 
-## Struttura repo
-- `src/laws_ingestion/`: ingestion deterministic HTML -> dataset strutturato + pipeline notebook 03.
-- `src/legal_indexing/`: chunk refinement, embeddings, indexing Qdrant e runtime RAG.
-- `baselines/`: baseline retrieval/benchmarking (es. BM25).
-- `notebooks/`: notebook sperimentali e walkthrough.
-- `docs/`: documentazione operativa corrente.
-- `docs/archive/`: documentazione storica/legacy (non source of truth).
-- `data/evaluation/`: dataset benchmark (`questions.csv`, `questions_no_hint.csv`).
+## What This Project Builds
 
-## Notebook principali
-- `notebooks/03_laws_graph_pipeline.ipynb`
-- `notebooks/04_qdrant_indexing_pipeline.ipynb`
-- `notebooks/05_langgraph_rag_pipeline.ipynb`
-- `notebooks/evaluation/02_evalutation_no_rag.ipynb`
+This repository is being refactored into a minimal research codebase for building, running, and explaining a Legal RAG pipeline.
 
-## Setup rapido
-```bash
-poetry install
-cp .env.example .env
-```
+The goal is not to preserve the complexity of the previous implementation. The goal is to keep the same research flow while making each step understandable, reproducible, and easy to discuss with a research team.
 
-## CLI / moduli Python
-Il progetto e' notebook-centric e usa codice in `src/`.
+The legal corpus and question datasets are part of the application and are intended to be versioned in the repository.
 
-Per eseguire i moduli direttamente:
-```bash
-PYTHONPATH=src poetry run python -m legal_indexing --help
-PYTHONPATH=src poetry run python -m laws_ingestion --help
-```
+## Refactored Pipeline
 
-Esempio indexing:
-```bash
-UTOPIA_API_KEY=... PYTHONPATH=src poetry run python -m legal_indexing --subset-limit 500
-```
+1. Prepare evaluation questions.
+2. Evaluate a no-retrieval baseline.
+3. Prepare the legal corpus.
+4. Build the retrieval index.
+5. Run simple RAG.
+6. Run advanced RAG.
+7. Compare results.
 
-## Config ambiente (Utopia)
-Variabili principali:
-- `UTOPIA_API_KEY`
-- `UTOPIA_BASE_URL`
-- `UTOPIA_EMBED_API_MODE` (`auto|openai|ollama`)
-- `UTOPIA_EMBED_URL`
-- `UTOPIA_EMBED_MODEL`
-- `UTOPIA_CHAT_MODEL`
-- `UTOPIA_JUDGE_MODEL`
+## Repository Shape
 
-## Documentazione
-Indice documentazione corrente: `docs/index.md`.
+- Core reusable code contains the implementation for each pipeline step.
+- Notebooks provide short demonstration runs with explanatory text and visible outputs.
+- Markdown specifications are the source of intent for each step.
+- Markdown implementation notes record choices, results, and lessons learned.
+- `data/laws_html/` contains the source legal corpus.
+- `data/evaluation/` contains the evaluation question datasets.
+- `OLD/` is historical reference only; it is not the target architecture.
+
+## Reproducibility Contract
+
+The repository should include the full source corpus of laws and the full set of evaluation questions used by the application.
+
+Runs should be reproducible from a fresh clone using the versioned source data. Any generated dataset, retrieval index, benchmark output, or cache should be documented as a derived artifact, not as source data.
+
+Outputs used in the thesis or shared with the research team should be traceable to their input data, configuration, and pipeline step.
+
+## Documentation Model
+
+Each major pipeline step should have two documents:
+
+- a specification file describing purpose, inputs, outputs, contracts, and acceptance criteria;
+- an implementation/results note describing what was built, what choices were made, and what results were observed.
+
+Repository-level documentation should remain minimal. Details belong in the step-specific Markdown files.
+
+## Current Status
+
+The refactor is in progress.
+
+The previous implementation has been archived under `OLD/` and should be used only to understand the historical workflow, expected outputs, and prior experiments.
