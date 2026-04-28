@@ -52,7 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     p_ing.add_argument("--html-dir", default="data/laws_html")
     p_ing.add_argument("--out-dir", default="data/laws_dataset")
     p_ing.add_argument("--scope", choices=["all", "benchmark"], default="all")
-    p_ing.add_argument("--csv", default="data/questions.csv", help="Benchmark questions CSV (required for --scope benchmark)")
+    p_ing.add_argument(
+        "--csv",
+        default="data/evaluation/questions.csv",
+        help="Benchmark questions CSV (required for --scope benchmark)",
+    )
     p_ing.add_argument("--backend", choices=["auto", "stdlib", "bs4"], default="auto")
     p_ing.add_argument("--strict", action="store_true")
     p_ing.add_argument("--max-words", type=int, default=600)

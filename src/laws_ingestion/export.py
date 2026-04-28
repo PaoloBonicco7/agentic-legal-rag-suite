@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 
 from . import __version__
-from .ingest import ingest_law
-from .registry import build_corpus_registry
-from .utils import compute_dataset_id
+from .core.ingest import ingest_law
+from .core.registry import build_corpus_registry
+from .core.utils import compute_dataset_id
 
 
 def ingest_and_write(
