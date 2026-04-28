@@ -13,6 +13,8 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     manifest = ingest_and_write(
         html_dir=Path(args.html_dir),
         out_dir=Path(args.out_dir),
+        scope=str(args.scope),
+        questions_csv=(Path(args.csv) if str(args.scope) == "benchmark" else None),
         backend=args.backend,
         strict=bool(args.strict),
         max_words=int(args.max_words),
@@ -47,8 +49,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_ing = sub.add_parser("ingest", help="Ingest HTML corpus into JSONL RAG-ready dataset")
-    p_ing.add_argument("--html-dir", default="data/leggi-html")
+    p_ing.add_argument("--html-dir", default="data/laws_html")
     p_ing.add_argument("--out-dir", default="data/laws_dataset")
+    p_ing.add_argument("--scope", choices=["all", "benchmark"], default="all")
+    p_ing.add_argument("--csv", default="data/questions.csv", help="Benchmark questions CSV (required for --scope benchmark)")
     p_ing.add_argument("--backend", choices=["auto", "stdlib", "bs4"], default="auto")
     p_ing.add_argument("--strict", action="store_true")
     p_ing.add_argument("--max-words", type=int, default=600)
@@ -61,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     p_qa.set_defaults(func=_cmd_qa)
 
     p_dbg = sub.add_parser("debug-law", help="Debug ingestion for a single law")
-    p_dbg.add_argument("--html-dir", default="data/leggi-html")
+    p_dbg.add_argument("--html-dir", default="data/laws_html")
     p_dbg.add_argument("--backend", choices=["auto", "stdlib", "bs4"], default="auto")
     p_dbg.add_argument("--strict", action="store_true")
     p_dbg.add_argument("--law-id", default="")
@@ -76,4 +80,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

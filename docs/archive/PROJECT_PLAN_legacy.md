@@ -1,6 +1,8 @@
 # Agentic Legal RAG — Project Plan (High-level)
 _Base architecture + documented task breakdown with tools/frameworks_
 
+> Archived: questo documento e' una copia storica. Alcuni path e link possono essere obsoleti o non esistere piu'.
+
 ## 0) Project goals (recap)
 - Build a **legal Agentic RAG** system over ~3000 HTML laws.
 - Start with **MCQ benchmark** (A..F) + **citations + rationale**.

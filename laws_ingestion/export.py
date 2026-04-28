@@ -14,6 +14,8 @@ def ingest_and_write(
     *,
     html_dir: Path,
     out_dir: Path,
+    scope: str = "all",  # all | benchmark
+    questions_csv: Path | None = None,
     backend: str = "auto",
     strict: bool = False,
     max_words: int = 600,
@@ -21,7 +23,27 @@ def ingest_and_write(
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     registry = build_corpus_registry(html_dir)
-    dataset_id = compute_dataset_id(html_dir.glob("*.html"))
+
+    scope = (scope or "all").strip().lower()
+    if scope not in {"all", "benchmark"}:
+        raise ValueError(f"Unknown scope: {scope!r} (expected: all|benchmark)")
+
+    selected_law_ids: list[str]
+    if scope == "all":
+        selected_law_ids = sorted(registry.by_law_id.keys())
+    else:
+        if questions_csv is None:
+            raise ValueError("questions_csv is required when scope='benchmark'")
+        # Local import to keep laws_ingestion minimal (benchmark lives in baselines/).
+        from baselines.benchmark import iter_complete_questions  # type: ignore
+
+        questions = iter_complete_questions(questions_csv, registry)
+        selected = {gt.law_id for q in questions for gt in q.gold_targets if gt.law_id}
+        selected_law_ids = sorted(selected)
+        if not selected_law_ids:
+            raise ValueError("Benchmark scope selected 0 laws (check questions_csv)")
+
+    dataset_id = compute_dataset_id([registry.by_law_id[lid].path for lid in selected_law_ids])
 
     paths = {
         "laws": out_dir / "laws.jsonl",
@@ -47,7 +69,8 @@ def ingest_and_write(
         paths["edges"].open("w", encoding="utf-8") as edges_f,
         paths["chunks"].open("w", encoding="utf-8") as chunks_f,
     ):
-        for law_id, law_file in sorted(registry.by_law_id.items(), key=lambda kv: kv[0]):
+        for law_id in selected_law_ids:
+            law_file = registry.by_law_id[law_id]
             try:
                 ing = ingest_law(
                     law_file,
@@ -98,6 +121,9 @@ def ingest_and_write(
         "parser_backend": parser_backend_used or "unknown",
         "source_dir": str(html_dir),
         "out_dir": str(out_dir),
+        "scope": scope,
+        "questions_csv": (str(questions_csv) if questions_csv is not None else None),
+        "law_ids_included": (selected_law_ids if len(selected_law_ids) <= 200 else None),
         "config": {
             "backend": backend,
             "strict": bool(strict),
@@ -113,4 +139,3 @@ def ingest_and_write(
 
     paths["manifest"].write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest
-

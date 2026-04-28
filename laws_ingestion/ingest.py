@@ -27,6 +27,7 @@ _PLAIN_ARTICLE_RE = re.compile(
     r"^(ARTICOLO|Articolo|ART\.)\s+(?P<label>\d+(?:\s*(?:bis|ter|quater|quinquies|sexies|septies|octies|novies|decies))?|unico)\b(?P<rest>.*)$",
     re.IGNORECASE,
 )
+_TOC_ARTICLE_LINE_RE = re.compile(r"^(ARTICOLO|Articolo|ART\.?)\s+\d+\b", re.IGNORECASE)
 
 _COMMA_START_RE = re.compile(
     r"^(?P<num>\d+)(?P<suf>bis|ter|quater|quinquies|sexies|septies|octies|novies|decies)?\.\s+",
@@ -101,7 +102,7 @@ def _edge_id(
 
 def _classify_relation_type(context: str, evidence_text: str) -> tuple[str, float]:
     t = (evidence_text or "").lower()
-    if "abrogat" in t:
+    if "abrogat" in t or ("cessat" in t and "efficac" in t):
         return ("ABROGATED_BY", 0.9) if context in {"preamble", "note"} else ("ABROGATED_BY", 0.7)
     if any(k in t for k in ("modificat", "sostituit", "inserit")):
         return ("AMENDED_BY", 0.7) if context == "note" else ("AMENDED_BY", 0.6)
@@ -165,6 +166,13 @@ def _plain_article_in_block(b: Block) -> tuple[str, str | None] | None:
     return label_norm, heading
 
 
+def _looks_like_toc_article_line(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_TOC_ARTICLE_LINE_RE.match(t))
+
+
 def _links_out(links: list[Link]) -> list[dict]:
     out = []
     for l in links:
@@ -217,7 +225,7 @@ def ingest_law(
     # Articles collected as drafts (later expanded into passages)
     articles: list[dict] = []
     article_lines_by_id: dict[str, list[_Line]] = {}
-    article_order: list[str] = []
+    article_by_id: dict[str, dict] = {}
 
     # Note definitions (text) collected now; linked ids filled after passages build
     notes: list[dict] = []
@@ -270,6 +278,8 @@ def ingest_law(
         edge_type, conf = _classify_relation_type(context, evidence_text)
 
         for r in merged:
+            if r.law_id == law_file.law_id:
+                continue
             edges.append(
                 {
                     "edge_id": _edge_id(
@@ -298,6 +308,7 @@ def ingest_law(
             )
 
     saw_first_article = False
+    in_index_mode = False
     note_mode = False
     current_article_id: str | None = None
 
@@ -311,6 +322,44 @@ def ingest_law(
     def flush_note_if_any() -> None:
         nonlocal current_note_anchor
         current_note_anchor = None
+
+    def start_article(
+        *,
+        article_id: str,
+        article_label_raw: str,
+        article_label_norm: str,
+        anchor_name: str | None,
+        heading: str | None,
+    ) -> None:
+        nonlocal current_article_id
+        existing = article_by_id.get(article_id)
+        if existing is None:
+            rec = {
+                "article_id": article_id,
+                "law_id": law_file.law_id,
+                "article_label_raw": article_label_raw,
+                "article_label_norm": article_label_norm,
+                "anchor_name": anchor_name,
+                "structure_path": " > ".join([s for s in structure if s]),
+                "article_heading": heading,
+                "article_text": "",
+                "note_anchor_names": [],
+                "is_abrogated": False,
+                "abrogated_by": None,
+                "amended_by_law_ids": [],
+                "links_out": [],
+            }
+            article_by_id[article_id] = rec
+            articles.append(rec)
+            article_lines_by_id.setdefault(article_id, [])
+        else:
+            if heading and not existing.get("article_heading"):
+                existing["article_heading"] = heading
+            if anchor_name and not existing.get("anchor_name"):
+                existing["anchor_name"] = anchor_name
+            if not existing.get("structure_path"):
+                existing["structure_path"] = " > ".join([s for s in structure if s])
+        current_article_id = article_id
 
     for b in blocks:
         if _is_noise_line(b.text):
@@ -368,34 +417,24 @@ def ingest_law(
             note_mode = False
             flush_note_if_any()
             saw_first_article = True
+            in_index_mode = False
             flush_article_if_any()
 
             anchor_name, label_norm, heading = art_anchor
             article_id = f"{law_file.law_id}#art:{label_norm}"
-            current_article_id = article_id
-            articles.append(
-                {
-                    "article_id": article_id,
-                    "law_id": law_file.law_id,
-                    "article_label_raw": f"Art. {label_norm}",
-                    "article_label_norm": label_norm,
-                    "anchor_name": anchor_name,
-                    "structure_path": " > ".join([s for s in structure if s]),
-                    "article_heading": heading,
-                    "article_text": "",
-                    "note_anchor_names": [],
-                    "is_abrogated": False,
-                    "abrogated_by": None,
-                    "amended_by_law_ids": [],
-                    "links_out": [],
-                }
+            start_article(
+                article_id=article_id,
+                article_label_raw=f"Art. {label_norm}",
+                article_label_norm=label_norm,
+                anchor_name=anchor_name,
+                heading=heading,
             )
-            article_lines_by_id.setdefault(article_id, [])
-            article_order.append(article_id)
             continue
 
         plain_art = _plain_article_in_block(b)
         if plain_art:
+            if not saw_first_article and in_index_mode and _looks_like_toc_article_line(b.text):
+                continue
             note_mode = False
             flush_note_if_any()
             saw_first_article = True
@@ -403,26 +442,13 @@ def ingest_law(
 
             label_norm, heading = plain_art
             article_id = f"{law_file.law_id}#art:{label_norm}"
-            current_article_id = article_id
-            articles.append(
-                {
-                    "article_id": article_id,
-                    "law_id": law_file.law_id,
-                    "article_label_raw": f"Articolo {label_norm}",
-                    "article_label_norm": label_norm,
-                    "anchor_name": None,
-                    "structure_path": " > ".join([s for s in structure if s]),
-                    "article_heading": heading,
-                    "article_text": "",
-                    "note_anchor_names": [],
-                    "is_abrogated": False,
-                    "abrogated_by": None,
-                    "amended_by_law_ids": [],
-                    "links_out": [],
-                }
+            start_article(
+                article_id=article_id,
+                article_label_raw=f"Articolo {label_norm}",
+                article_label_norm=label_norm,
+                anchor_name=None,
+                heading=heading,
             )
-            article_lines_by_id.setdefault(article_id, [])
-            article_order.append(article_id)
             continue
 
         # Continue note mode
@@ -442,8 +468,11 @@ def ingest_law(
         # Preamble vs article body
         if not saw_first_article:
             if (b.text or "").strip().upper() == "INDICE":
+                in_index_mode = True
                 continue
             if any((l.href or "").startswith("#articolo_") for l in b.links):
+                continue
+            if in_index_mode and _looks_like_toc_article_line(b.text):
                 continue
             preamble_lines.append(_Line(text=b.text, links=b.links))
             add_edges_from_text(
@@ -489,7 +518,7 @@ def ingest_law(
             }
         )
         article_lines_by_id[article_id] = [_Line(text=preamble_text, links=())]
-        article_order.append(article_id)
+        article_by_id[article_id] = articles[-1]
 
     # Passages + edges at passage level
     passages: list[dict] = []
@@ -663,6 +692,8 @@ def ingest_law(
             merged: list[ResolvedLawRef] = []
             seen_dst: set[str] = set()
             for r in href_refs + text_refs:
+                if r.law_id == law_file.law_id:
+                    continue
                 if r.law_id in seen_dst:
                     continue
                 seen_dst.add(r.law_id)

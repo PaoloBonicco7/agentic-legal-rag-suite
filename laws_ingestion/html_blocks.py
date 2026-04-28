@@ -55,6 +55,7 @@ class _BlockHTMLParser(HTMLParser):
 
         self._row_cells: list[str] = []
         self._cell_text_parts: list[str] = []
+        self._row_has_structured_blocks = False
 
     def _allowed(self) -> bool:
         if not self._restrict_to_article:
@@ -86,17 +87,20 @@ class _BlockHTMLParser(HTMLParser):
             if tag == "tr":
                 self._in_tr = True
                 self._row_cells = []
+                self._row_has_structured_blocks = False
                 return
             if tag in ("td", "th"):
                 self._in_cell = True
                 self._cell_text_parts = []
                 return
 
-        if tag in ("p", "h1", "h2") and self._current_kind is None and not self._in_table:
+        if tag in ("p", "h1", "h2") and self._current_kind is None:
             self._current_kind = tag
             self._text_parts = []
             self._anchors = []
             self._links = []
+            if self._in_table:
+                self._row_has_structured_blocks = True
             return
 
         if tag == "a" and self._current_kind is not None:
@@ -127,9 +131,10 @@ class _BlockHTMLParser(HTMLParser):
             if tag == "tr" and self._in_tr:
                 self._in_tr = False
                 row = " | ".join([c for c in (s.strip() for s in self._row_cells) if c])
-                if row:
+                if row and not self._row_has_structured_blocks:
                     self.blocks.append(Block(kind="table_row", text=row, anchors=(), links=()))
                 self._row_cells = []
+                self._row_has_structured_blocks = False
                 return
 
         if tag == "a" and self._a_ctx is not None and self._current_kind is not None:
@@ -151,7 +156,7 @@ class _BlockHTMLParser(HTMLParser):
         if not self._allowed():
             return
 
-        if self._in_table and self._in_cell:
+        if self._in_table and self._in_cell and self._current_kind is None:
             self._cell_text_parts.append(data)
             return
 
@@ -159,6 +164,8 @@ class _BlockHTMLParser(HTMLParser):
             return
 
         self._text_parts.append(data)
+        if self._in_table and self._in_cell:
+            self._cell_text_parts.append(data)
         if self._a_ctx is not None:
             self._a_text_parts.append(data)
 
@@ -252,4 +259,3 @@ def parse_blocks_from_html(html: str, *, backend: str = "auto") -> tuple[list[Bl
                 raise
 
     return _parse_blocks_stdlib(html), "stdlib"
-

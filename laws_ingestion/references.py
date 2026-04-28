@@ -7,13 +7,15 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .registry import CorpusRegistry
 from .utils import normalize_article_label, parse_italian_date
 
+_LR_SHORT_RE = r"(?:L[\.:]\s*R\.?\.?)"
+
 _FULL_DATE_REF_RE = re.compile(
-    r"(?:Legge\s+regionale|L\.R\.|l\.r\.)\s+(?P<day>\d{1,2})(?:\s*°)?\s+(?P<month>[a-zà]+)\s+(?P<year>\d{4}),\s*n\.\s*(?P<num>\d+)",
+    rf"(?:Legge\s+regionale|{_LR_SHORT_RE})\s+(?P<day>\d{{1,2}})(?:\s*°)?\s+(?P<month>[a-zà]+)\s+(?P<year>\d{{4}}),\s*n\.\s*(?P<num>\d+)",
     re.IGNORECASE,
 )
 
 _YEAR_NUM_REF_RE = re.compile(
-    r"\b(?:L\.R\.|l\.r\.)\s*(?P<num>\d+)\s*/\s*(?P<year>\d{2,4})\b",
+    rf"\b(?:{_LR_SHORT_RE})\s*(?P<num>\d+)\s*/\s*(?P<year>\d{{2,4}})\b",
     re.IGNORECASE,
 )
 
@@ -198,4 +200,3 @@ def extract_note_anchor_names_from_hrefs(hrefs: list[str]) -> list[str]:
         seen.add(x)
         dedup.append(x)
     return dedup
-
