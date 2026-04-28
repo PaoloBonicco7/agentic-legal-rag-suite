@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from .config import AdvancedRerankConfig
-from .metadata_filters import MetadataFilterDecision
+from .metadata_filters import MetadataFilterDecision, is_relation_query
 from .qdrant_retrieval import RetrievedChunk
 
 
@@ -116,6 +116,7 @@ def rerank_candidates(
     config: AdvancedRerankConfig,
     source_tags_by_chunk: dict[str, set[str]] | None = None,
     metadata_decision: MetadataFilterDecision | None = None,
+    relation_query: bool = False,
 ) -> RerankResult:
     if not chunks:
         return RerankResult(ordered_chunks=tuple(), rows=tuple())
@@ -123,8 +124,9 @@ def rerank_candidates(
     source_tags_by_chunk = source_tags_by_chunk or {}
     query_tokens = _tokenize(question)
     query_low = str(question or "").lower()
-    query_is_specific = any(k in query_low for k in ("art.", "articolo", "comma", "l.r.", "n.")) or any(
-        ch.isdigit() for ch in query_low
+    relation_query = bool(relation_query or is_relation_query(question, decision=metadata_decision))
+    query_is_specific = any(
+        k in query_low for k in ("art.", "articolo", "comma", "l.r.", "legge regionale", "d.lgs.", "law:", "#art:")
     )
 
     scored: list[tuple[RetrievedChunk, RerankRow]] = []
@@ -137,7 +139,7 @@ def rerank_candidates(
 
         source_tags = tuple(sorted(source_tags_by_chunk.get(chunk.chunk_id, set())))
         graph_bonus = 1.0 if "graph" in set(source_tags) else 0.0
-        if query_is_specific:
+        if query_is_specific and not relation_query:
             graph_bonus *= 0.35
 
         sparse_score_raw = chunk.payload.get("hybrid_sparse_score")

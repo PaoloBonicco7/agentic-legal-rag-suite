@@ -6,8 +6,8 @@ import csv
 import re
 from pathlib import Path
 
-from laws_ingestion.registry import CorpusRegistry
-from laws_ingestion.utils import normalize_article_label, parse_italian_date
+from laws_ingestion.core.registry import CorpusRegistry
+from laws_ingestion.core.utils import normalize_article_label, parse_italian_date
 
 
 @dataclass(frozen=True)
@@ -188,4 +188,3 @@ def validate_gold_targets_exist(
             if gt.article_label_norm not in cache[gt.law_id]:
                 missing.append(f"Q{q.qid}: missing article {gt.article_label_norm} in {gt.law_id} ({html_path.name})")
     return len(missing), missing
-

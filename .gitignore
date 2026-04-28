@@ -207,7 +207,20 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project local data and heavy artifacts (keep evaluation CSV tracked)
 /data/leggi-html/
 /LegalRAGatoni/
-/data/leggi-html/
 /data/laws_dataset/
+/data/laws_dataset_clean/
+/data/laws_html/
+/data/indexes/
+/data/qdrant_indexing/
+/notebooks/data/
+/notebooks/rag_pipeline/artifacts/
+/notebooks/old/
+
+# Qdrant/SQLite generated files
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

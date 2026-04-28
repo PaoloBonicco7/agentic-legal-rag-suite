@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from legal_indexing.pipeline import run_indexing_pipeline
-from legal_indexing.rag_runtime.config import RagRuntimeConfig
-from legal_indexing.rag_runtime.langgraph_app import prepare_runtime, run_rag_question
+from legal_indexing.rag_runtime.config import (
+    AdvancedAnswerGuardConfig,
+    AdvancedMultiRetrievalConfig,
+    AdvancedRagConfig,
+    RagRuntimeConfig,
+)
+from legal_indexing.rag_runtime.langgraph_app import (
+    _build_nodes,
+    prepare_runtime,
+    run_rag_question,
+)
+from legal_indexing.rag_runtime.qdrant_retrieval import RetrievedChunk
 from legal_indexing.settings import IndexingConfig, make_chunking_profile
 
 
@@ -237,3 +249,100 @@ def test_answer_guard_fallback_when_retry_is_still_empty(tmp_path: Path) -> None
     assert answer["was_empty_before_guard"] is True
     assert answer["needs_more_context"] is True
     assert answer["citations"] == []
+
+
+class NeedsMoreThenResolvedLLM:
+    _chunk_re = re.compile(r"chunk_id=([^\s]+)")
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, prompt: str) -> str:
+        self.calls += 1
+        match = self._chunk_re.search(prompt or "")
+        citation = match.group(1) if match else "c0"
+        if self.calls == 1:
+            payload = {
+                "answer": "Serve più contesto, ma provo a sintetizzare.",
+                "citations": [citation],
+                "needs_more_context": True,
+            }
+        else:
+            payload = {
+                "answer": "Risposta best-effort con evidenza sufficiente.",
+                "citations": [citation],
+                "needs_more_context": False,
+            }
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _retrieved_chunks(n: int) -> list[RetrievedChunk]:
+    out: list[RetrievedChunk] = []
+    for i in range(n):
+        chunk_id = f"law:test:{i}#chunk:0"
+        out.append(
+            RetrievedChunk(
+                chunk_id=chunk_id,
+                score=0.5 - (i * 0.001),
+                text=f"Testo normativo {i}",
+                point_id=chunk_id,
+                payload={
+                    "chunk_id": chunk_id,
+                    "law_id": f"law:test:{i % 4}",
+                    "article_id": f"law:test:{i % 4}#art:{i % 3}",
+                    "source_chunk_ids": [chunk_id],
+                    "source_passage_ids": [f"law:test:{i % 4}#art:{i % 3}#p:intro"],
+                },
+            )
+        )
+    return out
+
+
+def test_answer_guard_retries_on_needs_more_context_when_retrieval_is_strong() -> None:
+    llm = NeedsMoreThenResolvedLLM()
+    cfg = RagRuntimeConfig(
+        llm_provider="disabled",
+        pipeline_mode="advanced",
+        advanced=AdvancedRagConfig(
+            multi_retrieval=AdvancedMultiRetrievalConfig(top_k_primary=12, top_k_secondary=6),
+            answer_guard=AdvancedAnswerGuardConfig(
+                retry_on_empty_answer=True,
+                max_empty_retries=1,
+                retry_on_needs_more_context=True,
+                max_needs_more_retries=1,
+            ),
+        ),
+    )
+    nodes = _build_nodes(
+        cfg,
+        resources=SimpleNamespace(
+            retriever=SimpleNamespace(),
+            graph_adapter=SimpleNamespace(),
+            law_catalog=SimpleNamespace(),
+        ),
+        llm=llm,
+    )
+    retrieved = _retrieved_chunks(12)
+    context_ids = [doc.chunk_id for doc in retrieved[:8]]
+    context_text = "\n\n".join([f"chunk_id={cid}\nTesto di supporto." for cid in context_ids])
+    state = {
+        "question": "Qual e la disciplina applicabile?",
+        "context": context_text,
+        "retrieved": retrieved,
+        "retrieval_mode": "hybrid",
+        "context_summary": {
+            "included_count": 8,
+            "included_chunk_ids": context_ids,
+            "total_candidates": 12,
+        },
+        "pipeline_errors": [],
+        "trace": [],
+        "reranked": [],
+        "retrieval_batches": [],
+    }
+
+    updates = nodes["generate_answer_structured"](state)
+    answer = updates["answer"]
+    assert answer["answer_source"] == "retry_needs_more_context"
+    assert answer["needs_more_context"] is False
+    assert llm.calls >= 2

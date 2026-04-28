@@ -46,6 +46,7 @@ from .langgraph_app import (
     RagState,
     RuntimeResources,
     build_rag_graph,
+    build_rag_retrieval_context_graph,
     prepare_runtime,
     run_rag_retrieval_context,
     run_rag_question,
@@ -145,6 +146,7 @@ __all__ = [
     "RuntimeResources",
     "prepare_runtime",
     "build_rag_graph",
+    "build_rag_retrieval_context_graph",
     "run_rag_retrieval_context",
     "run_rag_question",
 ]

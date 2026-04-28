@@ -1,6 +1,6 @@
 import unittest
 
-from laws_ingestion.registry import parse_law_filename
+from laws_ingestion.core.registry import parse_law_filename
 
 
 class TestCorpusRegistry(unittest.TestCase):
