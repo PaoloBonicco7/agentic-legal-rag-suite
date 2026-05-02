@@ -17,6 +17,7 @@ htmlcov/
 data/laws_html/
 data/laws_dataset/
 data/laws_dataset_clean/
+data/evaluation_clean/
 data/indexes/
 data/indexing_runs/
 data/qdrant_indexing/
@@ -27,3 +28,4 @@ notebooks/rag_pipeline/checkpoints/
 
 # Evaluation source data is intentionally versioned:
 # - data/evaluation/
+
