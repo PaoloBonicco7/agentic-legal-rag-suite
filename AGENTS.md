@@ -25,10 +25,22 @@ The repository should include the full source data needed by the application: th
 - Do not copy the old architecture, folder structure, or complexity by default.
 - Put reusable logic in core Python modules.
 - Use Pydantic v2 for explicit data contracts, configuration models, validation, and structured run outputs.
+- Use the available Qdrant skills when designing or changing indexing, vector storage, retrieval quality, hybrid search, payload filters, or metadata-based search behavior.
+- Use the LangChain documentation MCP when implementing LangChain integrations, chains, retrievers, document loaders, splitters, or evaluation helpers.
 - Use external libraries when they make the implementation simpler, clearer, or more reliable for the PoC.
 - Prefer well-known libraries over custom code for parsing, validation, indexing, retrieval, evaluation, and visualization when they reduce complexity.
 - Use notebooks as demonstration and explanation layers, not as the place where most logic lives.
 - Each notebook should show one coherent run with minimal code, visible inputs, visible outputs, and short explanations of the choices made.
+
+## Technology Guidance
+
+- Use Qdrant as the default vector index for the RAG pipeline.
+- Model indexed legal chunks with explicit Qdrant payload metadata so retrieval can combine semantic similarity with legal-domain filters such as source, law identifier, article, section, date, topic, or evaluation split when available.
+- Prefer Qdrant-supported retrieval features over custom retrieval code when they make semantic search, metadata filtering, hybrid search, reranking preparation, or reproducibility clearer.
+- Keep Qdrant collection schemas, vector names, payload fields, and indexing choices documented in the relevant step specification.
+- Use LangChain when it reduces glue code or makes the pipeline easier to read, especially for document objects, loaders, splitters, retrievers, prompt composition, chains, and evaluation workflows.
+- Do not wrap simple code in LangChain abstractions unless the abstraction makes the thesis workflow easier to explain or extend.
+- Use Pydantic v2 when structured inputs, configuration, payload schemas, run outputs, or validation boundaries are useful; avoid unnecessary models for trivial local variables or one-off transformations.
 
 ## Data Policy
 
