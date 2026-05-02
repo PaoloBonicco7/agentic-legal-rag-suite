@@ -8,11 +8,12 @@ The specifications are the source of intent. They describe what each step must p
 
 1. `01_laws_preprocessing.md`: HTML laws to clean legal dataset with graph metadata.
 2. `02_evaluation_dataset.md`: raw evaluation CSV files to validated MCQ and no-hint datasets.
-3. `03_indexing_contract.md`: clean legal chunks to a retrieval-ready index contract.
-4. `04_no_rag_baseline.md`: model-only evaluation without retrieval.
-5. `05_simple_rag.md`: minimal retrieval, context, answer, citation, and evaluation loop.
-6. `06_advanced_graph_rag.md`: explainable improvements with filters, graph expansion, reranking, and optional hybrid retrieval.
-7. `07_evaluation_reporting.md`: shared metrics, comparisons, failure analysis, and thesis-ready reporting.
+3. `02b_oracle_context_evaluation.md`: controlled evaluation with and without source-of-truth article context.
+4. `03_indexing_contract.md`: clean legal chunks to a retrieval-ready index contract.
+5. `04_no_rag_baseline.md`: model-only evaluation without retrieval.
+6. `05_simple_rag.md`: minimal retrieval, context, answer, citation, and evaluation loop.
+7. `06_advanced_graph_rag.md`: explainable improvements with filters, graph expansion, reranking, and optional hybrid retrieval.
+8. `07_evaluation_reporting.md`: shared metrics, comparisons, failure analysis, and thesis-ready reporting.
 
 ## Shared Principles
 
@@ -43,6 +44,7 @@ Each numbered spec uses the same sections:
 
 - `notebooks/01_laws_preprocessing.ipynb`
 - `notebooks/02_evaluation_dataset.ipynb`
+- `notebooks/02b_oracle_context_evaluation.ipynb`
 - `notebooks/03_indexing_contract.ipynb`
 - `notebooks/04_no_rag_baseline.ipynb`
 - `notebooks/05_simple_rag.ipynb`

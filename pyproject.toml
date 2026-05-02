@@ -20,7 +20,10 @@ dev = [
 notebooks = [
     "ipykernel>=7.0",
     "jupyter>=1.1",
+    "matplotlib>=3.10",
+    "networkx>=3.4",
     "pandas>=2.2",
+    "pyvis>=0.3",
 ]
 
 [tool.hatch.build.targets.wheel]
