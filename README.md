@@ -8,7 +8,8 @@ This repository is being refactored into a minimal research codebase for buildin
 
 The goal is not to preserve the complexity of the previous implementation. The goal is to keep the same research flow while making each step understandable, reproducible, and easy to discuss with a research team.
 
-The legal corpus and question datasets are part of the application and are intended to be versioned in the repository.
+The evaluation question datasets are part of the application and are intended to be versioned in the repository.
+The HTML legal corpus is expected locally under `data/laws_html/`, but is not tracked in Git.
 
 ## Refactored Pipeline
 
@@ -23,18 +24,21 @@ The legal corpus and question datasets are part of the application and are inten
 ## Repository Shape
 
 - Core reusable code contains the implementation for each pipeline step.
+- Pydantic v2 defines data contracts, configuration models, validation, and structured outputs.
+- External libraries are welcome when they make the code simpler, clearer, and easier to reproduce.
 - Notebooks provide short demonstration runs with explanatory text and visible outputs.
 - Markdown specifications are the source of intent for each step.
 - Markdown implementation notes record choices, results, and lessons learned.
-- `data/laws_html/` contains the source legal corpus.
+- `data/laws_html/` contains the local source legal corpus and is ignored by Git.
 - `data/evaluation/` contains the evaluation question datasets.
 - `OLD/` is historical reference only; it is not the target architecture.
 
 ## Reproducibility Contract
 
-The repository should include the full source corpus of laws and the full set of evaluation questions used by the application.
+The repository should include the full set of evaluation questions used by the application.
+The legal HTML corpus should be kept locally under `data/laws_html/` and documented as an external input.
 
-Runs should be reproducible from a fresh clone using the versioned source data. Any generated dataset, retrieval index, benchmark output, or cache should be documented as a derived artifact, not as source data.
+Runs should be reproducible from a fresh clone once the local corpus has been placed under `data/laws_html/`. Any generated dataset, retrieval index, benchmark output, or cache should be documented as a derived artifact, not as source data.
 
 Outputs used in the thesis or shared with the research team should be traceable to their input data, configuration, and pipeline step.
 

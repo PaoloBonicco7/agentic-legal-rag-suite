@@ -21,6 +21,9 @@ The specifications are the source of intent. They describe what each step must p
 - Generated datasets, indexes, benchmark outputs, reports, caches, and notebook artifacts are reproducible outputs and are not committed by default.
 - `OLD/` is historical reference only.
 - Core logic belongs in reusable modules; notebooks demonstrate runs and explain choices.
+- Use Pydantic v2 for shared data contracts, configuration models, validation, and structured outputs across the pipeline.
+- External libraries are allowed and recommended when they make the PoC simpler, clearer, or more reliable.
+- Prefer well-known libraries over custom implementations for specialized tasks when the dependency is easy to justify.
 - Prefer clarity over completeness when a feature would make the PoC harder to explain.
 
 ## Common Spec Structure
@@ -51,4 +54,3 @@ Each notebook should run one coherent demonstration, display the relevant artifa
 ## Results Notes
 
 After implementation, each step should have a short result note under `docs/results/` with the same numbering. The note should record the implementation choices, run configuration, observed counts, metrics, and known limitations.
-
