@@ -1,4 +1,5 @@
 OLD/
+.env
 
 # Local environment and OS/editor files.
 .venv/
@@ -18,6 +19,7 @@ data/laws_html/
 data/laws_dataset/
 data/laws_dataset_clean/
 data/evaluation_clean/
+data/evaluation_runs/
 data/indexes/
 data/indexing_runs/
 data/qdrant_indexing/
@@ -29,4 +31,6 @@ notebooks/rag_pipeline/checkpoints/
 # Evaluation source data is intentionally versioned:
 # - data/evaluation/
 
-
+# skills
+.agents/
+skills-lock.json

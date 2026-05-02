@@ -4,7 +4,7 @@
 
 Define how the clean legal dataset becomes a retrieval-ready index for RAG.
 
-This step proves that generated chunks can be indexed with stable payload metadata, reproducible hashes, and filterable fields needed by simple and advanced retrieval.
+This step proves that generated chunks can be indexed with stable payload metadata, reproducible hashes, and filterable fields needed by simple and advanced retrieval. It should use qdrant, and refefing to the offical qdrant documentation offered by skills.
 
 ## Inputs
 
@@ -82,7 +82,7 @@ The index manifest must record the source dataset hash and the embedding model i
 
 ## Notebook Role
 
-`notebooks/03_indexing_contract.ipynb` should validate the clean dataset, run a small indexing job, show payload examples, test filters, and run a few diagnostic retrieval queries.
+`notebooks/03_indexing_contract.ipynb` should validate the clean dataset, run a small indexing job, show payload examples, test filters, and run a few diagnostic retrieval queries. It should also run the full indexing pipeline on the entire clean dataset and generate the required artifacts.
 
 The notebook should explain the payload fields because they are the bridge between preprocessing and RAG behavior.
 
