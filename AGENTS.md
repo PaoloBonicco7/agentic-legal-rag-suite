@@ -24,6 +24,9 @@ The repository should include the full source data needed by the application: th
 - Inspect `OLD/` to understand the previous flow, expected outputs, and experimental intent.
 - Do not copy the old architecture, folder structure, or complexity by default.
 - Put reusable logic in core Python modules.
+- Use Pydantic v2 for explicit data contracts, configuration models, validation, and structured run outputs.
+- Use external libraries when they make the implementation simpler, clearer, or more reliable for the PoC.
+- Prefer well-known libraries over custom code for parsing, validation, indexing, retrieval, evaluation, and visualization when they reduce complexity.
 - Use notebooks as demonstration and explanation layers, not as the place where most logic lives.
 - Each notebook should show one coherent run with minimal code, visible inputs, visible outputs, and short explanations of the choices made.
 
@@ -41,11 +44,14 @@ The repository should include the full source data needed by the application: th
 - Specifications describe intent, contracts, inputs, outputs, and acceptance criteria.
 - Implementation notes describe what was built, why key choices were made, and what results were obtained.
 - Keep repository-level documentation minimal; put detailed step behavior in step-specific documents.
+- Always document new code with minimal docstrings that clearly explain the fundamental purpose and processing steps.
+- Keep code comments in English, concise, and focused on non-obvious decisions or data transformations.
 
 ## Quality Bar
 
 - Changes should be small enough to review and explain.
 - Prefer deterministic, reproducible behavior where practical.
+- Add external dependencies deliberately: they should simplify the project and be easy to explain in the thesis context.
 - Add or update focused tests when behavior changes.
 - Validate that demo outputs are reproducible before presenting them as project results.
 - Validate that source data remains available from a fresh clone.
