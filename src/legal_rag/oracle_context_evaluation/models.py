@@ -35,6 +35,7 @@ class OracleEvaluationConfig(BaseModel):
     limit: int | None = Field(default=None, gt=0)
     smoke: bool = False
     retry_attempts: int = Field(default=1, ge=1)
+    max_concurrency: int = Field(default=4, ge=1)
     prompt_version: str = ORACLE_PROMPT_VERSION
 
     @field_validator("judge_model")

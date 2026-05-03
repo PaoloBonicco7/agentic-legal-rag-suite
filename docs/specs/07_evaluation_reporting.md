@@ -44,12 +44,14 @@ Default generated output directory: `data/reports/`.
 
 ## Contract
 
-Every compared method must expose:
+Every compared method must expose the shared metric contract used by steps 04, 05, and 06:
 
 - `processed`
 - `judged`
 - `score_sum`
+- `max_score_sum`
 - `accuracy`
+- `mean_score`
 - `coverage`
 - `strict_accuracy`
 - `errors`
@@ -63,7 +65,15 @@ Comparison outputs must include:
 - separate MCQ and no-hint summaries;
 - references to source run manifests.
 
-Failure analysis should preserve row-level identifiers so examples can be traced back to original questions and run outputs.
+`thesis_tables.md` must contain a fixed set of Markdown tables in this order, with English column headers, so the file can be lifted into the thesis without reformatting:
+
+1. **Headline MCQ accuracy**: rows = methods (`no_rag`, `simple_rag`, `advanced_rag`), columns = `processed`, `accuracy`, `coverage`, `strict_accuracy`.
+2. **Headline no-hint score**: rows = methods, columns = `processed`, `mean_score`, `coverage`, `strict_accuracy`.
+3. **MCQ accuracy by level**: rows = methods, columns = one per level present in the evaluation manifest.
+4. **No-hint mean score by level**: rows = methods, columns = one per level.
+5. **Failure category breakdown**: rows = methods, columns = the failure categories from step 06 (`retrieval_miss`, `context_noise`, `abstention`, `contradiction`, `generation_error`, `judge_error`, `unknown`); rows for `no_rag` and `simple_rag` use only the categories that apply.
+
+Failure analysis should preserve row-level identifiers (`qid`, `method`, `run_name` when applicable) so examples can be traced back to original questions and run outputs.
 
 ## Quality Gates
 
@@ -77,9 +87,16 @@ Failure analysis should preserve row-level identifiers so examples can be traced
 
 ## Notebook Role
 
-`notebooks/07_evaluation_reporting.ipynb` should load completed run artifacts, display comparison tables, show charts, inspect representative failures, and summarize the thesis-relevant conclusions.
+`notebooks/07_evaluation_reporting.ipynb` should load completed run artifacts, display the comparison tables from `thesis_tables.md`, render the charts listed below, inspect representative failures, and summarize the thesis-relevant conclusions.
 
-The notebook should be the final narrative layer, not the place where metrics are redefined.
+Required charts:
+
+- bar chart: MCQ accuracy by level, one bar group per method;
+- bar chart: no-hint mean score by level, one bar group per method;
+- delta plot: `advanced_rag - no_rag` MCQ accuracy by level (and the same for `simple_rag - no_rag`);
+- stacked bar chart: failure category distribution per method.
+
+The notebook is the final narrative layer, not the place where metrics are redefined or where pipelines are re-run.
 
 ## Acceptance Criteria
 
