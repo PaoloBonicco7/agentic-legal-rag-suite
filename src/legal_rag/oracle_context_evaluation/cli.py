@@ -27,6 +27,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Optional max row count.")
     parser.add_argument("--smoke", action="store_true", help="Run only one row for connectivity checks.")
     parser.add_argument("--retry-attempts", type=int, default=1, help="Remote call attempts per model call.")
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=4,
+        help="Maximum parallel model calls per run condition.",
+    )
     return parser.parse_args(argv)
 
 
@@ -49,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             smoke=args.smoke,
             retry_attempts=args.retry_attempts,
+            max_concurrency=args.max_concurrency,
         )
     )
     print(

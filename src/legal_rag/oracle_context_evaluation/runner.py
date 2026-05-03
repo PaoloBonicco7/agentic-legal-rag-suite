@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from pydantic import ValidationError
 
@@ -37,6 +38,9 @@ from .models import (
 from .prompts import build_judge_prompt, build_mcq_prompt, build_no_hint_prompt, schema_dict
 from .references import OracleReferenceResolver
 from .scoring import add_delta, aggregate_results, score_mcq_label
+
+T = TypeVar("T")
+U = TypeVar("U")
 
 
 def load_inputs(config: OracleEvaluationConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
@@ -124,6 +128,15 @@ def resolve_judge_model(config: OracleEvaluationConfig, answer_model: str) -> st
     return os.getenv("UTOPIA_JUDGE_MODEL", answer_model)
 
 
+def _parallel_map_ordered(items: list[T], func: Callable[[T], U], *, max_workers: int) -> list[U]:
+    """Run independent tasks in parallel while preserving input order."""
+    if max_workers <= 1 or len(items) <= 1:
+        return [func(item) for item in items]
+    workers = min(max_workers, len(items))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(func, items))
+
+
 def run_mcq(
     *,
     records: list[dict[str, Any]],
@@ -133,8 +146,7 @@ def run_mcq(
     use_context: bool,
 ) -> list[dict[str, Any]]:
     """Run one MCQ condition and return row-level results."""
-    rows: list[dict[str, Any]] = []
-    for record in records:
+    def run_one(record: dict[str, Any]) -> dict[str, Any]:
         qid = str(record["qid"])
         context = contexts_by_qid[qid]
         context_text = context.context_text if use_context else None
@@ -155,20 +167,19 @@ def run_mcq(
                 score, error = score_mcq_label(predicted_label, str(record["correct_label"]))
             except Exception as exc:
                 error = f"mcq_structured_error: {type(exc).__name__}: {exc}"
-        rows.append(
-            McqResultRow(
-                qid=qid,
-                level=str(record["level"]),
-                question=str(record["question_stem"]),
-                options=dict(record["options"]),
-                correct_label=str(record["correct_label"]),
-                predicted_label=predicted_label,
-                score=score,
-                context_article_ids=context_article_ids,
-                error=error,
-            ).to_json_record()
-        )
-    return rows
+        return McqResultRow(
+            qid=qid,
+            level=str(record["level"]),
+            question=str(record["question_stem"]),
+            options=dict(record["options"]),
+            correct_label=str(record["correct_label"]),
+            predicted_label=predicted_label,
+            score=score,
+            context_article_ids=context_article_ids,
+            error=error,
+        ).to_json_record()
+
+    return _parallel_map_ordered(records, run_one, max_workers=config.max_concurrency)
 
 
 def run_no_hint(
@@ -180,8 +191,7 @@ def run_no_hint(
     use_context: bool,
 ) -> list[dict[str, Any]]:
     """Run one no-hint condition and judge each answer on a 0-2 scale."""
-    rows: list[dict[str, Any]] = []
-    for record in records:
+    def run_one(record: dict[str, Any]) -> dict[str, Any]:
         qid = str(record["qid"])
         context = contexts_by_qid[qid]
         context_text = context.context_text if use_context else None
@@ -217,20 +227,19 @@ def run_no_hint(
                 error = f"judge_structured_error: {type(exc).__name__}: {exc}"
             except Exception as exc:
                 error = f"judge_structured_error: {type(exc).__name__}: {exc}"
-        rows.append(
-            NoHintResultRow(
-                qid=qid,
-                level=str(record["level"]),
-                question=str(record["question"]),
-                predicted_answer=predicted_answer,
-                correct_answer=str(record["correct_answer"]),
-                judge_score=judge_score,
-                judge_explanation=judge_explanation,
-                context_article_ids=context_article_ids,
-                error=error,
-            ).to_json_record()
-        )
-    return rows
+        return NoHintResultRow(
+            qid=qid,
+            level=str(record["level"]),
+            question=str(record["question"]),
+            predicted_answer=predicted_answer,
+            correct_answer=str(record["correct_answer"]),
+            judge_score=judge_score,
+            judge_explanation=judge_explanation,
+            context_article_ids=context_article_ids,
+            error=error,
+        ).to_json_record()
+
+    return _parallel_map_ordered(records, run_one, max_workers=config.max_concurrency)
 
 
 def build_summary(

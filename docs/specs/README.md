@@ -4,6 +4,8 @@ This folder defines the thesis PoC workflow from source data to final evaluation
 
 The specifications are the source of intent. They describe what each step must prove, what it consumes, what it produces, and how the result is checked. They should stay compact enough to guide implementation and notebook demonstrations without becoming a second codebase.
 
+`AGENTS.md` at the repository root is complementary, not a duplicate: it describes the project's technology stack, repository principles, and how a coding agent should behave. This file is the workflow map; each numbered file is the contract for one step.
+
 ## Workflow
 
 1. `01_laws_preprocessing.md`: HTML laws to clean legal dataset with graph metadata.

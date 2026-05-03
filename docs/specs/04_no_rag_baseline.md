@@ -9,9 +9,11 @@ This step provides the scientific baseline for the thesis: it shows what the mod
 ## Inputs
 
 - Clean evaluation datasets from step 02.
-- Baseline configuration: model identity, prompt version, judge model identity, benchmark size, random seed if sampling is used, and retry policy.
+- Baseline configuration (`NoRagConfig` Pydantic model): `chat_model`, `judge_model`, `prompt_version` (default `no-rag-prompts-v1`), `benchmark_size`, `start`, `smoke`, `retry_attempts`, `random_seed` if sampling is used, `env_file` (default `.env`).
 
 No legal retrieval index is used in this step.
+
+LLM calls follow the project stack defined in `AGENTS.md`: Utopia structured chat with `temperature=0` for deterministic answers; the resolved seed (when supported by the model) is recorded in the manifest.
 
 ## Outputs
 
@@ -45,10 +47,17 @@ MCQ result rows must include:
 - `qid`
 - `level`
 - `question`
+- `options`
 - `predicted_label`
 - `correct_label`
 - `score`
 - `error`
+
+MCQ scoring is deterministic and identical to step 02b:
+
+- `score=1` when `predicted_label` equals `correct_label`;
+- `score=0` when `predicted_label` is a valid label other than `correct_label`;
+- invalid or missing labels are recorded in `error` and do not count toward `judged`.
 
 No-hint result rows must include:
 
@@ -61,12 +70,16 @@ No-hint result rows must include:
 - `judge_explanation`
 - `error`
 
+No-hint judge scoring uses the same `0-2` rubric as step 02b: `2` correct or semantically equivalent, `1` partially correct and not contradictory, `0` wrong, contradictory, empty, or not evaluable. Out-of-range scores or missing explanations are recorded as `judge_error`.
+
 Summary metrics must include:
 
 - `processed`
 - `judged`
 - `score_sum`
+- `max_score_sum` (equals `judged` for MCQ, `2 * judged` for no-hint)
 - `accuracy`
+- `mean_score`
 - `coverage`
 - `strict_accuracy`
 - `errors`
