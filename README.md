@@ -58,6 +58,13 @@ Install the optional RAG dependencies when working on retrieval or generation:
 uv sync --group dev --group notebooks --group rag
 ```
 
+Run the local Advanced Graph RAG UI:
+
+```bash
+uv sync --group dev --group notebooks --group ui
+uv run --group ui streamlit run src/legal_rag/ui/advanced_rag_app.py
+```
+
 Run the basic checks:
 
 ```bash

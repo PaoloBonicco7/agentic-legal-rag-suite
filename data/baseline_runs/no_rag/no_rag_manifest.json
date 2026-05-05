@@ -1,0 +1,183 @@
+{
+  "config": {
+    "api_key_present": true,
+    "api_url": null,
+    "base_url": "https://utopia.hpc4ai.unito.it/api",
+    "benchmark_size": null,
+    "chat_model": "code",
+    "env_file": ".env",
+    "evaluation_dir": "/Users/paolo.bonicco/Library/Mobile Documents/com~apple~CloudDocs/Università/Tesi/agentic-legal-rag-suite/data/evaluation_clean",
+    "judge_model": "code",
+    "max_concurrency": 4,
+    "output_dir": "/Users/paolo.bonicco/Library/Mobile Documents/com~apple~CloudDocs/Università/Tesi/agentic-legal-rag-suite/data/baseline_runs/no_rag",
+    "prompt_version": "no-rag-prompts-v1",
+    "random_seed": null,
+    "retry_attempts": 1,
+    "smoke": false,
+    "start": 0,
+    "timeout_seconds": 120
+  },
+  "connection": {
+    "api_key_present": true,
+    "api_url": "https://utopia.hpc4ai.unito.it/ollama/api/chat",
+    "base_url": "https://utopia.hpc4ai.unito.it/api",
+    "client": "utopia",
+    "env_file": ".env",
+    "env_file_loaded": false,
+    "env_keys_loaded": []
+  },
+  "counts": {
+    "mcq": 100,
+    "mcq_errors": 0,
+    "no_hint": 100,
+    "no_hint_errors": 0
+  },
+  "created_at": "2026-05-05T10:11:00Z",
+  "manifest_hash_note": "no_rag_manifest.json is excluded from output_hashes because a file cannot contain a stable hash of itself.",
+  "models": {
+    "answer_model": "code",
+    "judge_model": "code"
+  },
+  "output_hashes": {
+    "mcq_results": "7bc1b2f14cdda0f95f3e860ae4049575a00a5c10e0c46a00af4f56fe9dffe52d",
+    "no_hint_results": "919e582032ad9934be7ed4085384c6510f686073d301b9c78490e73dfede5ff2",
+    "no_rag_summary": "6fefa5a78b84ad46d3d153f2e242d5a92dd2ffa2eb13e51d694b44897fe4ecde",
+    "quality_report": "18f0064b57555de11d013f6a0b78989cdf7356ae24d927168e579f5729d98682"
+  },
+  "outputs": {
+    "mcq_results": "mcq_results.jsonl",
+    "no_hint_results": "no_hint_results.jsonl",
+    "no_rag_manifest": "no_rag_manifest.json",
+    "no_rag_summary": "no_rag_summary.json",
+    "quality_report": "quality_report.md"
+  },
+  "prompt_version": "no-rag-prompts-v1",
+  "random_seed": null,
+  "schema_version": "no-rag-baseline-v1",
+  "source_hashes": {
+    "evaluation_manifest": "705814775e91e48a4a33d8aaa7d2416747ce2ff96eebd70b190155aa88cdfe30",
+    "questions_mcq": "b9ad8147899cc2ca35f8a6b891f770b388af8d1806f0e105f6bab281eb91e019",
+    "questions_no_hint": "e319f0d06e2dd7a0dbab5f913acb943e4e08977d0982d1be9ee5f608aedf88b0"
+  },
+  "summary": {
+    "mcq": {
+      "accuracy": 0.81,
+      "by_level": {
+        "L1": {
+          "accuracy": 0.8,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 25,
+          "mean_score": 0.8,
+          "processed": 25,
+          "score_sum": 20,
+          "strict_accuracy": 0.8
+        },
+        "L2": {
+          "accuracy": 0.84,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 25,
+          "mean_score": 0.84,
+          "processed": 25,
+          "score_sum": 21,
+          "strict_accuracy": 0.84
+        },
+        "L3": {
+          "accuracy": 0.76,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 25,
+          "mean_score": 0.76,
+          "processed": 25,
+          "score_sum": 19,
+          "strict_accuracy": 0.76
+        },
+        "L4": {
+          "accuracy": 0.84,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 25,
+          "mean_score": 0.84,
+          "processed": 25,
+          "score_sum": 21,
+          "strict_accuracy": 0.84
+        }
+      },
+      "coverage": 1.0,
+      "dataset": "mcq",
+      "errors": 0,
+      "judged": 100,
+      "max_score_sum": 100,
+      "mean_score": 0.81,
+      "processed": 100,
+      "score_sum": 81,
+      "strict_accuracy": 0.81
+    },
+    "no_hint": {
+      "accuracy": 0.485,
+      "by_level": {
+        "L1": {
+          "accuracy": 0.34,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 50,
+          "mean_score": 0.68,
+          "processed": 25,
+          "score_sum": 17,
+          "strict_accuracy": 0.34
+        },
+        "L2": {
+          "accuracy": 0.54,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 50,
+          "mean_score": 1.08,
+          "processed": 25,
+          "score_sum": 27,
+          "strict_accuracy": 0.54
+        },
+        "L3": {
+          "accuracy": 0.46,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 50,
+          "mean_score": 0.92,
+          "processed": 25,
+          "score_sum": 23,
+          "strict_accuracy": 0.46
+        },
+        "L4": {
+          "accuracy": 0.6,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 25,
+          "max_score_sum": 50,
+          "mean_score": 1.2,
+          "processed": 25,
+          "score_sum": 30,
+          "strict_accuracy": 0.6
+        }
+      },
+      "coverage": 1.0,
+      "dataset": "no_hint",
+      "errors": 0,
+      "judged": 100,
+      "max_score_sum": 200,
+      "mean_score": 0.97,
+      "processed": 100,
+      "score_sum": 97,
+      "strict_accuracy": 0.485
+    }
+  },
+  "upstream_manifests": {
+    "evaluation_schema_version": "evaluation-dataset-v1"
+  }
+}

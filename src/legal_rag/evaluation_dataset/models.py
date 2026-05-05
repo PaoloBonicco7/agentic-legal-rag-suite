@@ -13,6 +13,8 @@ EXPECTED_OPTION_LABELS = ("A", "B", "C", "D", "E", "F")
 class EvaluationDatasetConfig(BaseModel):
     """Runtime configuration for the deterministic evaluation dataset build."""
 
+    model_config = ConfigDict(extra="forbid")
+
     mcq_source: str = "data/evaluation/questions.csv"
     no_hint_source: str = "data/evaluation/questions_no_hint.csv"
     output_dir: str = "data/evaluation_clean"
@@ -74,6 +76,38 @@ class NoHintQuestionRecord(_Record):
     linked_mcq_qid: str = Field(min_length=1)
 
 
+class EvaluationDatasetProfile(_Record):
+    """Compact diagnostics used by notebooks and human inspection."""
+
+    counts: dict[str, int] = Field(min_length=1)
+    level_distribution: dict[str, int] = Field(min_length=1)
+    reference_count: int = Field(ge=0)
+    sample_references: list[str]
+    sample_mcq_records: list[dict[str, Any]]
+    sample_no_hint_records: list[dict[str, Any]]
+    alignment_examples: list[dict[str, str]]
+    ready_for_evaluation: bool
+
+
+class EvaluationDatasetManifest(_Record):
+    """Run manifest for the generated clean evaluation dataset."""
+
+    schema_version: str = Field(min_length=1)
+    created_at: str = Field(min_length=1)
+    mcq_source: str = Field(min_length=1)
+    no_hint_source: str = Field(min_length=1)
+    output_dir: str = Field(min_length=1)
+    config: dict[str, Any] = Field(min_length=1)
+    source_hashes: dict[str, str] = Field(min_length=1)
+    counts: dict[str, int] = Field(min_length=1)
+    level_distribution: dict[str, int] = Field(min_length=1)
+    quality_gates: dict[str, bool] = Field(min_length=1)
+    ready_for_evaluation: bool
+    outputs: dict[str, str] = Field(min_length=1)
+    output_hashes: dict[str, str] = Field(min_length=1)
+    manifest_hash_note: str = Field(min_length=1)
+
+
 def mcq_question_record(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and serialize an MCQ question record."""
     return McqQuestionRecord.model_validate(data).to_json_record()
@@ -82,3 +116,13 @@ def mcq_question_record(data: dict[str, Any]) -> dict[str, Any]:
 def no_hint_question_record(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and serialize a no-hint question record."""
     return NoHintQuestionRecord.model_validate(data).to_json_record()
+
+
+def evaluation_dataset_profile(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and serialize the notebook-friendly profile."""
+    return EvaluationDatasetProfile.model_validate(data).to_json_record()
+
+
+def evaluation_dataset_manifest(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and serialize the run manifest."""
+    return EvaluationDatasetManifest.model_validate(data).to_json_record()

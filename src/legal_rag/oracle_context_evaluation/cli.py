@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 
-from .models import OracleEvaluationConfig
+from .models import DEFAULT_CHAT_MODEL, OracleEvaluationConfig
 from .runner import run_oracle_context_evaluation
 
 
@@ -17,10 +17,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--laws-dir", default="data/laws_dataset_clean", help="Clean step 01 output directory.")
     parser.add_argument("--output", default="data/evaluation_runs/oracle_context", help="Generated run output directory.")
     parser.add_argument("--env-file", default=".env", help="Optional .env file with Utopia settings.")
-    parser.add_argument("--api-url", default=os.getenv("UTOPIA_OLLAMA_CHAT_URL") or None, help="Explicit chat API URL.")
+    parser.add_argument("--api-url", default=None, help="Explicit chat API URL.")
     parser.add_argument("--base-url", default=os.getenv("UTOPIA_BASE_URL", "https://utopia.hpc4ai.unito.it/api"))
     parser.add_argument("--api-key", default=os.getenv("UTOPIA_API_KEY") or None)
-    parser.add_argument("--chat-model", default=os.getenv("UTOPIA_CHAT_MODEL", "SLURM.gpt-oss:120b"))
+    parser.add_argument("--api-mode", choices=["openai", "ollama"], default=os.getenv("UTOPIA_CHAT_API_MODE", "ollama"))
+    parser.add_argument("--chat-model", default=DEFAULT_CHAT_MODEL)
     parser.add_argument("--judge-model", default=os.getenv("UTOPIA_JUDGE_MODEL") or None)
     parser.add_argument("--timeout", type=int, default=120, help="HTTP timeout in seconds.")
     parser.add_argument("--start", type=int, default=0, help="Zero-based row offset.")
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
             api_url=args.api_url,
             api_key=args.api_key,
             base_url=args.base_url,
+            api_mode=args.api_mode,
             chat_model=args.chat_model,
             judge_model=args.judge_model,
             timeout_seconds=args.timeout,

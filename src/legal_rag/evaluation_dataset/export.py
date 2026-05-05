@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import EVALUATION_SCHEMA_VERSION, EvaluationDatasetConfig
+from .models import (
+    EVALUATION_SCHEMA_VERSION,
+    EvaluationDatasetConfig,
+    evaluation_dataset_manifest,
+    evaluation_dataset_profile,
+)
 from .parsing import (
     build_mcq_record,
     build_no_hint_record,
@@ -87,9 +92,12 @@ def _build_quality(
     mcq_records: list[dict[str, Any]],
     no_hint_records: list[dict[str, Any]],
     expected_records: int,
+    source_hashes: dict[str, str] | None = None,
     output_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compute quality gates and notebook-friendly diagnostics."""
+    source_hashes = source_hashes or {}
+    output_hashes = output_hashes or {}
     mcq_required = {
         "qid",
         "source_position",
@@ -133,7 +141,7 @@ def _build_quality(
         "stable_qids_aligned": [record["qid"] for record in mcq_records]
         == [record["linked_mcq_qid"] for record in no_hint_records],
         "level_distribution_reported": bool(level_distribution),
-        "source_hashes_recorded": bool(output_hashes),
+        "source_hashes_recorded": bool(source_hashes) and all(source_hashes.values()),
         "output_files_exist_and_hash": bool(output_hashes) and all(output_hashes.values()),
     }
     return {
@@ -195,24 +203,26 @@ def _build_profile(
 ) -> dict[str, Any]:
     """Build a compact notebook-friendly profile for the clean evaluation data."""
     reference_counts = Counter(ref for record in mcq_records for ref in record["expected_references"])
-    return {
-        "counts": quality["counts"],
-        "level_distribution": quality["level_distribution"],
-        "reference_count": len(reference_counts),
-        "sample_references": sorted(reference_counts)[:10],
-        "sample_mcq_records": mcq_records[:3],
-        "sample_no_hint_records": no_hint_records[:3],
-        "alignment_examples": [
-            {
-                "qid": mcq["qid"],
-                "mcq_stem": mcq["question_stem"],
-                "no_hint_question": no_hint["question"],
-                "correct_answer": mcq["correct_answer"],
-            }
-            for mcq, no_hint in list(zip(mcq_records, no_hint_records))[:3]
-        ],
-        "ready_for_evaluation": quality["ready_for_evaluation"],
-    }
+    return evaluation_dataset_profile(
+        {
+            "counts": quality["counts"],
+            "level_distribution": quality["level_distribution"],
+            "reference_count": len(reference_counts),
+            "sample_references": sorted(reference_counts)[:10],
+            "sample_mcq_records": mcq_records[:3],
+            "sample_no_hint_records": no_hint_records[:3],
+            "alignment_examples": [
+                {
+                    "qid": mcq["qid"],
+                    "mcq_stem": mcq["question_stem"],
+                    "no_hint_question": no_hint["question"],
+                    "correct_answer": mcq["correct_answer"],
+                }
+                for mcq, no_hint in list(zip(mcq_records, no_hint_records))[:3]
+            ],
+            "ready_for_evaluation": quality["ready_for_evaluation"],
+        }
+    )
 
 
 def run_evaluation_dataset(config: EvaluationDatasetConfig | None = None) -> dict[str, Any]:
@@ -275,7 +285,8 @@ def run_evaluation_dataset(config: EvaluationDatasetConfig | None = None) -> dic
             mcq_records=mcq_records,
             no_hint_records=no_hint_records,
             expected_records=cfg.expected_records,
-            output_hashes={**source_hashes, **output_hashes},
+            source_hashes=source_hashes,
+            output_hashes=output_hashes,
         )
         _write_quality_report(tmp_dir / output_files["quality_report"], quality)
         output_hashes["quality_report"] = sha256_file(tmp_dir / output_files["quality_report"])
@@ -288,31 +299,35 @@ def run_evaluation_dataset(config: EvaluationDatasetConfig | None = None) -> dic
             mcq_records=mcq_records,
             no_hint_records=no_hint_records,
             expected_records=cfg.expected_records,
-            output_hashes={**source_hashes, **output_hashes},
+            source_hashes=source_hashes,
+            output_hashes=output_hashes,
         )
-        manifest = {
-            "schema_version": EVALUATION_SCHEMA_VERSION,
-            "created_at": _now_utc(),
-            "mcq_source": str(mcq_source),
-            "no_hint_source": str(no_hint_source),
-            "output_dir": str(output_dir),
-            "config": cfg.model_dump(mode="json"),
-            "source_hashes": source_hashes,
-            "counts": quality["counts"],
-            "level_distribution": quality["level_distribution"],
-            "quality_gates": quality["quality_gates"],
-            "ready_for_evaluation": quality["ready_for_evaluation"],
-            "outputs": output_files,
-            "output_hashes": output_hashes,
-            "manifest_hash_note": "evaluation_manifest.json is excluded from output_hashes because a file cannot contain a stable hash of itself.",
-        }
+        manifest = evaluation_dataset_manifest(
+            {
+                "schema_version": EVALUATION_SCHEMA_VERSION,
+                "created_at": _now_utc(),
+                "mcq_source": str(mcq_source),
+                "no_hint_source": str(no_hint_source),
+                "output_dir": str(output_dir),
+                "config": cfg.model_dump(mode="json"),
+                "source_hashes": source_hashes,
+                "counts": quality["counts"],
+                "level_distribution": quality["level_distribution"],
+                "quality_gates": quality["quality_gates"],
+                "ready_for_evaluation": quality["ready_for_evaluation"],
+                "outputs": output_files,
+                "output_hashes": output_hashes,
+                "manifest_hash_note": "evaluation_manifest.json is excluded from output_hashes because a file cannot contain a stable hash of itself.",
+            }
+        )
         _write_json(tmp_dir / output_files["evaluation_manifest"], manifest)
         final_quality = _build_quality(
             source_counts=source_counts,
             mcq_records=mcq_records,
             no_hint_records=no_hint_records,
             expected_records=cfg.expected_records,
-            output_hashes={**source_hashes, **output_hashes},
+            source_hashes=source_hashes,
+            output_hashes=output_hashes,
         )
         if not final_quality["ready_for_evaluation"]:
             raise ValueError(f"Evaluation dataset quality gates failed: {final_quality['quality_gates']}")

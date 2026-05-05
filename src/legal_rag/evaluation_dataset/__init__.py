@@ -6,6 +6,8 @@ from .export import run_evaluation_dataset
 from .models import (
     EVALUATION_SCHEMA_VERSION,
     EXPECTED_OPTION_LABELS,
+    EvaluationDatasetManifest,
+    EvaluationDatasetProfile,
     EvaluationDatasetConfig,
     McqQuestionRecord,
     NoHintQuestionRecord,
@@ -21,6 +23,8 @@ from .parsing import (
 __all__ = [
     "EVALUATION_SCHEMA_VERSION",
     "EXPECTED_OPTION_LABELS",
+    "EvaluationDatasetManifest",
+    "EvaluationDatasetProfile",
     "EvaluationDatasetConfig",
     "McqQuestionRecord",
     "NoHintQuestionRecord",
