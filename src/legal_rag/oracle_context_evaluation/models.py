@@ -28,6 +28,7 @@ class OracleEvaluationConfig(BaseModel):
     api_url: str | None = None
     api_key: str | None = None
     base_url: str = "https://utopia.hpc4ai.unito.it/api"
+    api_mode: Literal["openai", "ollama"] = "ollama"
     chat_model: str = DEFAULT_CHAT_MODEL
     judge_model: str | None = None
     timeout_seconds: int = Field(default=120, gt=0)

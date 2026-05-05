@@ -1,0 +1,117 @@
+{
+  "config": {
+    "api_key_present": true,
+    "api_url": null,
+    "base_url": "https://utopia.hpc4ai.unito.it/api",
+    "benchmark_size": null,
+    "chat_model": "code",
+    "env_file": ".env",
+    "evaluation_dir": "/Users/paolo.bonicco/Library/Mobile Documents/com~apple~CloudDocs/Università/Tesi/agentic-legal-rag-suite/data/evaluation_clean",
+    "judge_model": "code",
+    "max_concurrency": 4,
+    "output_dir": "/Users/paolo.bonicco/Library/Mobile Documents/com~apple~CloudDocs/Università/Tesi/agentic-legal-rag-suite/data/baseline_runs/no_rag_smoke",
+    "prompt_version": "no-rag-prompts-v1",
+    "random_seed": null,
+    "retry_attempts": 1,
+    "smoke": true,
+    "start": 0,
+    "timeout_seconds": 120
+  },
+  "connection": {
+    "api_key_present": true,
+    "api_url": "https://utopia.hpc4ai.unito.it/ollama/api/chat",
+    "base_url": "https://utopia.hpc4ai.unito.it/api",
+    "client": "utopia",
+    "env_file": ".env",
+    "env_file_loaded": false,
+    "env_keys_loaded": []
+  },
+  "counts": {
+    "mcq": 1,
+    "mcq_errors": 0,
+    "no_hint": 1,
+    "no_hint_errors": 0
+  },
+  "created_at": "2026-05-05T10:00:43Z",
+  "manifest_hash_note": "no_rag_manifest.json is excluded from output_hashes because a file cannot contain a stable hash of itself.",
+  "models": {
+    "answer_model": "code",
+    "judge_model": "code"
+  },
+  "output_hashes": {
+    "mcq_results": "f1e7cabe5e16331a55b08a4af3c46b8bfc6fd3ca177ab8ebee4e19e3b511880f",
+    "no_hint_results": "216a5446899291699b5541b2d8a9e1b9f8bbd509b0d179ac3c67437360c7aa23",
+    "no_rag_summary": "50fa60cc5c6588e6335a88f35d0bd1275e4607cf34416a8e9bce205cefaf5257",
+    "quality_report": "45a2085399e890de2255abc677a866877f74fdcf3475176511527611ed02d5dc"
+  },
+  "outputs": {
+    "mcq_results": "mcq_results.jsonl",
+    "no_hint_results": "no_hint_results.jsonl",
+    "no_rag_manifest": "no_rag_manifest.json",
+    "no_rag_summary": "no_rag_summary.json",
+    "quality_report": "quality_report.md"
+  },
+  "prompt_version": "no-rag-prompts-v1",
+  "random_seed": null,
+  "schema_version": "no-rag-baseline-v1",
+  "source_hashes": {
+    "evaluation_manifest": "705814775e91e48a4a33d8aaa7d2416747ce2ff96eebd70b190155aa88cdfe30",
+    "questions_mcq": "b9ad8147899cc2ca35f8a6b891f770b388af8d1806f0e105f6bab281eb91e019",
+    "questions_no_hint": "e319f0d06e2dd7a0dbab5f913acb943e4e08977d0982d1be9ee5f608aedf88b0"
+  },
+  "summary": {
+    "mcq": {
+      "accuracy": 1.0,
+      "by_level": {
+        "L1": {
+          "accuracy": 1.0,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 1,
+          "max_score_sum": 1,
+          "mean_score": 1.0,
+          "processed": 1,
+          "score_sum": 1,
+          "strict_accuracy": 1.0
+        }
+      },
+      "coverage": 1.0,
+      "dataset": "mcq",
+      "errors": 0,
+      "judged": 1,
+      "max_score_sum": 1,
+      "mean_score": 1.0,
+      "processed": 1,
+      "score_sum": 1,
+      "strict_accuracy": 1.0
+    },
+    "no_hint": {
+      "accuracy": 0.5,
+      "by_level": {
+        "L1": {
+          "accuracy": 0.5,
+          "coverage": 1.0,
+          "errors": 0,
+          "judged": 1,
+          "max_score_sum": 2,
+          "mean_score": 1.0,
+          "processed": 1,
+          "score_sum": 1,
+          "strict_accuracy": 0.5
+        }
+      },
+      "coverage": 1.0,
+      "dataset": "no_hint",
+      "errors": 0,
+      "judged": 1,
+      "max_score_sum": 2,
+      "mean_score": 1.0,
+      "processed": 1,
+      "score_sum": 1,
+      "strict_accuracy": 0.5
+    }
+  },
+  "upstream_manifests": {
+    "evaluation_schema_version": "evaluation-dataset-v1"
+  }
+}

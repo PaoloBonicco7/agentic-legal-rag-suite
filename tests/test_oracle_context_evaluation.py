@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +17,16 @@ from legal_rag.oracle_context_evaluation import (
     score_mcq_label,
     split_reference_values,
 )
+from legal_rag.oracle_context_evaluation.llm import (
+    discover_utopia_api_models,
+    parse_openai_structured_content,
+    resolve_openai_chat_completions_url,
+)
 from legal_rag.oracle_context_evaluation.runner import resolve_utopia_runtime
 from legal_rag.oracle_context_evaluation.runner import resolve_answer_model, resolve_judge_model
+from legal_rag.oracle_context_evaluation.runner import run_mcq
 from legal_rag.oracle_context_evaluation.io import write_json, write_jsonl
+from legal_rag.oracle_context_evaluation.models import DEFAULT_CHAT_MODEL, OracleContextRecord
 from legal_rag.oracle_context_evaluation.scoring import aggregate_results
 
 
@@ -38,6 +47,31 @@ class FakeStructuredClient:
         if "score" in properties:
             return {"structured": {"score": 2, "explanation": "Correct fake answer."}}
         raise AssertionError(f"Unexpected schema: {payload_schema}")
+
+
+class ObservedSlowClient:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+
+    def structured_chat(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        payload_schema: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            time.sleep(0.02)
+            return {"structured": {"answer_label": "A", "short_rationale": "fake"}}
+        finally:
+            with self._lock:
+                self._active -= 1
 
 
 def _make_clean_inputs(tmp_path: Path) -> tuple[Path, Path]:
@@ -142,6 +176,53 @@ def test_score_mcq_label() -> None:
     assert error and "invalid_mcq_label" in error
 
 
+def test_parse_openai_structured_content() -> None:
+    parsed = parse_openai_structured_content(
+        {"choices": [{"message": {"content": json.dumps({"answer_label": "A"})}}]}
+    )
+    assert parsed == {"answer_label": "A"}
+
+
+def test_resolve_openai_chat_completions_url() -> None:
+    assert (
+        resolve_openai_chat_completions_url("https://utopia.example/api")
+        == "https://utopia.example/api/chat/completions"
+    )
+
+
+def test_discover_utopia_api_models_includes_base_model_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        @property
+        def ok(self) -> bool:
+            return True
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "data": [
+                    {
+                        "id": "chat",
+                        "info": {"base_model_id": "SLURM.gpt-oss:120b"},
+                        "tags": [{"name": "CHAT"}],
+                    }
+                ]
+            }
+
+    def fake_get(*args: Any, **kwargs: Any) -> FakeResponse:
+        return FakeResponse()
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    catalog = discover_utopia_api_models(base_url="https://utopia.example/api", api_key="secret")
+
+    assert catalog["models"] == ["chat"]
+    assert catalog["base_models"] == ["SLURM.gpt-oss:120b"]
+    assert catalog["all_models"] == ["SLURM.gpt-oss:120b", "chat"]
+
+
 def test_judge_output_accepts_only_zero_to_two_with_explanation() -> None:
     assert JudgeOutput.model_validate({"score": 0, "explanation": "Wrong."}).score == 0
     assert JudgeOutput.model_validate({"score": 1, "explanation": "Partial."}).score == 1
@@ -155,6 +236,7 @@ def test_judge_output_accepts_only_zero_to_two_with_explanation() -> None:
 def test_run_oracle_context_evaluation_with_fake_client(tmp_path: Path) -> None:
     evaluation_dir, laws_dir = _make_clean_inputs(tmp_path)
     output_dir = tmp_path / "oracle_context"
+    progress_events: list[dict[str, Any]] = []
 
     manifest = run_oracle_context_evaluation(
         OracleEvaluationConfig(
@@ -165,6 +247,7 @@ def test_run_oracle_context_evaluation_with_fake_client(tmp_path: Path) -> None:
             judge_model="fake-judge",
         ),
         client=FakeStructuredClient(),
+        progress_callback=progress_events.append,
     )
 
     assert manifest["counts"]["context_errors"] == 0
@@ -186,6 +269,52 @@ def test_run_oracle_context_evaluation_with_fake_client(tmp_path: Path) -> None:
     assert summary["mcq_no_context"]["score_sum"] == 1
     assert summary["no_hint_no_context"]["score_sum"] == 4
     assert summary["delta_oracle_minus_no_context"]["mcq"]["accuracy"] == 0
+    assert [event["run"] for event in progress_events if event["event"] == "run_started"] == [
+        "mcq_no_context",
+        "mcq_oracle_context",
+        "no_hint_no_context",
+        "no_hint_oracle_context",
+    ]
+    assert sum(1 for event in progress_events if event["event"] == "row_finished") == 8
+
+
+def test_mcq_calls_are_parallelized_but_output_order_is_stable() -> None:
+    records = [
+        {
+            "qid": f"eval-{idx:04d}",
+            "level": "L1",
+            "question_stem": f"Domanda {idx}?",
+            "options": {"A": "Corretta", "B": "Errata", "C": "Errata", "D": "Errata", "E": "Errata", "F": "Errata"},
+            "correct_label": "A",
+        }
+        for idx in range(1, 5)
+    ]
+    contexts = {
+        record["qid"]: OracleContextRecord(
+            qid=record["qid"],
+            level="L1",
+            expected_references=[],
+            resolved_references=[],
+            context_article_ids=[],
+            context_text="",
+            context_hash=None,
+            error=None,
+        )
+        for record in records
+    }
+    client = ObservedSlowClient()
+
+    rows = run_mcq(
+        records=records,
+        contexts_by_qid=contexts,
+        client=client,
+        config=OracleEvaluationConfig(chat_model="fake", max_concurrency=4),
+        use_context=False,
+    )
+
+    assert client.max_active > 1
+    assert [row["qid"] for row in rows] == [record["qid"] for record in records]
+    assert all(row["score"] == 1 for row in rows)
 
 
 def test_resolve_utopia_runtime_loads_env_file_without_leaking_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,6 +334,7 @@ def test_resolve_utopia_runtime_loads_env_file_without_leaking_key(tmp_path: Pat
 
     runtime = resolve_utopia_runtime(OracleEvaluationConfig(env_file=str(env_file)))
 
+    assert runtime["api_mode"] == "ollama"
     assert runtime["api_url"] == "https://utopia.example/ollama/api/chat"
     assert runtime["api_key"] == "test-secret"
     assert runtime["api_key_present"] is True
@@ -230,6 +360,19 @@ def test_resolve_utopia_runtime_falls_back_to_legacy_old_env(tmp_path: Path, mon
     assert runtime["env_file"].endswith("OLD/.env")
 
 
+def test_resolve_utopia_runtime_can_use_ollama_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("UTOPIA_API_KEY", raising=False)
+    monkeypatch.delenv("UTOPIA_BASE_URL", raising=False)
+    monkeypatch.delenv("UTOPIA_CHAT_API_MODE", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("UTOPIA_API_KEY=test-secret\nUTOPIA_BASE_URL=https://utopia.example/api\n", encoding="utf-8")
+
+    runtime = resolve_utopia_runtime(OracleEvaluationConfig(env_file=str(env_file), api_mode="ollama"))
+
+    assert runtime["api_mode"] == "ollama"
+    assert runtime["api_url"] == "https://utopia.example/ollama/api/chat"
+
+
 def test_model_resolution_uses_env_after_env_file_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("UTOPIA_CHAT_MODEL", raising=False)
     monkeypatch.delenv("UTOPIA_JUDGE_MODEL", raising=False)
@@ -245,6 +388,39 @@ def test_model_resolution_uses_env_after_env_file_load(tmp_path: Path, monkeypat
 
     assert answer_model == "server-answer"
     assert resolve_judge_model(config, answer_model) == "server-judge"
+
+
+def test_default_model_is_gpt_oss_120b() -> None:
+    assert DEFAULT_CHAT_MODEL == "SLURM.gpt-oss:120b"
+    assert OracleEvaluationConfig().chat_model == "SLURM.gpt-oss:120b"
+
+
+def test_model_resolution_keeps_slurm_model_in_openai_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UTOPIA_CHAT_API_MODE", "openai")
+    monkeypatch.setenv("UTOPIA_CHAT_MODEL", "SLURM.gpt-oss:120b")
+    monkeypatch.delenv("UTOPIA_JUDGE_MODEL", raising=False)
+
+    answer_model = resolve_answer_model(OracleEvaluationConfig())
+
+    assert answer_model == "SLURM.gpt-oss:120b"
+    assert resolve_judge_model(OracleEvaluationConfig(), answer_model) == "SLURM.gpt-oss:120b"
+
+
+def test_ollama_mode_uses_env_slurm_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UTOPIA_CHAT_API_MODE", "ollama")
+    monkeypatch.setenv("UTOPIA_CHAT_MODEL", "SLURM.gpt-oss:20b")
+
+    assert resolve_answer_model(OracleEvaluationConfig(api_mode="ollama")) == "SLURM.gpt-oss:20b"
+
+
+def test_ollama_mode_keeps_explicit_slurm_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UTOPIA_CHAT_API_MODE", "ollama")
+    monkeypatch.delenv("UTOPIA_CHAT_MODEL", raising=False)
+
+    assert (
+        resolve_answer_model(OracleEvaluationConfig(api_mode="ollama", chat_model="SLURM.gpt-oss:120b"))
+        == "SLURM.gpt-oss:120b"
+    )
 
 
 def test_aggregate_results_reports_coverage_strict_accuracy_and_levels() -> None:

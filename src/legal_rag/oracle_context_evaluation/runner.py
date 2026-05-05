@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -23,7 +23,13 @@ from .io import (
     write_json,
     write_jsonl,
 )
-from .llm import StructuredChatClient, UtopiaStructuredChatClient, resolve_ollama_chat_url
+from .llm import (
+    StructuredChatClient,
+    UtopiaOpenAIChatClient,
+    UtopiaStructuredChatClient,
+    resolve_ollama_chat_url,
+    resolve_openai_chat_completions_url,
+)
 from .models import (
     DEFAULT_CHAT_MODEL,
     ORACLE_CONTEXT_SCHEMA_VERSION,
@@ -41,6 +47,7 @@ from .scoring import add_delta, aggregate_results, score_mcq_label
 
 T = TypeVar("T")
 U = TypeVar("U")
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 def load_inputs(config: OracleEvaluationConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
@@ -90,10 +97,18 @@ def resolve_utopia_runtime(config: OracleEvaluationConfig) -> dict[str, Any]:
     api_key = config.api_key or os.getenv("UTOPIA_API_KEY", "")
     if not api_key:
         raise RuntimeError("UTOPIA_API_KEY is missing for oracle-context evaluation")
-    explicit_url = config.api_url or os.getenv("UTOPIA_OLLAMA_CHAT_URL", "")
+    api_mode = os.getenv("UTOPIA_CHAT_API_MODE", config.api_mode).strip().lower()
+    if api_mode not in {"openai", "ollama"}:
+        raise ValueError(f"Unsupported UTOPIA_CHAT_API_MODE={api_mode!r}; expected 'openai' or 'ollama'")
     base_url = os.getenv("UTOPIA_BASE_URL", config.base_url)
-    api_url = resolve_ollama_chat_url(base_url, explicit_url=explicit_url)
+    if api_mode == "openai":
+        explicit_url = config.api_url or os.getenv("UTOPIA_CHAT_COMPLETIONS_URL", "")
+        api_url = resolve_openai_chat_completions_url(base_url, explicit_url=explicit_url)
+    else:
+        explicit_url = config.api_url or os.getenv("UTOPIA_OLLAMA_CHAT_URL", "")
+        api_url = resolve_ollama_chat_url(base_url, explicit_url=explicit_url)
     return {
+        "api_mode": api_mode,
         "api_url": api_url,
         "base_url": base_url,
         "api_key": api_key,
@@ -104,9 +119,15 @@ def resolve_utopia_runtime(config: OracleEvaluationConfig) -> dict[str, Any]:
     }
 
 
-def create_default_client(config: OracleEvaluationConfig) -> UtopiaStructuredChatClient:
+def create_default_client(config: OracleEvaluationConfig) -> StructuredChatClient:
     """Create the default remote client from config and environment."""
     runtime = resolve_utopia_runtime(config)
+    if runtime["api_mode"] == "openai":
+        return UtopiaOpenAIChatClient(
+            api_url=runtime["api_url"],
+            api_key=runtime["api_key"],
+            retry_attempts=config.retry_attempts,
+        )
     return UtopiaStructuredChatClient(
         api_url=runtime["api_url"],
         api_key=runtime["api_key"],
@@ -117,24 +138,53 @@ def create_default_client(config: OracleEvaluationConfig) -> UtopiaStructuredCha
 def resolve_answer_model(config: OracleEvaluationConfig) -> str:
     """Resolve the answer model after .env loading."""
     if config.chat_model and config.chat_model != DEFAULT_CHAT_MODEL:
-        return config.chat_model
-    return os.getenv("UTOPIA_CHAT_MODEL", config.chat_model)
+        return str(config.chat_model).strip()
+    env_model = os.getenv("UTOPIA_CHAT_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return config.chat_model
 
 
 def resolve_judge_model(config: OracleEvaluationConfig, answer_model: str) -> str:
     """Resolve the judge model after .env loading."""
     if config.judge_model:
-        return config.judge_model
-    return os.getenv("UTOPIA_JUDGE_MODEL", answer_model)
+        return str(config.judge_model).strip()
+    env_model = os.getenv("UTOPIA_JUDGE_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return answer_model
 
 
-def _parallel_map_ordered(items: list[T], func: Callable[[T], U], *, max_workers: int) -> list[U]:
+def _parallel_map_ordered(
+    items: list[T],
+    func: Callable[[T], U],
+    *,
+    max_workers: int,
+    on_done: Callable[[U, int, int], None] | None = None,
+) -> list[U]:
     """Run independent tasks in parallel while preserving input order."""
     if max_workers <= 1 or len(items) <= 1:
-        return [func(item) for item in items]
+        out: list[U] = []
+        total = len(items)
+        for item in items:
+            result = func(item)
+            out.append(result)
+            if on_done:
+                on_done(result, len(out), total)
+        return out
     workers = min(max_workers, len(items))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        return list(executor.map(func, items))
+        futures = {executor.submit(func, item): index for index, item in enumerate(items)}
+        results: list[U | None] = [None] * len(items)
+        completed = 0
+        total = len(items)
+        for future in as_completed(futures):
+            result = future.result()
+            results[futures[future]] = result
+            completed += 1
+            if on_done:
+                on_done(result, completed, total)
+    return [result for result in results if result is not None]
 
 
 def run_mcq(
@@ -144,6 +194,8 @@ def run_mcq(
     client: StructuredChatClient,
     config: OracleEvaluationConfig,
     use_context: bool,
+    run_name: str = "mcq",
+    progress_callback: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
     """Run one MCQ condition and return row-level results."""
     def run_one(record: dict[str, Any]) -> dict[str, Any]:
@@ -179,7 +231,25 @@ def run_mcq(
             error=error,
         ).to_json_record()
 
-    return _parallel_map_ordered(records, run_one, max_workers=config.max_concurrency)
+    return _parallel_map_ordered(
+        records,
+        run_one,
+        max_workers=config.max_concurrency,
+        on_done=(
+            lambda row, completed, total: progress_callback(
+                {
+                    "event": "row_finished",
+                    "run": run_name,
+                    "completed": completed,
+                    "total": total,
+                    "qid": row.get("qid"),
+                    "error": row.get("error"),
+                }
+            )
+            if progress_callback
+            else None
+        ),
+    )
 
 
 def run_no_hint(
@@ -189,6 +259,8 @@ def run_no_hint(
     client: StructuredChatClient,
     config: OracleEvaluationConfig,
     use_context: bool,
+    run_name: str = "no_hint",
+    progress_callback: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
     """Run one no-hint condition and judge each answer on a 0-2 scale."""
     def run_one(record: dict[str, Any]) -> dict[str, Any]:
@@ -239,7 +311,25 @@ def run_no_hint(
             error=error,
         ).to_json_record()
 
-    return _parallel_map_ordered(records, run_one, max_workers=config.max_concurrency)
+    return _parallel_map_ordered(
+        records,
+        run_one,
+        max_workers=config.max_concurrency,
+        on_done=(
+            lambda row, completed, total: progress_callback(
+                {
+                    "event": "row_finished",
+                    "run": run_name,
+                    "completed": completed,
+                    "total": total,
+                    "qid": row.get("qid"),
+                    "error": row.get("error"),
+                }
+            )
+            if progress_callback
+            else None
+        ),
+    )
 
 
 def build_summary(
@@ -313,6 +403,7 @@ def run_oracle_context_evaluation(
     config: OracleEvaluationConfig | None = None,
     *,
     client: StructuredChatClient | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Run the complete controlled oracle-context evaluation pipeline."""
     cfg = config or OracleEvaluationConfig()
@@ -321,11 +412,18 @@ def run_oracle_context_evaluation(
     runtime_connection: dict[str, Any] | None = None
     if client is None:
         runtime_connection = resolve_utopia_runtime(cfg)
-        remote_client = UtopiaStructuredChatClient(
-            api_url=runtime_connection["api_url"],
-            api_key=runtime_connection["api_key"],
-            retry_attempts=cfg.retry_attempts,
-        )
+        if runtime_connection["api_mode"] == "openai":
+            remote_client = UtopiaOpenAIChatClient(
+                api_url=runtime_connection["api_url"],
+                api_key=runtime_connection["api_key"],
+                retry_attempts=cfg.retry_attempts,
+            )
+        else:
+            remote_client = UtopiaStructuredChatClient(
+                api_url=runtime_connection["api_url"],
+                api_key=runtime_connection["api_key"],
+                retry_attempts=cfg.retry_attempts,
+            )
     else:
         remote_client = client
     answer_model = resolve_answer_model(cfg)
@@ -338,38 +436,69 @@ def run_oracle_context_evaluation(
     validate_mcq_no_hint_alignment(mcq_records, no_hint_records)
     contexts = build_oracle_contexts(no_hint_records, effective_cfg.laws_dir)
     contexts_by_qid = {ctx.qid: ctx for ctx in contexts}
+    if progress_callback:
+        progress_callback(
+            {
+                "event": "setup_finished",
+                "mcq": len(mcq_records),
+                "no_hint": len(no_hint_records),
+                "context_rows": len(contexts),
+                "context_errors": sum(1 for ctx in contexts if ctx.error),
+            }
+        )
 
     output_dir = Path(cfg.output_dir)
     tmp_dir = prepare_tmp_output_dir(output_dir)
     try:
+        if progress_callback:
+            progress_callback({"event": "run_started", "run": "mcq_no_context", "total": len(mcq_records)})
         mcq_no_context = run_mcq(
             records=mcq_records,
             contexts_by_qid=contexts_by_qid,
             client=remote_client,
             config=effective_cfg,
             use_context=False,
+            run_name="mcq_no_context",
+            progress_callback=progress_callback,
         )
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "mcq_no_context", "total": len(mcq_records)})
+            progress_callback({"event": "run_started", "run": "mcq_oracle_context", "total": len(mcq_records)})
         mcq_oracle_context = run_mcq(
             records=mcq_records,
             contexts_by_qid=contexts_by_qid,
             client=remote_client,
             config=effective_cfg,
             use_context=True,
+            run_name="mcq_oracle_context",
+            progress_callback=progress_callback,
         )
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "mcq_oracle_context", "total": len(mcq_records)})
+            progress_callback({"event": "run_started", "run": "no_hint_no_context", "total": len(no_hint_records)})
         no_hint_no_context = run_no_hint(
             records=no_hint_records,
             contexts_by_qid=contexts_by_qid,
             client=remote_client,
             config=effective_cfg,
             use_context=False,
+            run_name="no_hint_no_context",
+            progress_callback=progress_callback,
         )
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "no_hint_no_context", "total": len(no_hint_records)})
+            progress_callback({"event": "run_started", "run": "no_hint_oracle_context", "total": len(no_hint_records)})
         no_hint_oracle_context = run_no_hint(
             records=no_hint_records,
             contexts_by_qid=contexts_by_qid,
             client=remote_client,
             config=effective_cfg,
             use_context=True,
+            run_name="no_hint_oracle_context",
+            progress_callback=progress_callback,
         )
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "no_hint_oracle_context", "total": len(no_hint_records)})
         summary = build_summary(
             mcq_no_context=mcq_no_context,
             mcq_oracle_context=mcq_oracle_context,

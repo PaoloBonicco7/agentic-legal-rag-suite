@@ -1,0 +1,118 @@
+{
+  "mcq": {
+    "accuracy": 0.81,
+    "by_level": {
+      "L1": {
+        "accuracy": 0.8,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 25,
+        "mean_score": 0.8,
+        "processed": 25,
+        "score_sum": 20,
+        "strict_accuracy": 0.8
+      },
+      "L2": {
+        "accuracy": 0.84,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 25,
+        "mean_score": 0.84,
+        "processed": 25,
+        "score_sum": 21,
+        "strict_accuracy": 0.84
+      },
+      "L3": {
+        "accuracy": 0.76,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 25,
+        "mean_score": 0.76,
+        "processed": 25,
+        "score_sum": 19,
+        "strict_accuracy": 0.76
+      },
+      "L4": {
+        "accuracy": 0.84,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 25,
+        "mean_score": 0.84,
+        "processed": 25,
+        "score_sum": 21,
+        "strict_accuracy": 0.84
+      }
+    },
+    "coverage": 1.0,
+    "dataset": "mcq",
+    "errors": 0,
+    "judged": 100,
+    "max_score_sum": 100,
+    "mean_score": 0.81,
+    "processed": 100,
+    "score_sum": 81,
+    "strict_accuracy": 0.81
+  },
+  "no_hint": {
+    "accuracy": 0.485,
+    "by_level": {
+      "L1": {
+        "accuracy": 0.34,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 50,
+        "mean_score": 0.68,
+        "processed": 25,
+        "score_sum": 17,
+        "strict_accuracy": 0.34
+      },
+      "L2": {
+        "accuracy": 0.54,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 50,
+        "mean_score": 1.08,
+        "processed": 25,
+        "score_sum": 27,
+        "strict_accuracy": 0.54
+      },
+      "L3": {
+        "accuracy": 0.46,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 50,
+        "mean_score": 0.92,
+        "processed": 25,
+        "score_sum": 23,
+        "strict_accuracy": 0.46
+      },
+      "L4": {
+        "accuracy": 0.6,
+        "coverage": 1.0,
+        "errors": 0,
+        "judged": 25,
+        "max_score_sum": 50,
+        "mean_score": 1.2,
+        "processed": 25,
+        "score_sum": 30,
+        "strict_accuracy": 0.6
+      }
+    },
+    "coverage": 1.0,
+    "dataset": "no_hint",
+    "errors": 0,
+    "judged": 100,
+    "max_score_sum": 200,
+    "mean_score": 0.97,
+    "processed": 100,
+    "score_sum": 97,
+    "strict_accuracy": 0.485
+  }
+}
