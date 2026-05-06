@@ -123,6 +123,7 @@ class InteractiveRagRuntime:
         context_text = ""
         answer_text: str | None = None
         answer_rationale: str | None = None
+        context_sufficient: str | None = None
         citations: list[Citation] = []
         invalid_citations: list[str] = []
         timing = InteractiveStepTiming()
@@ -142,9 +143,13 @@ class InteractiveRagRuntime:
                     collection_name=self.collection_name,
                     graph=self.graph,
                     seeds=retrieved[: cfg.graph_expansion_seed_k],
+                    embedder=self.embedder,
+                    query_text=text,
                     relation_types=cfg.graph_expansion_relation_types,
                     static_filters=cfg.active_static_filters,
                     max_chunks_per_law=cfg.max_chunks_per_expanded_law,
+                    max_chunks_total=cfg.max_expanded_chunks_total,
+                    min_edge_confidence=cfg.min_edge_confidence,
                 )
             timing.graph_expansion_seconds = perf_counter() - step_started
 
@@ -187,6 +192,7 @@ class InteractiveRagRuntime:
                 answer = AdvancedNoHintAnswerOutput.model_validate(answer_call["structured"])
                 answer_text = answer.answer_text
                 answer_rationale = answer.short_rationale
+                context_sufficient = answer.context_sufficient
                 citations, invalid_citations = _build_citations(answer.citation_chunk_ids, context_chunks)
                 if invalid_citations:
                     error = _join_error(error, f"citation_error: invalid_chunk_ids={invalid_citations}")
@@ -205,6 +211,7 @@ class InteractiveRagRuntime:
             timing=timing,
             answer=answer_text,
             answer_rationale=answer_rationale,
+            context_sufficient=context_sufficient,
             citations=citations,
             invalid_citation_chunk_ids=invalid_citations,
             retrieved=retrieved,
@@ -288,6 +295,7 @@ class InteractiveRagRuntime:
         timing: InteractiveStepTiming,
         answer: str | None = None,
         answer_rationale: str | None = None,
+        context_sufficient: str | None = None,
         citations: list[Citation] | None = None,
         invalid_citation_chunk_ids: list[str] | None = None,
         retrieved: list[RetrievedChunkRecord] | None = None,
@@ -305,6 +313,7 @@ class InteractiveRagRuntime:
             question=question,
             answer=answer,
             answer_rationale=answer_rationale,
+            context_sufficient=context_sufficient,
             citations=citations or [],
             invalid_citation_chunk_ids=invalid_citation_chunk_ids or [],
             retrieved=retrieved or [],
@@ -332,6 +341,8 @@ class InteractiveRagRuntime:
                 "rrf_k": config.rrf_k,
                 "graph_expansion_seed_k": config.graph_expansion_seed_k,
                 "max_chunks_per_expanded_law": config.max_chunks_per_expanded_law,
+                "max_expanded_chunks_total": config.max_expanded_chunks_total,
+                "min_edge_confidence": config.min_edge_confidence,
                 "rerank_input_k": config.rerank_input_k,
                 "rerank_output_k": config.rerank_output_k,
                 "max_context_chars": config.max_context_chars,

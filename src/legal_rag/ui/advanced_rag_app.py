@@ -114,6 +114,8 @@ def _render_result(result: InteractiveRagResult) -> None:
     with st.chat_message("assistant"):
         if result.answer:
             st.markdown(result.answer)
+            if result.context_sufficient:
+                st.caption(f"context_sufficient={result.context_sufficient}")
         elif result.error:
             st.error(result.error)
         else:
@@ -235,8 +237,10 @@ def main() -> None:
         graph_expansion_enabled = st.toggle("Graph expansion", value=True)
         rerank_enabled = st.toggle("LLM rerank", value=True)
         top_k = st.slider("Top-k", min_value=1, max_value=30, value=10)
-        graph_seed_k = st.slider("Graph seed k", min_value=1, max_value=20, value=5)
+        graph_seed_k = st.slider("Graph seed k", min_value=1, max_value=20, value=3)
         max_chunks_per_law = st.slider("Max chunk per legge espansa", min_value=1, max_value=10, value=2)
+        max_expanded_chunks_total = st.slider("Max chunk espansi totali", min_value=1, max_value=50, value=15)
+        min_edge_confidence = st.slider("Min edge confidence", min_value=0.0, max_value=1.0, value=0.45, step=0.05)
         rerank_input_k = st.slider("Rerank input k", min_value=1, max_value=50, value=20)
         rerank_output_k = st.slider("Context chunk cap", min_value=1, max_value=15, value=5)
         max_context_chars = st.slider("Max context chars", min_value=1000, max_value=32000, value=16000, step=1000)
@@ -268,6 +272,8 @@ def main() -> None:
             "top_k": int(top_k),
             "graph_expansion_seed_k": int(graph_seed_k),
             "max_chunks_per_expanded_law": int(max_chunks_per_law),
+            "max_expanded_chunks_total": int(max_expanded_chunks_total),
+            "min_edge_confidence": float(min_edge_confidence),
             "rerank_input_k": int(rerank_input_k),
             "rerank_output_k": int(rerank_output_k),
             "max_context_chars": int(max_context_chars),

@@ -43,6 +43,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--smoke", action="store_true", help="Run only one row for connectivity checks.")
     parser.add_argument("--retry-attempts", type=int, default=1, help="Remote call attempts per model call.")
     parser.add_argument("--max-concurrency", type=int, default=4, help="Maximum parallel calls per run condition.")
+    parser.add_argument("--sequential-datasets", action="store_true", help="Run MCQ before no-hint instead of running both datasets in parallel.")
     parser.add_argument("--no-metadata-filters", action="store_true", help="Disable static metadata filters.")
     parser.add_argument("--no-hybrid", action="store_true", help="Use dense-only retrieval.")
     parser.add_argument("--no-graph-expansion", action="store_true", help="Disable explicit graph expansion.")
@@ -50,9 +51,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--static-filters", default='{"law_status":"current"}', help="Static Qdrant filters as JSON.")
     parser.add_argument("--top-k", type=int, default=10, help="Top-k candidates per retrieval mode.")
     parser.add_argument("--rrf-k", type=int, default=60, help="Qdrant RRF k parameter.")
-    parser.add_argument("--graph-expansion-seed-k", type=int, default=5)
+    parser.add_argument("--graph-expansion-seed-k", type=int, default=3)
     parser.add_argument("--graph-expansion-relation-types", default=None, help="Comma-separated relation types.")
     parser.add_argument("--max-chunks-per-expanded-law", type=int, default=2)
+    parser.add_argument("--max-expanded-chunks-total", type=int, default=15)
+    parser.add_argument("--min-edge-confidence", type=float, default=0.45)
     parser.add_argument("--rerank-input-k", type=int, default=20)
     parser.add_argument("--rerank-output-k", type=int, default=5)
     parser.add_argument("--max-context-chars", type=int, default=16000)
@@ -82,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         "smoke": args.smoke,
         "retry_attempts": args.retry_attempts,
         "max_concurrency": args.max_concurrency,
+        "parallel_datasets_enabled": not args.sequential_datasets,
         "metadata_filters_enabled": not args.no_metadata_filters,
         "hybrid_enabled": not args.no_hybrid,
         "graph_expansion_enabled": not args.no_graph_expansion,
@@ -91,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         "rrf_k": args.rrf_k,
         "graph_expansion_seed_k": args.graph_expansion_seed_k,
         "max_chunks_per_expanded_law": args.max_chunks_per_expanded_law,
+        "max_expanded_chunks_total": args.max_expanded_chunks_total,
+        "min_edge_confidence": args.min_edge_confidence,
         "rerank_input_k": args.rerank_input_k,
         "rerank_output_k": args.rerank_output_k,
         "max_context_chars": args.max_context_chars,
