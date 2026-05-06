@@ -14,8 +14,9 @@ This step proves whether metadata filters, hybrid retrieval, explicit graph expa
 - Simple RAG run output from step 05 for direct comparison.
 - Advanced RAG configuration (`AdvancedRagConfig` Pydantic model):
   - paths and `chat_model` / `judge_model` consistent with step 05;
-  - `prompt_version: str` (default `advanced-rag-prompts-v1`);
+  - `prompt_version: str` (default `advanced-rag-prompts-v2`);
   - `run_name: str` (default `default`): used to disambiguate ablation runs in the output directory.
+  - `parallel_datasets_enabled: bool` (default `True`): run MCQ and no-hint datasets concurrently; each dataset still preserves row order and uses `max_concurrency` internally.
   - **Feature flags** (each independently switchable for ablation):
     - `metadata_filters_enabled: bool` (default `True`).
     - `hybrid_enabled: bool` (default `True`).
@@ -26,9 +27,11 @@ This step proves whether metadata filters, hybrid retrieval, explicit graph expa
     - `top_k: int` (default `10`): top-k from each vector type before fusion.
     - `rrf_k: int` (default `60`): Reciprocal Rank Fusion constant used by Qdrant `Query API`.
   - **Graph expansion parameters**:
-    - `graph_expansion_seed_k: int` (default `5`): how many of the top retrieved chunks seed the expansion.
-    - `graph_expansion_relation_types: list[str]` (default: all 8 from step 01 — `REFERENCES`, `ABROGATED_BY`, `ABROGATES`, `MODIFIED_BY`, `AMENDS`, `REPLACED_BY`, `REPLACES`, `INSERTED_BY`, `INSERTS`).
+    - `graph_expansion_seed_k: int` (default `3`): how many of the top retrieved chunks seed the expansion.
+    - `graph_expansion_relation_types: list[str]` (default: current-relevant relations — `REFERENCES`, `AMENDS`, `INSERTS`, `MODIFIED_BY`, `INSERTED_BY`).
     - `max_chunks_per_expanded_law: int` (default `2`): cap on chunks added per law reached via expansion.
+    - `max_expanded_chunks_total: int` (default `15`): global cap on chunks added by graph expansion for one question.
+    - `min_edge_confidence: float` (default `0.45`): minimum edge confidence used during expansion; the default preserves low-confidence `REFERENCES` edges for ablation compatibility.
     - `graph_expansion_hops: int` (default `1`): kept as `1` for the PoC; multi-hop is out of scope.
   - **Rerank parameters**:
     - `rerank_input_k: int` (default `20`): number of candidates passed to the reranker.
@@ -61,7 +64,9 @@ Default generated output directory: `data/rag_runs/advanced/<run_name>/`.
 5. Expand candidates via explicit graph edges when `graph_expansion_enabled=True`.
    Why: related laws (referenced, modifying, modified, replaced) often hold the article that resolves the question.
    - Take the `graph_expansion_seed_k` top retrieved chunks; collect their `law_id` values.
-   - For every edge in `edges.jsonl` whose source `law_id` is in the seed set and whose `relation_type` is in `graph_expansion_relation_types`, add up to `max_chunks_per_expanded_law` chunks from the target law (selected by Qdrant via filter on the target `law_id` plus the same `static_filters` when enabled).
+   - For every edge in `edges.jsonl` whose source `law_id` is in the seed set, whose `relation_type` is in `graph_expansion_relation_types`, and whose `confidence` is at least `min_edge_confidence`, add target-law chunks until both the per-law and global caps are respected.
+   - When `dst_article_label_norm` is available, filter the target law to that article. Otherwise, fall back to law-level filtering.
+   - Rank target-law chunks with a dense mini-search filtered by target `law_id` and optional `article_label_norm`; use deterministic scroll only as a fallback when mini-search returns too few allowed chunks.
    - Record the edges actually used in `graph_relations_used` for traceability.
 6. Rerank candidates when `rerank_enabled=True`.
    Why: the LLM reranker reorders by legal relevance and prunes noisy candidates before the answer step.
@@ -73,6 +78,7 @@ Default generated output directory: `data/rag_runs/advanced/<run_name>/`.
    - Concatenate kept candidates in rerank order until either `rerank_output_k` chunks or `max_context_chars` is reached.
 8. Generate MCQ and no-hint answers, attach citations, judge no-hint answers.
    Why: the answer contract must remain compatible with step 05 so that step 07 can compare directly.
+   - When `parallel_datasets_enabled=True`, run the MCQ and no-hint dataset loops in parallel. This can use up to roughly `2 * max_concurrency` remote calls, because each dataset loop also parallelizes rows.
 9. Export row-level traces, diagnostics, and summary metrics.
    Why: improvements must be explainable, not only numerically better.
 
@@ -89,6 +95,7 @@ Advanced result rows must include all simple RAG fields plus:
 - `rerank_scores`: list of integer scores aligned with `reranked_chunk_ids` (empty when rerank is off).
 - `context_included_count`: number of chunks placed in the context.
 - `reference_law_hit`: `bool` flag set to `True` when at least one `law_id` from the question's `expected_references` appears in `context_chunk_ids`.
+- no-hint rows include `context_sufficient`: one of `"yes"`, `"partial"`, `"no"`, emitted by the answer model to separate sufficient, partial, and irrelevant contexts.
 - `failure_category`: one of the allowed values below, populated for failed or low-quality rows.
 
 Allowed failure categories:
@@ -114,6 +121,7 @@ The advanced manifest must record every flag value, every parameter value, the s
 - Every entry in `graph_relations_used` corresponds to an actual record in `edges.jsonl`.
 - Hybrid retrieval is only enabled when the index manifest declares sparse vectors are present.
 - Rerank scores are integers in `{0, 1, 2}`; out-of-range scores cause `judge_error`-style row errors and are excluded from the kept set.
+- No-hint `context_sufficient` values are counted in diagnostics.
 - Summary metric names match the no-RAG and simple RAG contracts so that step 07 can compare directly.
 - `failure_category` is populated for every wrong or empty row.
 

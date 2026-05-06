@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ from qdrant_client.http import models as qmodels
 from legal_rag.advanced_graph_rag import (
     ADVANCED_RAG_PROMPT_VERSION,
     ADVANCED_RAG_SCHEMA_VERSION,
+    AdvancedNoHintAnswerOutput,
     AdvancedRagConfig,
     run_advanced_graph_rag,
 )
@@ -99,6 +102,31 @@ class InvalidCitationClient(FakeStructuredClient):
         if "answer_text" in properties:
             return {"structured": {"answer_text": "Risposta fake", "citation_chunk_ids": ["missing-citation"], "short_rationale": "fake"}}
         return super().structured_chat(prompt=prompt, model=model, payload_schema=payload_schema, timeout_seconds=timeout_seconds)
+
+
+class SlowRecordingClient(FakeStructuredClient):
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active_calls = 0
+        self.max_active_calls = 0
+
+    def structured_chat(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        payload_schema: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self._active_calls)
+        try:
+            time.sleep(0.05)
+            return super().structured_chat(prompt=prompt, model=model, payload_schema=payload_schema, timeout_seconds=timeout_seconds)
+        finally:
+            with self._lock:
+                self._active_calls -= 1
 
 
 def _context_chunk_ids(prompt: str) -> list[str]:
@@ -221,11 +249,19 @@ def _write_simple_manifest(tmp_path: Path, *, evaluation_dir: Path, index_manife
     return path
 
 
-def _chunk_payload(chunk_id: str, *, law_id: str, text: str, law_status: str = "current") -> dict[str, Any]:
+def _chunk_payload(
+    chunk_id: str,
+    *,
+    law_id: str,
+    text: str,
+    law_status: str = "current",
+    article_label_norm: str = "1",
+) -> dict[str, Any]:
     return {
         "chunk_id": chunk_id,
         "law_id": law_id,
-        "article_id": f"{law_id}#art:1",
+        "article_id": f"{law_id}#art:{article_label_norm}",
+        "article_label_norm": article_label_norm,
         "text": text,
         "law_title": f"Law {chunk_id}",
         "law_status": law_status,
@@ -266,14 +302,26 @@ def _make_qdrant(*, sparse: bool = True, collection_name: str = "advanced_collec
     return client
 
 
-def _add_qdrant_chunk(client: QdrantClient, *, point_id: int, chunk_id: str, law_id: str, text: str) -> None:
+def _add_qdrant_chunk(
+    client: QdrantClient,
+    *,
+    point_id: int,
+    chunk_id: str,
+    law_id: str,
+    text: str,
+    vector: list[float] | None = None,
+    article_label_norm: str = "1",
+) -> None:
     client.upsert(
         collection_name="advanced_collection",
         points=[
             qmodels.PointStruct(
                 id=point_id,
-                vector={"dense": [0.0, 1.0, 0.0, 0.0], "sparse": qmodels.SparseVector(indices=[30 + point_id], values=[1.0])},
-                payload=_chunk_payload(chunk_id, law_id=law_id, text=text),
+                vector={
+                    "dense": vector or [0.0, 1.0, 0.0, 0.0],
+                    "sparse": qmodels.SparseVector(indices=[30 + point_id], values=[1.0]),
+                },
+                payload=_chunk_payload(chunk_id, law_id=law_id, text=text, article_label_norm=article_label_norm),
             )
         ],
         wait=True,
@@ -410,6 +458,29 @@ def test_run_advanced_graph_rag_exports_contract_files_and_traces(tmp_path: Path
     assert row["context_included_count"] == 2
     assert row["reference_law_hit"] is True
     assert row["failure_category"] is None
+    no_hint_row = json.loads((output_dir / "no_hint_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert no_hint_row["context_sufficient"] == "yes"
+    assert manifest["diagnostics"]["context_sufficient_counts"] == {"yes": 1}
+
+
+def test_run_advanced_graph_rag_reports_progress(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    events: list[dict[str, Any]] = []
+
+    run_advanced_graph_rag(
+        _config(tmp_path, evaluation_dir, laws_dir, index_manifest, simple_manifest, run_name="progress"),
+        client=FakeStructuredClient(),
+        qdrant_client=_make_qdrant(),
+        embedder=FakeHybridEmbedder(),
+        progress_callback=events.append,
+    )
+
+    assert events[0] == {"event": "setup_finished", "mcq": 1, "no_hint": 1, "total": 2}
+    row_events = [event for event in events if event["event"] == "row_finished"]
+    assert len(row_events) == 2
+    assert {event["run"] for event in row_events} == {"mcq", "no_hint"}
+    assert all(event["completed"] == 1 and event["total"] == 1 for event in row_events)
+    assert {event["event"] for event in events if event["event"] == "run_finished"} == {"run_finished"}
 
 
 def test_feature_flags_disable_observable_effects(tmp_path: Path) -> None:
@@ -441,6 +512,29 @@ def test_feature_flags_disable_observable_effects(tmp_path: Path) -> None:
     assert row["graph_relations_used"] == []
     assert row["rerank_scores"] == []
     assert row["reranked_chunk_ids"] == row["retrieved_chunk_ids"]
+
+
+def test_parallel_dataset_runs_overlap_model_calls(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    client = SlowRecordingClient()
+
+    run_advanced_graph_rag(
+        _config(
+            tmp_path,
+            evaluation_dir,
+            laws_dir,
+            index_manifest,
+            simple_manifest,
+            run_name="parallel_datasets",
+            max_concurrency=1,
+            parallel_datasets_enabled=True,
+        ),
+        client=client,
+        qdrant_client=_make_qdrant(),
+        embedder=FakeHybridEmbedder(),
+    )
+
+    assert client.max_active_calls >= 2
 
 
 def test_hybrid_enabled_requires_sparse_collection_and_embedder(tmp_path: Path) -> None:
@@ -510,7 +604,8 @@ def test_graph_expansion_deduplicates_edges_and_caps_chunks_per_target_law(tmp_p
     )
 
     row = json.loads((tmp_path / "advanced_runs" / "graph_cap" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert row["graph_expanded_chunk_ids"] == ["c3"]
+    assert len(row["graph_expanded_chunk_ids"]) == 1
+    assert set(row["graph_expanded_chunk_ids"]) <= {"c3", "c4"}
     assert row["graph_relations_used"] == [{"source_law_id": LAW_2, "target_law_id": LAW_3, "relation_type": "REFERENCES"}]
 
 
@@ -546,6 +641,179 @@ def test_graph_expansion_ignores_qdrant_chunks_missing_from_clean_chunks_jsonl(t
     row = json.loads((tmp_path / "advanced_runs" / "graph_allowed_chunks" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert row["graph_expanded_chunk_ids"] == ["c3"]
     assert "orphan-c4" not in row["retrieved_chunk_ids"]
+
+
+def test_graph_expansion_defaults_exclude_obsolete_relation_types(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    write_jsonl(
+        laws_dir / "edges.jsonl",
+        [
+            {"edge_id": "e1", "src_law_id": LAW_2, "dst_law_id": LAW_3, "relation_type": "ABROGATED_BY"},
+        ],
+    )
+
+    run_advanced_graph_rag(
+        _config(tmp_path, evaluation_dir, laws_dir, index_manifest, simple_manifest, rerank_enabled=False),
+        client=FakeStructuredClient(),
+        qdrant_client=_make_qdrant(),
+        embedder=FakeHybridEmbedder(),
+    )
+
+    row = json.loads((tmp_path / "advanced_runs" / "test" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["graph_expanded_chunk_ids"] == []
+    assert row["graph_relations_used"] == []
+
+
+def test_graph_expansion_respects_min_edge_confidence(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    write_jsonl(
+        laws_dir / "edges.jsonl",
+        [
+            {"edge_id": "e1", "src_law_id": LAW_2, "dst_law_id": LAW_3, "relation_type": "AMENDS", "confidence": 0.69},
+        ],
+    )
+
+    run_advanced_graph_rag(
+        _config(
+            tmp_path,
+            evaluation_dir,
+            laws_dir,
+            index_manifest,
+            simple_manifest,
+            min_edge_confidence=0.7,
+            rerank_enabled=False,
+        ),
+        client=FakeStructuredClient(),
+        qdrant_client=_make_qdrant(),
+        embedder=FakeHybridEmbedder(),
+    )
+
+    row = json.loads((tmp_path / "advanced_runs" / "test" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["graph_expanded_chunk_ids"] == []
+
+
+def test_graph_expansion_respects_global_expanded_chunk_cap(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    law_4 = "vda:lr:2000-01-01:4"
+    write_jsonl(
+        laws_dir / "edges.jsonl",
+        [
+            {"edge_id": "e1", "src_law_id": LAW_2, "dst_law_id": LAW_3, "relation_type": "REFERENCES"},
+            {"edge_id": "e2", "src_law_id": LAW_2, "dst_law_id": law_4, "relation_type": "AMENDS"},
+        ],
+    )
+    write_jsonl(
+        laws_dir / "chunks.jsonl",
+        [
+            _chunk_payload("c1", law_id=LAW_1, text="Answer A legal text."),
+            _chunk_payload("c2", law_id=LAW_2, text="Seed legal text."),
+            _chunk_payload("c3", law_id=LAW_3, text="Expanded legal text."),
+            _chunk_payload("c4", law_id=law_4, text="Extra expanded legal text."),
+        ],
+    )
+    qdrant = _make_qdrant()
+    _add_qdrant_chunk(qdrant, point_id=4, chunk_id="c4", law_id=law_4, text="Extra expanded legal text.")
+
+    run_advanced_graph_rag(
+        _config(
+            tmp_path,
+            evaluation_dir,
+            laws_dir,
+            index_manifest,
+            simple_manifest,
+            max_chunks_per_expanded_law=2,
+            max_expanded_chunks_total=1,
+            rerank_enabled=False,
+        ),
+        client=FakeStructuredClient(),
+        qdrant_client=qdrant,
+        embedder=FakeHybridEmbedder(),
+    )
+
+    row = json.loads((tmp_path / "advanced_runs" / "test" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["graph_expanded_chunk_ids"] == ["c3"]
+
+
+def test_graph_expansion_uses_dst_article_label_when_available(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    write_jsonl(
+        laws_dir / "edges.jsonl",
+        [
+            {
+                "edge_id": "e1",
+                "src_law_id": LAW_2,
+                "dst_law_id": LAW_3,
+                "dst_article_label_norm": "2",
+                "relation_type": "REFERENCES",
+            },
+        ],
+    )
+    write_jsonl(
+        laws_dir / "chunks.jsonl",
+        [
+            _chunk_payload("c1", law_id=LAW_1, text="Answer A legal text."),
+            _chunk_payload("c2", law_id=LAW_2, text="Seed legal text."),
+            _chunk_payload("c3", law_id=LAW_3, text="Article one text.", article_label_norm="1"),
+            _chunk_payload("c4", law_id=LAW_3, text="Article two text.", article_label_norm="2"),
+        ],
+    )
+    qdrant = _make_qdrant()
+    _add_qdrant_chunk(qdrant, point_id=4, chunk_id="c4", law_id=LAW_3, text="Article two text.", article_label_norm="2")
+
+    run_advanced_graph_rag(
+        _config(tmp_path, evaluation_dir, laws_dir, index_manifest, simple_manifest, rerank_enabled=False),
+        client=FakeStructuredClient(),
+        qdrant_client=qdrant,
+        embedder=FakeHybridEmbedder(),
+    )
+
+    row = json.loads((tmp_path / "advanced_runs" / "test" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["graph_expanded_chunk_ids"] == ["c4"]
+
+
+def test_graph_expansion_semantically_ranks_chunks_within_law(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    write_jsonl(
+        laws_dir / "chunks.jsonl",
+        [
+            _chunk_payload("c1", law_id=LAW_1, text="Answer A legal text."),
+            _chunk_payload("c2", law_id=LAW_2, text="Seed legal text."),
+            _chunk_payload("c3", law_id=LAW_3, text="Less similar target text."),
+            _chunk_payload("c4", law_id=LAW_3, text="More similar target text."),
+        ],
+    )
+    qdrant = _make_qdrant()
+    _add_qdrant_chunk(qdrant, point_id=4, chunk_id="c4", law_id=LAW_3, text="More similar target text.", vector=[0.9, 0.1, 0.0, 0.0])
+
+    run_advanced_graph_rag(
+        _config(
+            tmp_path,
+            evaluation_dir,
+            laws_dir,
+            index_manifest,
+            simple_manifest,
+            max_chunks_per_expanded_law=1,
+            rerank_enabled=False,
+        ),
+        client=FakeStructuredClient(),
+        qdrant_client=qdrant,
+        embedder=FakeHybridEmbedder(),
+    )
+
+    row = json.loads((tmp_path / "advanced_runs" / "test" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["graph_expanded_chunk_ids"] == ["c4"]
+
+
+def test_no_hint_answer_output_accepts_context_sufficient() -> None:
+    output = AdvancedNoHintAnswerOutput.model_validate(
+        {
+            "answer_text": "Risposta parziale",
+            "context_sufficient": "partial",
+            "citation_chunk_ids": ["c1"],
+        }
+    )
+
+    assert output.to_json_record()["context_sufficient"] == "partial"
 
 
 def test_invalid_citation_marks_row_as_generation_failure_even_when_answer_is_correct(tmp_path: Path) -> None:

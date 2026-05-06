@@ -139,11 +139,14 @@ def fetch_law_chunks(
     law_id: str,
     static_filters: dict[str, Any],
     limit: int,
+    article_label_norm: str | None = None,
     allowed_chunk_ids: set[str] | None = None,
 ) -> list[RetrievedChunkRecord]:
     """Fetch chunks for one law via Qdrant payload filters."""
     filters = dict(static_filters)
     filters["law_id"] = law_id
+    if article_label_norm:
+        filters["article_label_norm"] = article_label_norm
     selected: list[RetrievedChunkRecord] = []
     seen: set[str] = set()
     offset: Any = None
@@ -174,12 +177,54 @@ def fetch_law_chunks(
     return selected
 
 
+def rank_law_chunks(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    query_vector: list[float],
+    law_id: str,
+    static_filters: dict[str, Any],
+    limit: int,
+    article_label_norm: str | None = None,
+    allowed_chunk_ids: set[str] | None = None,
+) -> list[RetrievedChunkRecord]:
+    """Rank chunks inside a target law using the same dense query vector."""
+    filters = dict(static_filters)
+    filters["law_id"] = law_id
+    if article_label_norm:
+        filters["article_label_norm"] = article_label_norm
+    vector_name = dense_vector_name(client, collection_name=collection_name)
+    response = client.query_points(
+        collection_name=collection_name,
+        query=query_vector,
+        using=vector_name,
+        query_filter=build_static_filter(filters),
+        limit=max(limit, min(64, limit * 4)),
+        with_payload=True,
+        with_vectors=False,
+    )
+    selected: list[RetrievedChunkRecord] = []
+    seen: set[str] = set()
+    for point in response.points:
+        chunk = _point_to_chunk(point)
+        if allowed_chunk_ids is not None and chunk.chunk_id not in allowed_chunk_ids:
+            continue
+        if chunk.chunk_id in seen:
+            continue
+        selected.append(chunk)
+        seen.add(chunk.chunk_id)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 class GraphIndex:
     """Explicit law graph and clean chunks loaded from step 01 outputs."""
 
     def __init__(self, *, edges: list[dict[str, Any]], chunks: list[dict[str, Any]]) -> None:
         self.edges_by_source: dict[str, list[dict[str, Any]]] = {}
         self.chunk_ids_by_law: dict[str, list[str]] = {}
+        self.chunk_ids_by_law_article: dict[tuple[str, str], list[str]] = {}
         self.edge_triples: set[tuple[str, str, str]] = set()
         for edge in edges:
             src = str(edge.get("src_law_id") or "")
@@ -194,6 +239,9 @@ class GraphIndex:
             chunk_id = str(chunk.get("chunk_id") or "")
             if law_id and chunk_id:
                 self.chunk_ids_by_law.setdefault(law_id, []).append(chunk_id)
+                article_label_norm = str(chunk.get("article_label_norm") or "").strip()
+                if article_label_norm:
+                    self.chunk_ids_by_law_article.setdefault((law_id, article_label_norm), []).append(chunk_id)
 
     @classmethod
     def from_dir(cls, laws_dir: str | Path) -> "GraphIndex":
@@ -211,10 +259,18 @@ def expand_with_graph(
     relation_types: Sequence[str],
     static_filters: dict[str, Any],
     max_chunks_per_law: int,
+    embedder: SupportsEmbedding | None = None,
+    query_text: str = "",
+    max_chunks_total: int | None = None,
+    min_edge_confidence: float = 0.0,
 ) -> tuple[list[RetrievedChunkRecord], list[GraphRelationUsed]]:
     """Expand retrieved candidates through explicit source-law graph edges."""
     allowed = {str(value).strip().upper() for value in relation_types}
     seed_law_ids = _unique(str(chunk.payload.get("law_id") or "") for chunk in seeds)
+    if not seed_law_ids:
+        return [], []
+    query_vector = embedder.embed_texts([query_text])[0] if embedder is not None and query_text else None
+    effective_max_total = max_chunks_total or max_chunks_per_law * max(1, len(seed_law_ids))
     chunks: list[RetrievedChunkRecord] = []
     relations: list[GraphRelationUsed] = []
     seen_triples: set[tuple[str, str, str]] = set()
@@ -222,26 +278,49 @@ def expand_with_graph(
     accepted_by_target_law: dict[str, int] = {}
     for source_law_id in seed_law_ids:
         for edge in graph.edges_by_source.get(source_law_id, []):
+            if len(chunks) >= effective_max_total:
+                return chunks, relations
             target_law_id = str(edge.get("dst_law_id") or "")
             relation_type = str(edge.get("relation_type") or "").strip().upper()
             if not target_law_id or relation_type not in allowed:
+                continue
+            if _edge_confidence(edge) < min_edge_confidence:
                 continue
             triple = (source_law_id, target_law_id, relation_type)
             if triple in seen_triples:
                 continue
             seen_triples.add(triple)
-            allowed_chunk_ids = set(graph.chunk_ids_by_law.get(target_law_id, []))
-            remaining = max_chunks_per_law - accepted_by_target_law.get(target_law_id, 0)
+            article_label_norm = str(edge.get("dst_article_label_norm") or "").strip() or None
+            allowed_chunk_ids = _allowed_target_chunk_ids(graph, target_law_id, article_label_norm)
+            remaining = min(
+                max_chunks_per_law - accepted_by_target_law.get(target_law_id, 0),
+                effective_max_total - len(chunks),
+            )
             if not allowed_chunk_ids or remaining <= 0:
                 continue
-            fetched = fetch_law_chunks(
-                client,
-                collection_name=collection_name,
-                law_id=target_law_id,
-                static_filters=static_filters,
-                limit=remaining,
-                allowed_chunk_ids=allowed_chunk_ids,
-            )
+            fetched: list[RetrievedChunkRecord] = []
+            if query_vector is not None:
+                fetched = rank_law_chunks(
+                    client,
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    law_id=target_law_id,
+                    static_filters=static_filters,
+                    limit=remaining,
+                    article_label_norm=article_label_norm,
+                    allowed_chunk_ids=allowed_chunk_ids,
+                )
+            if len(fetched) < remaining:
+                fallback = fetch_law_chunks(
+                    client,
+                    collection_name=collection_name,
+                    law_id=target_law_id,
+                    static_filters=static_filters,
+                    limit=remaining,
+                    article_label_norm=article_label_norm,
+                    allowed_chunk_ids=allowed_chunk_ids,
+                )
+                fetched = _dedupe_chunks([*fetched, *fallback])[:remaining]
             new_chunks = [chunk for chunk in fetched if chunk.chunk_id not in seen_chunk_ids]
             if not new_chunks:
                 continue
@@ -256,6 +335,24 @@ def expand_with_graph(
                 )
             )
     return chunks, relations
+
+
+def _allowed_target_chunk_ids(graph: GraphIndex, law_id: str, article_label_norm: str | None) -> set[str]:
+    if article_label_norm:
+        article_chunk_ids = set(graph.chunk_ids_by_law_article.get((law_id, article_label_norm), []))
+        if article_chunk_ids:
+            return article_chunk_ids
+    return set(graph.chunk_ids_by_law.get(law_id, []))
+
+
+def _edge_confidence(edge: dict[str, Any]) -> float:
+    raw = edge.get("confidence")
+    if raw is None:
+        return 1.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def dense_vector_name(client: QdrantClient, *, collection_name: str) -> str | None:
@@ -327,6 +424,17 @@ def _point_to_chunk(point: Any, *, score: float | None = None) -> RetrievedChunk
         text=str(payload.get("text") or ""),
         payload=payload,
     )
+
+
+def _dedupe_chunks(chunks: list[RetrievedChunkRecord]) -> list[RetrievedChunkRecord]:
+    out: list[RetrievedChunkRecord] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        if chunk.chunk_id in seen:
+            continue
+        out.append(chunk)
+        seen.add(chunk.chunk_id)
+    return out
 
 
 def _unique(values: Sequence[str] | Any) -> list[str]:

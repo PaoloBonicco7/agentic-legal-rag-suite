@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, TypeVar
@@ -64,6 +64,7 @@ from .retrieval import (
 
 T = TypeVar("T")
 U = TypeVar("U")
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 def load_inputs(config: AdvancedRagConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -227,13 +228,36 @@ def _qdrant_start_hint(qdrant_target: dict[str, str | None]) -> str:
     return ""
 
 
-def _parallel_map_ordered(items: list[T], func: Callable[[T], U], *, max_workers: int) -> list[U]:
+def _parallel_map_ordered(
+    items: list[T],
+    func: Callable[[T], U],
+    *,
+    max_workers: int,
+    on_done: Callable[[U, int, int], None] | None = None,
+) -> list[U]:
     """Run independent tasks in parallel while preserving input order."""
     if max_workers <= 1 or len(items) <= 1:
-        return [func(item) for item in items]
+        out: list[U] = []
+        total = len(items)
+        for item in items:
+            result = func(item)
+            out.append(result)
+            if on_done:
+                on_done(result, len(out), total)
+        return out
     workers = min(max_workers, len(items))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        return list(executor.map(func, items))
+        futures = {executor.submit(func, item): index for index, item in enumerate(items)}
+        results: list[U | None] = [None] * len(items)
+        completed = 0
+        total = len(items)
+        for future in as_completed(futures):
+            result = future.result()
+            results[futures[future]] = result
+            completed += 1
+            if on_done:
+                on_done(result, completed, total)
+    return [result for result in results if result is not None]
 
 
 def retrieve_candidates(
@@ -281,9 +305,13 @@ def retrieve_candidates(
             collection_name=collection_name,
             graph=graph,
             seeds=retrieved[: config.graph_expansion_seed_k],
+            embedder=embedder,
+            query_text=question,
             relation_types=config.graph_expansion_relation_types,
             static_filters=metadata_filters,
             max_chunks_per_law=config.max_chunks_per_expanded_law,
+            max_chunks_total=config.max_expanded_chunks_total,
+            min_edge_confidence=config.min_edge_confidence,
         )
 
     candidates = _dedupe_chunks([*retrieved, *expanded])
@@ -374,6 +402,8 @@ def run_mcq(
     graph: GraphIndex,
     reference_resolver: OracleReferenceResolver,
     config: AdvancedRagConfig,
+    progress_callback: ProgressCallback | None = None,
+    run_name: str = "mcq",
 ) -> list[dict[str, Any]]:
     """Run advanced-RAG MCQ answering and return row-level results."""
 
@@ -442,7 +472,25 @@ def run_mcq(
             **trace,
         ).to_json_record()
 
-    return _parallel_map_ordered(records, run_one, max_workers=config.max_concurrency)
+    return _parallel_map_ordered(
+        records,
+        run_one,
+        max_workers=config.max_concurrency,
+        on_done=(
+            lambda row, completed, total: progress_callback(
+                {
+                    "event": "row_finished",
+                    "run": run_name,
+                    "completed": completed,
+                    "total": total,
+                    "qid": row.get("qid"),
+                    "error": row.get("error"),
+                }
+            )
+            if progress_callback
+            else None
+        ),
+    )
 
 
 def run_no_hint(
@@ -456,6 +504,8 @@ def run_no_hint(
     graph: GraphIndex,
     reference_resolver: OracleReferenceResolver,
     config: AdvancedRagConfig,
+    progress_callback: ProgressCallback | None = None,
+    run_name: str = "no_hint",
 ) -> list[dict[str, Any]]:
     """Run advanced-RAG open answering and judge each generated answer."""
 
@@ -463,6 +513,7 @@ def run_no_hint(
         trace = _empty_trace(config)
         context_chunks: list[RetrievedChunkRecord] = []
         predicted_answer: str | None = None
+        context_sufficient: str | None = None
         citations: list[Citation] = []
         judge_score: int | None = None
         judge_explanation: str | None = None
@@ -498,6 +549,7 @@ def run_no_hint(
                 )
                 answer = AdvancedNoHintAnswerOutput.model_validate(answer_call["structured"])
                 predicted_answer = answer.answer_text
+                context_sufficient = answer.context_sufficient
                 citations, invalid_citations = _build_citations(answer.citation_chunk_ids, context_chunks)
                 if invalid_citations:
                     error = _join_error(error, f"citation_error: invalid_chunk_ids={invalid_citations}")
@@ -528,6 +580,7 @@ def run_no_hint(
             answer=predicted_answer,
             citations=citations,
             predicted_answer=predicted_answer,
+            context_sufficient=context_sufficient,
             correct_answer=str(record["correct_answer"]),
             judge_score=judge_score,
             judge_explanation=judge_explanation,
@@ -536,7 +589,25 @@ def run_no_hint(
             **trace,
         ).to_json_record()
 
-    return _parallel_map_ordered(records, run_one, max_workers=config.max_concurrency)
+    return _parallel_map_ordered(
+        records,
+        run_one,
+        max_workers=config.max_concurrency,
+        on_done=(
+            lambda row, completed, total: progress_callback(
+                {
+                    "event": "row_finished",
+                    "run": run_name,
+                    "completed": completed,
+                    "total": total,
+                    "qid": row.get("qid"),
+                    "error": row.get("error"),
+                }
+            )
+            if progress_callback
+            else None
+        ),
+    )
 
 
 def build_summary(*, mcq_results: list[dict[str, Any]], no_hint_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -557,6 +628,10 @@ def build_diagnostics(*, mcq_results: list[dict[str, Any]], no_hint_results: lis
         for row in rows
         for relation in row.get("graph_relations_used", [])
     )
+    context_sufficient_counts = Counter(
+        str(row.get("context_sufficient") or "missing")
+        for row in no_hint_results
+    )
     return {
         "processed_rows": len(rows),
         "metadata_filtered_rows": sum(1 for row in rows if row.get("metadata_filters")),
@@ -568,6 +643,7 @@ def build_diagnostics(*, mcq_results: list[dict[str, Any]], no_hint_results: lis
         "graph_relation_type_counts": dict(sorted(relation_counts.items())),
         "reranked_rows": sum(1 for row in rows if row.get("rerank_scores")),
         "rerank_score_distribution": dict(sorted(Counter(rerank_scores).items())),
+        "context_sufficient_counts": dict(sorted(context_sufficient_counts.items())),
         "reference_law_hits": sum(1 for row in rows if row.get("reference_law_hit")),
         "failure_category_counts": dict(sorted(failure_counts.items())),
     }
@@ -601,6 +677,7 @@ def build_quality_report(
             f"- graph_expanded_rows={diagnostics['graph_expanded_rows']}",
             f"- reranked_rows={diagnostics['reranked_rows']}",
             f"- reference_law_hits={diagnostics['reference_law_hits']}",
+            f"- context_sufficient_counts={diagnostics['context_sufficient_counts']}",
             "",
             "## Failure Categories",
         ]
@@ -615,12 +692,68 @@ def build_quality_report(
     return "\n".join(lines) + "\n"
 
 
+def run_datasets(
+    *,
+    mcq_records: list[dict[str, Any]],
+    no_hint_records: list[dict[str, Any]],
+    llm_client: StructuredChatClient,
+    qdrant_client: QdrantClient,
+    embedder: SupportsEmbedding,
+    collection_name: str,
+    index_manifest: dict[str, Any],
+    graph: GraphIndex,
+    reference_resolver: OracleReferenceResolver,
+    config: AdvancedRagConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run MCQ and no-hint datasets, optionally in parallel."""
+    kwargs = {
+        "llm_client": llm_client,
+        "qdrant_client": qdrant_client,
+        "embedder": embedder,
+        "collection_name": collection_name,
+        "index_manifest": index_manifest,
+        "graph": graph,
+        "reference_resolver": reference_resolver,
+        "config": config,
+    }
+    if not config.parallel_datasets_enabled or not mcq_records or not no_hint_records:
+        if progress_callback:
+            progress_callback({"event": "run_started", "run": "mcq", "total": len(mcq_records)})
+        mcq_results = run_mcq(records=mcq_records, progress_callback=progress_callback, run_name="mcq", **kwargs)
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "mcq", "total": len(mcq_records)})
+            progress_callback({"event": "run_started", "run": "no_hint", "total": len(no_hint_records)})
+        no_hint_results = run_no_hint(records=no_hint_records, progress_callback=progress_callback, run_name="no_hint", **kwargs)
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "no_hint", "total": len(no_hint_records)})
+        return (
+            mcq_results,
+            no_hint_results,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        if progress_callback:
+            progress_callback({"event": "run_started", "run": "mcq", "total": len(mcq_records)})
+            progress_callback({"event": "run_started", "run": "no_hint", "total": len(no_hint_records)})
+        mcq_future = executor.submit(run_mcq, records=mcq_records, progress_callback=progress_callback, run_name="mcq", **kwargs)
+        no_hint_future = executor.submit(run_no_hint, records=no_hint_records, progress_callback=progress_callback, run_name="no_hint", **kwargs)
+        mcq_results = mcq_future.result()
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "mcq", "total": len(mcq_records)})
+        no_hint_results = no_hint_future.result()
+        if progress_callback:
+            progress_callback({"event": "run_finished", "run": "no_hint", "total": len(no_hint_records)})
+        return mcq_results, no_hint_results
+
+
 def run_advanced_graph_rag(
     config: AdvancedRagConfig | dict[str, Any] | None = None,
     *,
     client: StructuredChatClient | None = None,
     qdrant_client: QdrantClient | None = None,
     embedder: SupportsEmbedding | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Run the complete advanced graph-aware RAG pipeline."""
     cfg = config if isinstance(config, AdvancedRagConfig) else AdvancedRagConfig.model_validate(config or {})
@@ -667,6 +800,15 @@ def run_advanced_graph_rag(
     mcq_records = select_records(mcq_all, effective_cfg)
     no_hint_records = select_records(no_hint_all, effective_cfg)
     validate_mcq_no_hint_alignment(mcq_records, no_hint_records)
+    if progress_callback:
+        progress_callback(
+            {
+                "event": "setup_finished",
+                "mcq": len(mcq_records),
+                "no_hint": len(no_hint_records),
+                "total": len(mcq_records) + len(no_hint_records),
+            }
+        )
     graph = GraphIndex.from_dir(effective_cfg.laws_dir)
     reference_resolver = OracleReferenceResolver.from_dir(effective_cfg.laws_dir)
 
@@ -674,8 +816,9 @@ def run_advanced_graph_rag(
     tmp_dir = prepare_tmp_output_dir(output_dir)
     started = perf_counter()
     try:
-        mcq_results = run_mcq(
-            records=mcq_records,
+        mcq_results, no_hint_results = run_datasets(
+            mcq_records=mcq_records,
+            no_hint_records=no_hint_records,
             llm_client=llm_client,
             qdrant_client=qdrant_client,
             embedder=embedder,
@@ -684,17 +827,7 @@ def run_advanced_graph_rag(
             graph=graph,
             reference_resolver=reference_resolver,
             config=effective_cfg,
-        )
-        no_hint_results = run_no_hint(
-            records=no_hint_records,
-            llm_client=llm_client,
-            qdrant_client=qdrant_client,
-            embedder=embedder,
-            collection_name=collection_name,
-            index_manifest=index_manifest,
-            graph=graph,
-            reference_resolver=reference_resolver,
-            config=effective_cfg,
+            progress_callback=progress_callback,
         )
         summary = build_summary(mcq_results=mcq_results, no_hint_results=no_hint_results)
         diagnostics = build_diagnostics(mcq_results=mcq_results, no_hint_results=no_hint_results)

@@ -4,9 +4,9 @@
 
 Questa fase trasforma il corpus HTML delle leggi regionali in un dataset pulito, strutturato e pronto per le fasi successive di indicizzazione e RAG.
 
-L'obiettivo metodologico non e produrre una copia semplificata del testo, ma costruire una rappresentazione esplicita della struttura giuridica contenuta nei file originali. Ogni unita recuperabile deve mantenere il collegamento con la legge, l'articolo, il passaggio, la provenienza del file sorgente, lo status legale e le relazioni esplicite con altre leggi.
+L'obiettivo metodologico non é produrre una copia semplificata del testo, ma costruire una rappresentazione esplicita della struttura giuridica contenuta nei file originali. Ogni unita recuperabile deve mantenere il collegamento con la legge, l'articolo, il passaggio, la provenienza del file sorgente, lo status legale e le relazioni esplicite con altre leggi.
 
-Il principio guida e conservativo: si estraggono solo informazioni che hanno un'evidenza osservabile nel corpus. Non vengono inferiti significati giuridici non presenti nel testo, nei link o nelle citazioni.
+Il principio guida è conservativo: si estraggono solo informazioni che hanno un'evidenza osservabile nel corpus. Non vengono inferiti significati giuridici non presenti nel testo, nei link o nelle citazioni.
 
 ## Dataset iniziale
 

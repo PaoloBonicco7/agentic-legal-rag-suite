@@ -10,10 +10,11 @@ from legal_rag.laws_preprocessing.models import ALLOWED_RELATION_TYPES
 from legal_rag.oracle_context_evaluation.models import DEFAULT_CHAT_MODEL, MCQ_LABELS
 from legal_rag.simple_rag.models import Citation, RetrievedChunkRecord
 
-ADVANCED_RAG_SCHEMA_VERSION = "advanced-graph-rag-v1"
-ADVANCED_RAG_PROMPT_VERSION = "advanced-rag-prompts-v1"
+ADVANCED_RAG_SCHEMA_VERSION = "advanced-graph-rag-v2"
+ADVANCED_RAG_PROMPT_VERSION = "advanced-rag-prompts-v2"
 
 RetrievalMode = Literal["dense", "hybrid"]
+ContextSufficiency = Literal["yes", "partial", "no"]
 FailureCategory = Literal[
     "retrieval_miss",
     "context_noise",
@@ -50,6 +51,7 @@ class AdvancedRagConfig(BaseModel):
     smoke: bool = False
     retry_attempts: int = Field(default=1, ge=1)
     max_concurrency: int = Field(default=4, ge=1)
+    parallel_datasets_enabled: bool = True
     prompt_version: str = ADVANCED_RAG_PROMPT_VERSION
 
     metadata_filters_enabled: bool = True
@@ -60,9 +62,13 @@ class AdvancedRagConfig(BaseModel):
     static_filters: dict[str, Any] = Field(default_factory=lambda: {"law_status": "current"})
     top_k: int = Field(default=10, gt=0)
     rrf_k: int = Field(default=60, gt=0)
-    graph_expansion_seed_k: int = Field(default=5, gt=0)
-    graph_expansion_relation_types: list[str] = Field(default_factory=lambda: sorted(ALLOWED_RELATION_TYPES))
+    graph_expansion_seed_k: int = Field(default=3, gt=0)
+    graph_expansion_relation_types: list[str] = Field(
+        default_factory=lambda: ["REFERENCES", "AMENDS", "INSERTS", "MODIFIED_BY", "INSERTED_BY"]
+    )
     max_chunks_per_expanded_law: int = Field(default=2, gt=0)
+    max_expanded_chunks_total: int = Field(default=15, gt=0)
+    min_edge_confidence: float = Field(default=0.45, ge=0.0, le=1.0)
     graph_expansion_hops: int = Field(default=1, ge=1)
     rerank_input_k: int = Field(default=20, gt=0)
     rerank_output_k: int = Field(default=5, gt=0)
@@ -186,6 +192,7 @@ class AdvancedNoHintAnswerOutput(_Record):
     """Structured open answer produced by the answer model."""
 
     answer_text: str = ""
+    context_sufficient: ContextSufficiency = "yes"
     citation_chunk_ids: list[str] = Field(default_factory=list)
     short_rationale: str | None = None
 
@@ -198,6 +205,14 @@ class AdvancedNoHintAnswerOutput(_Record):
     @classmethod
     def _normalize_citation_ids(cls, value: list[str]) -> list[str]:
         return _unique_non_empty(value)
+
+    @field_validator("context_sufficient", mode="before")
+    @classmethod
+    def _normalize_context_sufficient(cls, value: str) -> str:
+        text = str(value or "yes").strip().lower()
+        if text not in {"yes", "partial", "no"}:
+            raise ValueError("context_sufficient must be one of: yes, partial, no")
+        return text
 
 
 class _AdvancedTrace(_Record):
@@ -244,6 +259,7 @@ class AdvancedNoHintResultRow(_AdvancedTrace):
     answer: str | None
     citations: list[Citation]
     predicted_answer: str | None
+    context_sufficient: ContextSufficiency | None
     correct_answer: str
     judge_score: int | None
     judge_explanation: str | None
@@ -279,6 +295,7 @@ class InteractiveRagResult(_Record):
     question: str
     answer: str | None = None
     answer_rationale: str | None = None
+    context_sufficient: ContextSufficiency | None = None
     citations: list[Citation] = Field(default_factory=list)
     invalid_citation_chunk_ids: list[str] = Field(default_factory=list)
     retrieved: list[RetrievedChunkRecord] = Field(default_factory=list)
