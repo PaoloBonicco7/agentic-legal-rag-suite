@@ -18,8 +18,9 @@ from legal_rag.advanced_graph_rag import (
     AdvancedRagConfig,
     run_advanced_graph_rag,
 )
+from legal_rag.advanced_graph_rag.retrieval import GraphIndex, connect_qdrant, expand_with_graph
 from legal_rag.oracle_context_evaluation.io import sha256_file, write_json, write_jsonl
-from legal_rag.advanced_graph_rag.retrieval import connect_qdrant
+from legal_rag.simple_rag.models import RetrievedChunkRecord
 
 
 LAW_1 = "vda:lr:2000-01-01:1"
@@ -769,6 +770,47 @@ def test_graph_expansion_uses_dst_article_label_when_available(tmp_path: Path) -
 
     row = json.loads((tmp_path / "advanced_runs" / "test" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert row["graph_expanded_chunk_ids"] == ["c4"]
+
+
+def test_graph_expansion_can_use_clean_chunks_without_qdrant_client() -> None:
+    graph = GraphIndex(
+        edges=[
+            {
+                "edge_id": "e1",
+                "src_law_id": LAW_2,
+                "dst_law_id": LAW_3,
+                "dst_article_label_norm": "2",
+                "relation_type": "REFERENCES",
+            }
+        ],
+        chunks=[
+            _chunk_payload("c3", law_id=LAW_3, text="Article one text.", article_label_norm="1"),
+            _chunk_payload("c4", law_id=LAW_3, text="Article two text.", article_label_norm="2"),
+        ],
+    )
+    seed = RetrievedChunkRecord(
+        chunk_id="seed",
+        score=1.0,
+        text="Seed",
+        payload=_chunk_payload("seed", law_id=LAW_2, text="Seed"),
+    )
+
+    expanded, relations = expand_with_graph(
+        None,
+        collection_name="unused",
+        graph=graph,
+        seeds=[seed],
+        relation_types=["REFERENCES"],
+        static_filters={"law_status": "current"},
+        max_chunks_per_law=2,
+        max_chunks_total=2,
+        min_edge_confidence=0.0,
+    )
+
+    assert [chunk.chunk_id for chunk in expanded] == ["c4"]
+    assert [relation.to_json_record() for relation in relations] == [
+        {"source_law_id": LAW_2, "target_law_id": LAW_3, "relation_type": "REFERENCES"}
+    ]
 
 
 def test_graph_expansion_semantically_ranks_chunks_within_law(tmp_path: Path) -> None:

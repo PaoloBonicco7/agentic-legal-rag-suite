@@ -1,3 +1,66 @@
+## Behavioral Guidelines
+
+### 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them instead of choosing silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop, name what is confusing, and ask.
+
+### 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No flexibility or configurability that was not requested.
+- No error handling for impossible scenarios.
+- If 200 lines could be 50, rewrite it.
+
+Ask: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+
+**Touch only what is necessary. Clean up only your own changes.**
+
+When editing existing code:
+- Do not improve adjacent code, comments, or formatting.
+- Do not refactor things that are not broken.
+- Match existing style, even if you would choose differently.
+- If unrelated dead code is noticed, mention it instead of deleting it.
+
+When changes create orphans:
+- Remove imports, variables, and functions made unused by your changes.
+- Do not remove pre-existing dead code unless asked.
+
+Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" means write tests for invalid inputs, then make them pass.
+- "Fix the bug" means write a test that reproduces it, then make it pass.
+- "Refactor X" means ensure tests pass before and after.
+
+For multi-step tasks, state a brief plan:
+
+```text
+1. [Step] -> verify: [check]
+2. [Step] -> verify: [check]
+3. [Step] -> verify: [check]
+```
+
+Strong success criteria enable independent iteration. Weak criteria such as "make it work" require clarification.
+
+These guidelines are working if diffs contain fewer unnecessary changes, fewer rewrites are needed due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Project Context
+
 Agent-level context for working on this thesis codebase. The numbered workflow lives in `docs/specs/README.md`; each step has its own specification under `docs/specs/`. This file describes the project intent, the technology stack, and how a coding agent should behave when implementing or modifying any step.
 
 ## Project Goal
@@ -17,7 +80,7 @@ The codebase must remain small and easy to read. A new reader should be able to 
 
 ## Coding Agent Workflow
 
-- Before implementing any step, read the corresponding spec under `docs/specs/` end to end. The spec is the source of intent.
+- Before implementing any step, read the corresponding spec under `docs/specs/` end to end. The spec is the source of intent. If a new requirement is given, before adapt the related spec.
 - Use `src/legal_rag/oracle_context_evaluation/` as the reference pattern for new step modules: `models.py` for Pydantic contracts and config, `prompts.py` for prompt strings + version constant, `llm.py` for the structured chat client, `io.py` for JSONL/JSON I/O, `runner.py` for orchestration, `cli.py` + `__main__.py` for the entry point, `env.py` for `.env` loading.
 - Reuse existing utilities before writing new ones — in particular `UtopiaStructuredChatClient`, `load_env_file`, and the `_Record` / `to_json_record` pattern from `oracle_context_evaluation`.
 - Put core logic in `src/legal_rag/<step>/`. Notebooks under `notebooks/` are demonstration and explanation only — they should not contain reusable logic.
@@ -31,8 +94,8 @@ The codebase must remain small and easy to read. A new reader should be able to 
 - **LLM provider**: Utopia (HPC4AI, Università di Torino), Ollama-compatible endpoint at `https://utopia.hpc4ai.unito.it/api`. Structured output via JSON schema (`format=schema`, `temperature=0`). Default model `SLURM.gpt-oss:120b`. Configurable per step via `chat_model` and `judge_model`. Credentials in `.env` (`UTOPIA_API_KEY`, `UTOPIA_BASE_URL`).
 - **Vector store**: Qdrant in **local persistent file mode**, default at `data/indexes/qdrant`. No Docker, no server. Use the official `qdrant-client` Python SDK.
 - **Embedding**: pluggable backend selected by config.
-  - Default backend `local`: `BAAI/bge-m3` via `sentence-transformers` or `FlagEmbedding` (open weights, free, multilingual including Italian, native dense + sparse for hybrid).
-  - Alternative backend `utopia`: HTTP call to `/ollama/api/embeddings` on the same Utopia endpoint, model identity from config.
+  - Default backend `utopia`: HTTP call to `/ollama/api/embeddings` on the same Utopia endpoint, model identity from config.
+  - Alternative backend `local`: `BAAI/bge-m3` via `sentence-transformers` or `FlagEmbedding` (open weights, free, multilingual including Italian, native dense + sparse for hybrid).
   - Config fields: `embedding_backend: Literal["local","utopia"]`, `embedding_model: str`, `embedding_dim: int` (optional override).
 - **Reranker**: LLM-as-reranker using the same Utopia client with a dedicated prompt that scores chunk relevance on a `0-2` scale. No separate cross-encoder dependency.
 - **Hybrid retrieval**: dense + sparse vectors stored in the same Qdrant collection (named/sparse vectors). Fusion via Reciprocal Rank Fusion (RRF) using Qdrant's native `Query API` with `prefetch`.
