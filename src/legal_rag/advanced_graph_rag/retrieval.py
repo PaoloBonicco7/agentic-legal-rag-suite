@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import ResponseHandlingException
 from qdrant_client.http import models as qmodels
 
 from legal_rag.indexing.embeddings import SupportsEmbedding
@@ -15,6 +17,10 @@ from legal_rag.simple_rag.models import RetrievedChunkRecord
 from legal_rag.simple_rag.retrieval import build_static_filter, resolve_index_manifest_path
 
 from .models import AdvancedRagConfig, GraphRelationUsed
+
+_DENSE_VECTOR_NAME_CACHE: dict[tuple[int, str], str | None] = {}
+_SPARSE_VECTOR_NAME_CACHE: dict[tuple[int, str], str | None] = {}
+T = TypeVar("T")
 
 
 def load_index_manifest(config: AdvancedRagConfig) -> tuple[Path, dict[str, Any]]:
@@ -76,14 +82,16 @@ def search_dense(
     """Embed a query and search the dense vector index."""
     vector = embedder.embed_texts([query_text])[0]
     vector_name = dense_vector_name(client, collection_name=collection_name)
-    response = client.query_points(
-        collection_name=collection_name,
-        query=vector,
-        using=vector_name,
-        query_filter=build_static_filter(static_filters),
-        limit=limit,
-        with_payload=True,
-        with_vectors=False,
+    response = _qdrant_call(
+        lambda: client.query_points(
+            collection_name=collection_name,
+            query=vector,
+            using=vector_name,
+            query_filter=build_static_filter(static_filters),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
     )
     return [_point_to_chunk(point) for point in response.points]
 
@@ -108,32 +116,34 @@ def search_hybrid(
     dense_vector = embedder.embed_texts([query_text])[0]
     sparse_vector = embed_sparse_query(embedder, query_text)
     qdrant_filter = build_static_filter(static_filters)
-    response = client.query_points(
-        collection_name=collection_name,
-        prefetch=[
-            qmodels.Prefetch(
-                query=dense_vector,
-                using=dense_name,
-                filter=qdrant_filter,
-                limit=limit,
-            ),
-            qmodels.Prefetch(
-                query=sparse_vector,
-                using=sparse_name,
-                filter=qdrant_filter,
-                limit=limit,
-            ),
-        ],
-        query=qmodels.RrfQuery(rrf=qmodels.Rrf(k=int(rrf_k))),
-        limit=limit,
-        with_payload=True,
-        with_vectors=False,
+    response = _qdrant_call(
+        lambda: client.query_points(
+            collection_name=collection_name,
+            prefetch=[
+                qmodels.Prefetch(
+                    query=dense_vector,
+                    using=dense_name,
+                    filter=qdrant_filter,
+                    limit=limit,
+                ),
+                qmodels.Prefetch(
+                    query=sparse_vector,
+                    using=sparse_name,
+                    filter=qdrant_filter,
+                    limit=limit,
+                ),
+            ],
+            query=qmodels.RrfQuery(rrf=qmodels.Rrf(k=int(rrf_k))),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
     )
     return [_point_to_chunk(point) for point in response.points]
 
 
 def fetch_law_chunks(
-    client: QdrantClient,
+    client: QdrantClient | None,
     *,
     collection_name: str,
     law_id: str,
@@ -141,8 +151,20 @@ def fetch_law_chunks(
     limit: int,
     article_label_norm: str | None = None,
     allowed_chunk_ids: set[str] | None = None,
+    graph: "GraphIndex | None" = None,
 ) -> list[RetrievedChunkRecord]:
     """Fetch chunks for one law via Qdrant payload filters."""
+    if client is None:
+        if graph is None:
+            return []
+        return fetch_law_chunks_from_graph(
+            graph,
+            law_id=law_id,
+            static_filters=static_filters,
+            limit=limit,
+            article_label_norm=article_label_norm,
+            allowed_chunk_ids=allowed_chunk_ids,
+        )
     filters = dict(static_filters)
     filters["law_id"] = law_id
     if article_label_norm:
@@ -152,13 +174,15 @@ def fetch_law_chunks(
     offset: Any = None
     page_limit = max(limit, min(64, limit * 4))
     while len(selected) < limit:
-        records, offset = client.scroll(
-            collection_name=collection_name,
-            scroll_filter=build_static_filter(filters),
-            limit=page_limit,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
+        records, offset = _qdrant_call(
+            lambda: client.scroll(
+                collection_name=collection_name,
+                scroll_filter=build_static_filter(filters),
+                limit=page_limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
         )
         if not records:
             break
@@ -173,6 +197,37 @@ def fetch_law_chunks(
             if len(selected) >= limit:
                 break
         if offset is None:
+            break
+    return selected
+
+
+def fetch_law_chunks_from_graph(
+    graph: "GraphIndex",
+    *,
+    law_id: str,
+    static_filters: dict[str, Any],
+    limit: int,
+    article_label_norm: str | None = None,
+    allowed_chunk_ids: set[str] | None = None,
+) -> list[RetrievedChunkRecord]:
+    """Fetch graph-expanded chunks from the clean chunks snapshot."""
+    if article_label_norm:
+        chunk_ids = graph.chunk_ids_by_law_article.get((law_id, article_label_norm), [])
+    else:
+        chunk_ids = graph.chunk_ids_by_law.get(law_id, [])
+    selected: list[RetrievedChunkRecord] = []
+    seen: set[str] = set()
+    for chunk_id in chunk_ids:
+        if allowed_chunk_ids is not None and chunk_id not in allowed_chunk_ids:
+            continue
+        if chunk_id in seen:
+            continue
+        payload = graph.chunk_payload_by_id.get(chunk_id)
+        if payload is None or not _payload_matches_filters(payload, static_filters):
+            continue
+        selected.append(_payload_to_chunk(payload, score=0.0))
+        seen.add(chunk_id)
+        if len(selected) >= limit:
             break
     return selected
 
@@ -194,14 +249,16 @@ def rank_law_chunks(
     if article_label_norm:
         filters["article_label_norm"] = article_label_norm
     vector_name = dense_vector_name(client, collection_name=collection_name)
-    response = client.query_points(
-        collection_name=collection_name,
-        query=query_vector,
-        using=vector_name,
-        query_filter=build_static_filter(filters),
-        limit=max(limit, min(64, limit * 4)),
-        with_payload=True,
-        with_vectors=False,
+    response = _qdrant_call(
+        lambda: client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            using=vector_name,
+            query_filter=build_static_filter(filters),
+            limit=max(limit, min(64, limit * 4)),
+            with_payload=True,
+            with_vectors=False,
+        )
     )
     selected: list[RetrievedChunkRecord] = []
     seen: set[str] = set()
@@ -225,6 +282,7 @@ class GraphIndex:
         self.edges_by_source: dict[str, list[dict[str, Any]]] = {}
         self.chunk_ids_by_law: dict[str, list[str]] = {}
         self.chunk_ids_by_law_article: dict[tuple[str, str], list[str]] = {}
+        self.chunk_payload_by_id: dict[str, dict[str, Any]] = {}
         self.edge_triples: set[tuple[str, str, str]] = set()
         for edge in edges:
             src = str(edge.get("src_law_id") or "")
@@ -238,6 +296,7 @@ class GraphIndex:
             law_id = str(chunk.get("law_id") or "")
             chunk_id = str(chunk.get("chunk_id") or "")
             if law_id and chunk_id:
+                self.chunk_payload_by_id[chunk_id] = dict(chunk)
                 self.chunk_ids_by_law.setdefault(law_id, []).append(chunk_id)
                 article_label_norm = str(chunk.get("article_label_norm") or "").strip()
                 if article_label_norm:
@@ -251,7 +310,7 @@ class GraphIndex:
 
 
 def expand_with_graph(
-    client: QdrantClient,
+    client: QdrantClient | None,
     *,
     collection_name: str,
     graph: GraphIndex,
@@ -269,7 +328,7 @@ def expand_with_graph(
     seed_law_ids = _unique(str(chunk.payload.get("law_id") or "") for chunk in seeds)
     if not seed_law_ids:
         return [], []
-    query_vector = embedder.embed_texts([query_text])[0] if embedder is not None and query_text else None
+    query_vector = embedder.embed_texts([query_text])[0] if client is not None and embedder is not None and query_text else None
     effective_max_total = max_chunks_total or max_chunks_per_law * max(1, len(seed_law_ids))
     chunks: list[RetrievedChunkRecord] = []
     relations: list[GraphRelationUsed] = []
@@ -300,26 +359,40 @@ def expand_with_graph(
                 continue
             fetched: list[RetrievedChunkRecord] = []
             if query_vector is not None:
-                fetched = rank_law_chunks(
-                    client,
-                    collection_name=collection_name,
-                    query_vector=query_vector,
-                    law_id=target_law_id,
-                    static_filters=static_filters,
-                    limit=remaining,
-                    article_label_norm=article_label_norm,
-                    allowed_chunk_ids=allowed_chunk_ids,
-                )
+                try:
+                    fetched = rank_law_chunks(
+                        client,
+                        collection_name=collection_name,
+                        query_vector=query_vector,
+                        law_id=target_law_id,
+                        static_filters=static_filters,
+                        limit=remaining,
+                        article_label_norm=article_label_norm,
+                        allowed_chunk_ids=allowed_chunk_ids,
+                    )
+                except ResponseHandlingException:
+                    fetched = []
             if len(fetched) < remaining:
-                fallback = fetch_law_chunks(
-                    client,
-                    collection_name=collection_name,
-                    law_id=target_law_id,
-                    static_filters=static_filters,
-                    limit=remaining,
-                    article_label_norm=article_label_norm,
-                    allowed_chunk_ids=allowed_chunk_ids,
-                )
+                try:
+                    fallback = fetch_law_chunks(
+                        client,
+                        collection_name=collection_name,
+                        law_id=target_law_id,
+                        static_filters=static_filters,
+                        limit=remaining,
+                        article_label_norm=article_label_norm,
+                        allowed_chunk_ids=allowed_chunk_ids,
+                        graph=graph,
+                    )
+                except ResponseHandlingException:
+                    fallback = fetch_law_chunks_from_graph(
+                        graph,
+                        law_id=target_law_id,
+                        static_filters=static_filters,
+                        limit=remaining,
+                        article_label_norm=article_label_norm,
+                        allowed_chunk_ids=allowed_chunk_ids,
+                    )
                 fetched = _dedupe_chunks([*fetched, *fallback])[:remaining]
             new_chunks = [chunk for chunk in fetched if chunk.chunk_id not in seen_chunk_ids]
             if not new_chunks:
@@ -357,26 +430,36 @@ def _edge_confidence(edge: dict[str, Any]) -> float:
 
 def dense_vector_name(client: QdrantClient, *, collection_name: str) -> str | None:
     """Return the dense vector name, or None for unnamed-vector collections."""
-    info = client.get_collection(collection_name=collection_name)
+    cache_key = (id(client), collection_name)
+    if cache_key in _DENSE_VECTOR_NAME_CACHE:
+        return _DENSE_VECTOR_NAME_CACHE[cache_key]
+    info = _qdrant_call(lambda: client.get_collection(collection_name=collection_name))
     vectors = getattr(getattr(getattr(info, "config", None), "params", None), "vectors", None)
+    vector_name: str | None = None
     if isinstance(vectors, dict):
         if "dense" in vectors:
-            return "dense"
-        if vectors:
-            return str(next(iter(vectors)))
-    return None
+            vector_name = "dense"
+        elif vectors:
+            vector_name = str(next(iter(vectors)))
+    _DENSE_VECTOR_NAME_CACHE[cache_key] = vector_name
+    return vector_name
 
 
 def sparse_vector_name(client: QdrantClient, *, collection_name: str) -> str | None:
     """Return the sparse vector name if the collection has one."""
-    info = client.get_collection(collection_name=collection_name)
+    cache_key = (id(client), collection_name)
+    if cache_key in _SPARSE_VECTOR_NAME_CACHE:
+        return _SPARSE_VECTOR_NAME_CACHE[cache_key]
+    info = _qdrant_call(lambda: client.get_collection(collection_name=collection_name))
     sparse = getattr(getattr(getattr(info, "config", None), "params", None), "sparse_vectors", None)
+    vector_name: str | None = None
     if isinstance(sparse, dict):
         if "sparse" in sparse:
-            return "sparse"
-        if sparse:
-            return str(next(iter(sparse)))
-    return None
+            vector_name = "sparse"
+        elif sparse:
+            vector_name = str(next(iter(sparse)))
+    _SPARSE_VECTOR_NAME_CACHE[cache_key] = vector_name
+    return vector_name
 
 
 def manifest_disables_sparse(index_manifest: dict[str, Any]) -> bool:
@@ -387,6 +470,21 @@ def manifest_disables_sparse(index_manifest: dict[str, Any]) -> bool:
         (index_manifest.get("vectors") or {}).get("sparse_enabled") if isinstance(index_manifest.get("vectors"), dict) else None,
     ]
     return any(value is False for value in values)
+
+
+def _qdrant_call(operation: Callable[[], T], *, attempts: int = 5) -> T:
+    """Retry transient Qdrant HTTP disconnects from long diagnostic sweeps."""
+    last_error: ResponseHandlingException | None = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except ResponseHandlingException as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(0.2 * (attempt + 1))
+    assert last_error is not None
+    raise last_error
 
 
 def embed_sparse_query(embedder: SupportsEmbedding, query_text: str) -> qmodels.SparseVector:
@@ -418,12 +516,34 @@ def _coerce_sparse_vector(value: Any) -> qmodels.SparseVector:
 
 def _point_to_chunk(point: Any, *, score: float | None = None) -> RetrievedChunkRecord:
     payload = dict(point.payload or {})
-    return RetrievedChunkRecord(
-        chunk_id=str(payload.get("chunk_id") or point.id),
+    return _payload_to_chunk(
+        payload,
         score=float(score if score is not None else getattr(point, "score", 0.0)),
+        fallback_id=point.id,
+    )
+
+
+def _payload_to_chunk(payload: dict[str, Any], *, score: float, fallback_id: Any | None = None) -> RetrievedChunkRecord:
+    return RetrievedChunkRecord(
+        chunk_id=str(payload.get("chunk_id") or fallback_id or ""),
+        score=score,
         text=str(payload.get("text") or ""),
         payload=payload,
     )
+
+
+def _payload_matches_filters(payload: dict[str, Any], filters: dict[str, Any]) -> bool:
+    for key, expected in filters.items():
+        if expected is None:
+            continue
+        actual = payload.get(key)
+        expected_values = list(expected) if isinstance(expected, (list, tuple, set)) else [expected]
+        if isinstance(actual, list):
+            if not any(value in actual for value in expected_values):
+                return False
+        elif actual not in expected_values:
+            return False
+    return True
 
 
 def _dedupe_chunks(chunks: list[RetrievedChunkRecord]) -> list[RetrievedChunkRecord]:

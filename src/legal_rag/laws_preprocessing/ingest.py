@@ -45,7 +45,10 @@ COMMA_START_RE = re.compile(
 )
 LETTER_START_RE = re.compile(r"^(?P<lettera>[a-z])\)\s+", re.IGNORECASE)
 ABROGATION_FULL_RE = re.compile(
-    r"(legge\s+abrogata|\babrogat[oa]\b.*\bdall[ao]\b|\bnon\s+pi[uù]\s+in\s+vigore\b|\bcessat\w*\s+efficac)",
+    r"(legge\s+abrogata"
+    r"|\babrogat[oa]\b.*\bdall['’ao]"  # dall', dall’ (curly), dalla, dallo
+    r"|\bnon\s+pi[uù]\s+in\s+vigore\b"
+    r"|\bcessat\w*\s+efficac)",
     re.IGNORECASE,
 )
 PARTIAL_EXCEPTION_RE = re.compile(r"\babrogat[oa]\b.{0,120}\bad\s+eccezione", re.IGNORECASE | re.DOTALL)
