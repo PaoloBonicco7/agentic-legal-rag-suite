@@ -65,6 +65,12 @@ def _chunks(seq: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
         yield seq[i : i + size]
 
 
+def _optimizer_config(config: IndexingConfig) -> qmodels.OptimizersConfigDiff | None:
+    if config.qdrant_bulk_indexing_threshold_kb is None:
+        return None
+    return qmodels.OptimizersConfigDiff(indexing_threshold=int(config.qdrant_bulk_indexing_threshold_kb))
+
+
 def ensure_collection(
     client: QdrantClient,
     config: IndexingConfig,
@@ -99,18 +105,41 @@ def ensure_collection(
         client.create_collection(
             collection_name=collection_name,
             vectors_config={
-                DENSE_VECTOR_NAME: qmodels.VectorParams(size=int(vector_size), distance=_distance_enum(config.qdrant_distance))
+                DENSE_VECTOR_NAME: qmodels.VectorParams(
+                    size=int(vector_size),
+                    distance=_distance_enum(config.qdrant_distance),
+                )
             },
             sparse_vectors_config={
                 SPARSE_VECTOR_NAME: qmodels.SparseVectorParams(index=qmodels.SparseIndexParams(on_disk=False))
             }
             if config.hybrid_enabled
             else None,
+            shard_number=config.qdrant_shard_number,
             on_disk_payload=config.qdrant_on_disk_payload,
             hnsw_config=qmodels.HnswConfigDiff(m=config.qdrant_hnsw_m, ef_construct=config.qdrant_hnsw_ef_construct),
+            optimizers_config=_optimizer_config(config),
         )
     payload_index_statuses = create_payload_indexes(client, collection_name=collection_name)
     return (not exists, removed_count, payload_index_statuses)
+
+
+def restore_collection_indexing_threshold(
+    client: QdrantClient,
+    config: IndexingConfig,
+    *,
+    collection_name: str,
+) -> bool:
+    """Restore the normal indexing threshold after a bulk load, when configured."""
+    if config.qdrant_bulk_indexing_threshold_kb is None:
+        return False
+    client.update_collection(
+        collection_name=collection_name,
+        optimizers_config=qmodels.OptimizersConfigDiff(
+            indexing_threshold=int(config.qdrant_restore_indexing_threshold_kb)
+        ),
+    )
+    return True
 
 
 def create_payload_indexes(client: QdrantClient, *, collection_name: str) -> dict[str, str]:
@@ -161,6 +190,8 @@ def upload_point_batch(
     points: list[PreparedPoint],
     vectors: list[list[float]],
     max_retries: int,
+    upload_batch_size: int,
+    upload_parallel: int = 1,
     sparse_vectors: list[tuple[list[int], list[float]]] | None = None,
 ) -> None:
     """Upload one point batch with a small retry loop."""
@@ -177,7 +208,17 @@ def upload_point_batch(
     last_error: Exception | None = None
     for attempt in range(max(1, int(max_retries))):
         try:
-            client.upsert(collection_name=collection_name, points=qdrant_points, wait=True)
+            if upload_parallel > 1:
+                client.upload_points(
+                    collection_name=collection_name,
+                    points=qdrant_points,
+                    batch_size=int(upload_batch_size),
+                    parallel=int(upload_parallel),
+                    max_retries=int(max_retries),
+                    wait=True,
+                )
+            else:
+                client.upsert(collection_name=collection_name, points=qdrant_points, wait=True)
             return
         except Exception as exc:
             last_error = exc

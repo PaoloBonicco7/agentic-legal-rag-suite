@@ -96,10 +96,14 @@ class IndexingConfig(BaseModel):
 
     upload_batch_size: int = Field(default=64, gt=0)
     upload_max_retries: int = Field(default=3, ge=1)
+    qdrant_upload_parallel: int = Field(default=1, ge=1)
     qdrant_distance: Literal["cosine", "dot", "euclid", "manhattan"] = "cosine"
     qdrant_on_disk_payload: bool = True
     qdrant_hnsw_m: int = Field(default=16, ge=0)
     qdrant_hnsw_ef_construct: int = Field(default=100, gt=0)
+    qdrant_shard_number: int | None = Field(default=None, gt=0)
+    qdrant_bulk_indexing_threshold_kb: int | None = Field(default=None, gt=0)
+    qdrant_restore_indexing_threshold_kb: int = Field(default=20_000, gt=0)
     diagnostic_queries: list[str] = Field(
         default_factory=lambda: [
             "contributi regionali",

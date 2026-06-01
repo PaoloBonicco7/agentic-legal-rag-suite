@@ -11,7 +11,7 @@ from typing import Any, Callable, Sequence
 from qdrant_client import QdrantClient
 
 from .dataset import load_chunks, read_manifest, validate_clean_dataset
-from .embeddings import SupportsEmbedding, supports_sparse_embedding
+from .embeddings import SupportsEmbedding, supports_hybrid_embedding, supports_sparse_embedding
 from .embeddings import build_embedder
 from .hashing import content_hash_for_text, payload_hash, point_id_from_chunk_id
 from .io import finalize_run_dir, now_utc, prepare_run_dir, sha256_file, write_json, write_jsonl
@@ -23,6 +23,7 @@ from .qdrant_store import (
     connect_qdrant,
     ensure_collection,
     fetch_existing_content_hashes,
+    restore_collection_indexing_threshold,
     upload_point_batch,
     validate_no_duplicate_chunk_ids,
 )
@@ -244,14 +245,20 @@ def _sync_points(
         batch_number = (start // config.batch_size) + 1
         batch_total = ((total_to_process + config.batch_size - 1) // config.batch_size) if total_to_process else 0
         try:
-            vectors = embedder.embed_texts([point.embedding_text for point in batch])
-            if len(vectors) != len(batch):
-                raise RuntimeError(f"Embedding vector count mismatch: got {len(vectors)}, expected {len(batch)}")
+            batch_texts = [point.embedding_text for point in batch]
             sparse_vectors = None
             if config.hybrid_enabled:
                 if not supports_sparse_embedding(embedder):
                     raise RuntimeError("Hybrid indexing requires an embedder with embed_sparse_texts().")
-                sparse_vectors = embedder.embed_sparse_texts([point.embedding_text for point in batch])  # type: ignore[attr-defined]
+                if supports_hybrid_embedding(embedder):
+                    vectors, sparse_vectors = embedder.embed_dense_and_sparse_texts(batch_texts)  # type: ignore[attr-defined]
+                else:
+                    vectors = embedder.embed_texts(batch_texts)
+                    sparse_vectors = embedder.embed_sparse_texts(batch_texts)  # type: ignore[attr-defined]
+            else:
+                vectors = embedder.embed_texts(batch_texts)
+            if len(vectors) != len(batch):
+                raise RuntimeError(f"Embedding vector count mismatch: got {len(vectors)}, expected {len(batch)}")
         except Exception as exc:
             if len(batch) == 1:
                 failures.append({"chunk_id": batch[0].chunk_id, "stage": "embedding", "error": str(exc)})
@@ -264,12 +271,17 @@ def _sync_points(
                 continue
             for point in batch:
                 try:
-                    vector = embedder.embed_texts([point.embedding_text])
                     sparse_vector = None
                     if config.hybrid_enabled:
                         if not supports_sparse_embedding(embedder):
                             raise RuntimeError("Hybrid indexing requires an embedder with embed_sparse_texts().")
-                        sparse_vector = embedder.embed_sparse_texts([point.embedding_text])  # type: ignore[attr-defined]
+                        if supports_hybrid_embedding(embedder):
+                            vector, sparse_vector = embedder.embed_dense_and_sparse_texts([point.embedding_text])  # type: ignore[attr-defined]
+                        else:
+                            vector = embedder.embed_texts([point.embedding_text])
+                            sparse_vector = embedder.embed_sparse_texts([point.embedding_text])  # type: ignore[attr-defined]
+                    else:
+                        vector = embedder.embed_texts([point.embedding_text])
                     upload_point_batch(
                         client,
                         collection_name=collection_name,
@@ -277,6 +289,8 @@ def _sync_points(
                         vectors=vector,
                         sparse_vectors=sparse_vector,
                         max_retries=config.upload_max_retries,
+                        upload_batch_size=config.upload_batch_size,
+                        upload_parallel=config.qdrant_upload_parallel,
                     )
                     embedded += 1
                     upserted += 1
@@ -303,6 +317,8 @@ def _sync_points(
                     vectors=vector_batch,
                     sparse_vectors=sparse_vector_batch,
                     max_retries=config.upload_max_retries,
+                    upload_batch_size=config.upload_batch_size,
+                    upload_parallel=config.qdrant_upload_parallel,
                 )
                 upserted += len(point_batch)
             except Exception as exc:
@@ -319,6 +335,8 @@ def _sync_points(
                             vectors=[vector],
                             sparse_vectors=sparse_vector,
                             max_retries=config.upload_max_retries,
+                            upload_batch_size=config.upload_batch_size,
+                            upload_parallel=config.qdrant_upload_parallel,
                         )
                         upserted += 1
                     except Exception as inner_exc:
@@ -391,9 +409,28 @@ def run_indexing_pipeline(
         points = _prepare_points(chunks, dataset_hash=source_hash, embedding_model=cfg.resolved_embedding_model)
         if not points:
             raise RuntimeError("No chunks selected for indexing")
+        if progress_callback:
+            progress_callback(
+                {
+                    "event": "dataset_ready",
+                    "selected": len(points),
+                    "chunk_selection_mode": cfg.chunk_selection_mode,
+                    "sample_size": cfg.sample_size,
+                    "collection_name": cfg.collection_name,
+                }
+            )
 
         if embedder is None:
             embedder = build_embedder(cfg)
+        if progress_callback:
+            progress_callback(
+                {
+                    "event": "embedder_ready",
+                    "backend": cfg.embedding_backend,
+                    "model": getattr(embedder, "model_name", cfg.resolved_embedding_model),
+                    "hybrid_enabled": cfg.hybrid_enabled,
+                }
+            )
         probe = embedder.embed_texts([points[0].embedding_text])
         vector_size = len(probe[0])
         if vector_size <= 0:
@@ -402,6 +439,8 @@ def run_indexing_pipeline(
             raise RuntimeError(f"Embedding dim mismatch: configured={cfg.embedding_dim}, detected={vector_size}")
         if cfg.hybrid_enabled and not supports_sparse_embedding(embedder):
             raise RuntimeError("hybrid_enabled=True requires an embedding backend that exposes sparse vectors")
+        if progress_callback:
+            progress_callback({"event": "embedding_probe_finished", "vector_size": vector_size})
 
         if client is None:
             client = connect_qdrant(cfg)
@@ -412,6 +451,15 @@ def run_indexing_pipeline(
             collection_name=collection_name,
             vector_size=vector_size,
         )
+        if progress_callback:
+            progress_callback(
+                {
+                    "event": "collection_ready",
+                    "collection_name": collection_name,
+                    "created": created_collection,
+                    "removed_count": removed_count,
+                }
+            )
         sync_stats = _sync_points(
             client,
             collection_name=collection_name,
@@ -420,6 +468,15 @@ def run_indexing_pipeline(
             config=cfg,
             progress_callback=progress_callback,
         )
+        indexing_threshold_restored = restore_collection_indexing_threshold(client, cfg, collection_name=collection_name)
+        if progress_callback and indexing_threshold_restored:
+            progress_callback(
+                {
+                    "event": "optimizer_indexing_threshold_restored",
+                    "collection_name": collection_name,
+                    "indexing_threshold_kb": cfg.qdrant_restore_indexing_threshold_kb,
+                }
+            )
 
         failures = list(sync_stats.failures)
         write_jsonl(tmp_dir / "failures.jsonl", failures)
@@ -477,6 +534,11 @@ def run_indexing_pipeline(
                 field["missing"] == 0 for field in payload_profile["fields"].values()
             ),
         }
+        restore_indexing_threshold_kb = (
+            cfg.qdrant_restore_indexing_threshold_kb
+            if cfg.qdrant_bulk_indexing_threshold_kb is not None
+            else None
+        )
         index_manifest = {
             "schema_version": INDEXING_SCHEMA_VERSION,
             "created_at": now_utc(),
@@ -496,6 +558,14 @@ def run_indexing_pipeline(
                 "sparse_vector_name": "sparse" if cfg.hybrid_enabled else None,
                 "distance": cfg.qdrant_distance,
                 "on_disk_payload": cfg.qdrant_on_disk_payload,
+                "shard_number": cfg.qdrant_shard_number,
+                "hnsw_m": cfg.qdrant_hnsw_m,
+                "hnsw_ef_construct": cfg.qdrant_hnsw_ef_construct,
+                "upload_batch_size": cfg.upload_batch_size,
+                "upload_parallel": cfg.qdrant_upload_parallel,
+                "bulk_indexing_threshold_kb": cfg.qdrant_bulk_indexing_threshold_kb,
+                "restore_indexing_threshold_kb": restore_indexing_threshold_kb,
+                "indexing_threshold_restored": indexing_threshold_restored,
             },
             "embedding": {
                 "backend": cfg.embedding_backend,
@@ -541,6 +611,18 @@ def run_indexing_pipeline(
             raise RuntimeError(f"Index quality gates failed: {gates}")
 
         finalize_run_dir(tmp_dir, final_dir)
+        if progress_callback:
+            progress_callback(
+                {
+                    "event": "run_finished",
+                    "run_id": run_id,
+                    "collection_name": collection_name,
+                    "ready_for_retrieval": index_manifest["ready_for_retrieval"],
+                    "indexed_count": indexed_count,
+                    "collection_points_count": point_count,
+                    "failure_count": sync_stats.failure_count,
+                }
+            )
         return index_manifest
     except Exception:
         if tmp_dir.exists():

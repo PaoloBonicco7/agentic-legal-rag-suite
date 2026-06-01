@@ -17,6 +17,8 @@ The vector store, embedding backend, and retrieval strategy are fixed at the pro
   - `index_dir: str` (default `data/indexes/qdrant`).
   - `runs_dir: str` (default `data/indexing_runs`).
   - `collection_name: str` (default `legal_chunks`).
+  - `qdrant_url: str | None` (default `None`; set to `http://127.0.0.1:6333` for Docker/server mode).
+  - `qdrant_api_key: str` (default empty, used only for authenticated server targets).
   - `embedding_backend: Literal["local","utopia"]` (default `local`).
   - `embedding_model: str` (default `BAAI/bge-m3`).
   - `embedding_dim: int | None` (optional override; otherwise derived from the model).
@@ -25,11 +27,17 @@ The vector store, embedding backend, and retrieval strategy are fixed at the pro
   - `sample_size: int | None` (used only when `chunk_selection_mode == "sample"`).
   - `force_rebuild: bool` (default `False`).
   - `batch_size: int` (default `64`).
+  - `upload_batch_size: int` (default `64`).
+  - `qdrant_upload_parallel: int` (default `1`; use `2-4` for Docker bulk upload).
+  - `qdrant_shard_number: int | None` (optional server-side shard count for bulk indexing).
+  - `qdrant_bulk_indexing_threshold_kb: int | None` (optional high temporary threshold to defer HNSW build during initial bulk load).
+  - `qdrant_restore_indexing_threshold_kb: int` (default `20000`, restored after bulk upload when the temporary threshold is used).
   - `env_file: str | None` (default `.env`, used to load `UTOPIA_*` credentials when `embedding_backend == "utopia"`).
 
 ## Embedding and Vector Store
 
-- **Vector store**: Qdrant in local persistent file mode at `index_dir`. The collection is created on first run and reused on subsequent runs unless `force_rebuild=True`.
+- **Vector store**: Qdrant local persistent file mode at `index_dir` for demo/smoke runs, or Qdrant Docker/server mode when `qdrant_url` is set. Full BGE-M3 runs should use Docker/server mode with dedicated storage under `data/indexes/qdrant_server`. The collection is created on first run and reused on subsequent runs unless `force_rebuild=True`.
+- **Parallel collections**: experiments that change embedding model or vector topology must use a new `collection_name` instead of overwriting a historical collection. The BGE-M3 hybrid retrieval index uses `legal_chunks_bge_m3` while the previous `legal_chunks` collection remains available for baseline runs.
 - **Distance metric**: `Cosine` for dense vectors.
 - **Dense vector**: produced by the configured embedding backend.
   - Backend `local`: model loaded via `sentence-transformers` or `FlagEmbedding`. Default `BAAI/bge-m3`, dim `1024`.
@@ -39,7 +47,7 @@ The vector store, embedding backend, and retrieval strategy are fixed at the pro
   - For other local models without native sparse output: use `qdrant-client[fastembed]` BM25 sparse encoder client-side.
   - For `utopia` backend: hybrid is supported only if the configured remote model exposes sparse weights; otherwise indexing fails with a clear error and the user must either disable hybrid or switch backend.
 - **Embedding input text**: every chunk is embedded using its `text_for_embedding` field from step 01 (not the raw `text`), to preserve legal context like article label and structure path.
-- **Payload indexes**: at index creation, payload indexes are created for `law_id`, `law_status`, `index_views`, `article_id`, and `relation_types` so that filters at query time are efficient.
+- **Payload indexes and bulk indexing**: at index creation, payload indexes are created for `law_id`, `law_status`, `index_views`, `article_id`, and `relation_types` before points are uploaded. Docker/server full runs may temporarily raise Qdrant's indexing threshold during upload and restore it afterward so HNSW construction happens after the bulk load.
 
 ## Idempotency and Rebuild
 
@@ -49,13 +57,14 @@ The vector store, embedding backend, and retrieval strategy are fixed at the pro
   - if `content_hash` differs, the point is upserted with the new vectors and payload;
   - if no point with that id exists, it is inserted.
 - On re-run with `force_rebuild=True`, the collection is dropped and recreated from scratch.
+  This operation is scoped to the configured `collection_name`; other collections in the same Qdrant local path or server storage are not removed.
 - The manifest records counts for `inserted`, `updated`, `skipped`, and `removed` (the last only when rebuild is requested).
 
 ## Outputs
 
 Default generated output locations:
 
-- retrieval index under `data/indexes/qdrant/` (Qdrant local persistent files);
+- retrieval index under `data/indexes/qdrant/` for local mode or `data/indexes/qdrant_server/` for Docker/server mode;
 - indexing artifacts under `data/indexing_runs/<timestamp>/`.
 
 Required artifacts:
@@ -140,13 +149,15 @@ The index manifest must record the source dataset hash, the embedding backend, t
 - run a small indexing job in `sample` mode to demonstrate the pipeline quickly;
 - show the Qdrant collection schema, a representative payload, and the payload profile;
 - run a few diagnostic queries (one filter-only, one dense-only, one hybrid) to confirm that retrieval and filters work;
-- run the full indexing pipeline on the entire clean dataset and produce the final artifacts.
+- provide a guarded, monitorable full BGE-M3 re-index section for `legal_chunks_bge_m3` against Qdrant Docker/server mode, with progress output and a JSONL progress log under `data/indexing_runs/`;
+- run the full indexing pipeline on the entire clean dataset and produce the final artifacts when the guarded full-run cell is explicitly enabled.
 
 The notebook should explain the payload fields because they are the bridge between preprocessing (step 01) and RAG behavior (steps 05 and 06), and should explicitly note which retrieval modes the produced collection supports.
 
 ## Acceptance Criteria
 
 - The clean dataset can be indexed reproducibly under both `local` and `utopia` embedding backends, with hybrid enabled when the chosen backend supports sparse vectors.
+- Full BGE-M3 indexing can target Qdrant Docker/server mode via `qdrant_url`, records `qdrant.mode="server"` in the manifest, and restores the normal indexing threshold after bulk upload when a temporary threshold was configured.
 - The collection topology and payload contract are sufficient for simple RAG (step 05) and advanced graph RAG (step 06) without further indexing changes.
 - The index can be traced back to the exact clean dataset hash and embedding model identity recorded in the manifest.
 - Re-running indexing without changes is a no-op (all points skipped); re-running after a chunk content change updates only the affected points.

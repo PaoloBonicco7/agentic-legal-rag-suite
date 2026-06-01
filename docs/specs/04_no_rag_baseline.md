@@ -10,6 +10,7 @@ This step provides the scientific baseline for the thesis: it shows what the mod
 
 - Clean evaluation datasets from step 02.
 - Baseline configuration (`NoRagConfig` Pydantic model): `chat_model`, `judge_model`, `prompt_version` (default `no-rag-prompts-v1`), `benchmark_size`, `start`, `smoke`, `retry_attempts`, `random_seed` if sampling is used, `env_file` (default `.env`).
+- Optional OpenRouter chat fallback via `.env`: `OPENROUTER_FALLBACK_ENABLED=true`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`), and `OPENROUTER_CHAT_MODEL` (default `openai/gpt-oss-120b`). The fallback is used only for transient Utopia chat failures and must be recorded in the run manifest when enabled.
 
 No legal retrieval index is used in this step.
 
@@ -106,4 +107,3 @@ The notebook should explain why this baseline matters before introducing retriev
 - Summary metrics can be compared directly with simple and advanced RAG results.
 - Row-level outputs make wrong or failed cases inspectable.
 - The baseline can be explained without any retrieval-specific logic.
-

@@ -12,4 +12,6 @@ Step intent and contracts belong in `docs/specs/`.
 - [03 - Metodologia di Indicizzazione](03_indexing_contract_methodology.md)
 - [04 - Metodologia del Baseline No-RAG](04_no_rag_baseline_methodology.md)
 - [06 - Metodologia Advanced Graph RAG](06_advanced_graph_rag_methodology.md)
+- [06b - Metodologia Retrieval Diagnostics](06b_retrieval_diagnostics_methodology.md)
+- [06b - Log Esperimenti Retrieval](06b_retrieval_experiments_log.md)
 - [06b - UI Advanced Graph RAG](06b_advanced_graph_rag_ui.md)

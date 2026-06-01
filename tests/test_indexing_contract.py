@@ -14,6 +14,12 @@ from legal_rag.indexing import (
     validate_clean_dataset,
 )
 from legal_rag.indexing.cli import main as indexing_main
+from legal_rag.indexing.qdrant_store import (
+    PreparedPoint,
+    ensure_collection,
+    restore_collection_indexing_threshold,
+    upload_point_batch,
+)
 
 
 class FakeEmbedder:
@@ -117,6 +123,7 @@ def test_run_indexing_pipeline_creates_qdrant_contract_artifacts(tmp_path: Path)
     chunks = [_chunk("c1", text="Contributi regionali."), _chunk("c2", text="Formazione professionale.")]
     _write_dataset(dataset, chunks)
     client = QdrantClient(":memory:")
+    progress_events: list[dict[str, object]] = []
 
     manifest = run_indexing_pipeline(
         IndexingConfig(
@@ -130,6 +137,7 @@ def test_run_indexing_pipeline_creates_qdrant_contract_artifacts(tmp_path: Path)
         ),
         embedder=FakeEmbedder(),
         client=client,
+        progress_callback=progress_events.append,
     )
 
     assert manifest["ready_for_retrieval"] is True
@@ -145,6 +153,15 @@ def test_run_indexing_pipeline_creates_qdrant_contract_artifacts(tmp_path: Path)
     stored = json.loads((run_dir / "index_manifest.json").read_text(encoding="utf-8"))
     assert stored["source_hash"] == "source-hash"
     assert "law_id" in stored["payload_indexes"]
+    assert [event["event"] for event in progress_events] == [
+        "dataset_ready",
+        "embedder_ready",
+        "embedding_probe_finished",
+        "collection_ready",
+        "sync_started",
+        "batch_finished",
+        "run_finished",
+    ]
 
 
 def test_run_indexing_pipeline_reuse_skips_unchanged_points(tmp_path: Path) -> None:
@@ -173,6 +190,92 @@ def test_run_indexing_pipeline_reuse_skips_unchanged_points(tmp_path: Path) -> N
     assert manifest["upserted_count"] == 0
 
 
+def test_ensure_collection_applies_qdrant_server_tuning() -> None:
+    class FakeQdrantClient:
+        def __init__(self) -> None:
+            self.created: dict[str, object] = {}
+            self.updated: dict[str, object] = {}
+
+        def collection_exists(self, *, collection_name: str) -> bool:
+            return False
+
+        def create_collection(self, **kwargs: object) -> None:
+            self.created = kwargs
+
+        def create_payload_index(self, **kwargs: object) -> None:
+            return None
+
+        def update_collection(self, **kwargs: object) -> None:
+            self.updated = kwargs
+
+    client = FakeQdrantClient()
+    config = IndexingConfig(
+        collection_name="server_collection",
+        qdrant_shard_number=4,
+        qdrant_bulk_indexing_threshold_kb=10_000_000,
+        qdrant_restore_indexing_threshold_kb=20_000,
+    )
+
+    created, removed_count, statuses = ensure_collection(
+        client,  # type: ignore[arg-type]
+        config,
+        collection_name="server_collection",
+        vector_size=4,
+    )
+    restored = restore_collection_indexing_threshold(
+        client,  # type: ignore[arg-type]
+        config,
+        collection_name="server_collection",
+    )
+
+    assert created is True
+    assert removed_count == 0
+    assert statuses["law_id"] == "created"
+    assert client.created["shard_number"] == 4
+    assert client.created["optimizers_config"].indexing_threshold == 10_000_000  # type: ignore[union-attr]
+    assert restored is True
+    assert client.updated["optimizers_config"].indexing_threshold == 20_000  # type: ignore[union-attr]
+
+
+def test_upload_point_batch_can_use_parallel_upload_points() -> None:
+    class FakeQdrantClient:
+        def __init__(self) -> None:
+            self.upload_calls: list[dict[str, object]] = []
+            self.upsert_calls: list[dict[str, object]] = []
+
+        def upload_points(self, **kwargs: object) -> None:
+            self.upload_calls.append(kwargs)
+
+        def upsert(self, **kwargs: object) -> None:
+            self.upsert_calls.append(kwargs)
+
+    client = FakeQdrantClient()
+    point = PreparedPoint(
+        chunk_id="c1",
+        point_id="8d927ca1-6c96-5639-b69d-75bc1dd7ab35",
+        embedding_text="test",
+        payload={"chunk_id": "c1"},
+        content_hash="hash",
+    )
+
+    upload_point_batch(
+        client,  # type: ignore[arg-type]
+        collection_name="server_collection",
+        points=[point],
+        vectors=[[1.0, 0.0, 0.0, 0.0]],
+        sparse_vectors=[([1], [1.0])],
+        max_retries=3,
+        upload_batch_size=128,
+        upload_parallel=4,
+    )
+
+    assert not client.upsert_calls
+    assert client.upload_calls[0]["batch_size"] == 128
+    assert client.upload_calls[0]["parallel"] == 4
+    assert client.upload_calls[0]["max_retries"] == 3
+    assert client.upload_calls[0]["wait"] is True
+
+
 def test_indexing_cli_smoke_with_injected_pipeline(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def fake_run(config: IndexingConfig) -> dict[str, object]:
         assert config.sample_size == 1
@@ -190,3 +293,42 @@ def test_indexing_cli_smoke_with_injected_pipeline(monkeypatch: pytest.MonkeyPat
     out = json.loads(capsys.readouterr().out)
     assert out["ready_for_retrieval"] is True
     assert out["collection_name"] == "cli_collection"
+
+
+def test_indexing_cli_parses_qdrant_server_tuning(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(config: IndexingConfig) -> dict[str, object]:
+        captured.update(config.model_dump())
+        return {
+            "ready_for_retrieval": True,
+            "collection_name": "cli_collection",
+            "indexed_count": 1,
+            "run_id": "cli",
+        }
+
+    monkeypatch.setattr("legal_rag.indexing.cli.run_indexing_pipeline", fake_run)
+
+    assert indexing_main(
+        [
+            "--qdrant-url",
+            "http://127.0.0.1:6333",
+            "--qdrant-api-key",
+            "secret",
+            "--qdrant-upload-parallel",
+            "4",
+            "--qdrant-shard-number",
+            "4",
+            "--qdrant-bulk-indexing-threshold-kb",
+            "10000000",
+            "--qdrant-restore-indexing-threshold-kb",
+            "20000",
+        ]
+    ) == 0
+
+    assert captured["qdrant_url"] == "http://127.0.0.1:6333"
+    assert captured["qdrant_api_key"] == "secret"
+    assert captured["qdrant_upload_parallel"] == 4
+    assert captured["qdrant_shard_number"] == 4
+    assert captured["qdrant_bulk_indexing_threshold_kb"] == 10_000_000
+    assert captured["qdrant_restore_indexing_threshold_kb"] == 20_000

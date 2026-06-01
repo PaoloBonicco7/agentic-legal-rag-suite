@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import weakref
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
@@ -18,8 +19,8 @@ from legal_rag.simple_rag.retrieval import build_static_filter, resolve_index_ma
 
 from .models import AdvancedRagConfig, GraphRelationUsed
 
-_DENSE_VECTOR_NAME_CACHE: dict[tuple[int, str], str | None] = {}
-_SPARSE_VECTOR_NAME_CACHE: dict[tuple[int, str], str | None] = {}
+_DENSE_VECTOR_NAME_CACHE: weakref.WeakKeyDictionary[QdrantClient, dict[str, str | None]] = weakref.WeakKeyDictionary()
+_SPARSE_VECTOR_NAME_CACHE: weakref.WeakKeyDictionary[QdrantClient, dict[str, str | None]] = weakref.WeakKeyDictionary()
 T = TypeVar("T")
 
 
@@ -430,9 +431,9 @@ def _edge_confidence(edge: dict[str, Any]) -> float:
 
 def dense_vector_name(client: QdrantClient, *, collection_name: str) -> str | None:
     """Return the dense vector name, or None for unnamed-vector collections."""
-    cache_key = (id(client), collection_name)
-    if cache_key in _DENSE_VECTOR_NAME_CACHE:
-        return _DENSE_VECTOR_NAME_CACHE[cache_key]
+    client_cache = _DENSE_VECTOR_NAME_CACHE.setdefault(client, {})
+    if collection_name in client_cache:
+        return client_cache[collection_name]
     info = _qdrant_call(lambda: client.get_collection(collection_name=collection_name))
     vectors = getattr(getattr(getattr(info, "config", None), "params", None), "vectors", None)
     vector_name: str | None = None
@@ -441,15 +442,15 @@ def dense_vector_name(client: QdrantClient, *, collection_name: str) -> str | No
             vector_name = "dense"
         elif vectors:
             vector_name = str(next(iter(vectors)))
-    _DENSE_VECTOR_NAME_CACHE[cache_key] = vector_name
+    client_cache[collection_name] = vector_name
     return vector_name
 
 
 def sparse_vector_name(client: QdrantClient, *, collection_name: str) -> str | None:
     """Return the sparse vector name if the collection has one."""
-    cache_key = (id(client), collection_name)
-    if cache_key in _SPARSE_VECTOR_NAME_CACHE:
-        return _SPARSE_VECTOR_NAME_CACHE[cache_key]
+    client_cache = _SPARSE_VECTOR_NAME_CACHE.setdefault(client, {})
+    if collection_name in client_cache:
+        return client_cache[collection_name]
     info = _qdrant_call(lambda: client.get_collection(collection_name=collection_name))
     sparse = getattr(getattr(getattr(info, "config", None), "params", None), "sparse_vectors", None)
     vector_name: str | None = None
@@ -458,7 +459,7 @@ def sparse_vector_name(client: QdrantClient, *, collection_name: str) -> str | N
             vector_name = "sparse"
         elif sparse:
             vector_name = str(next(iter(sparse)))
-    _SPARSE_VECTOR_NAME_CACHE[cache_key] = vector_name
+    client_cache[collection_name] = vector_name
     return vector_name
 
 
@@ -506,6 +507,12 @@ def _coerce_sparse_vector(value: Any) -> qmodels.SparseVector:
         return qmodels.SparseVector(
             indices=[int(item) for item in value.get("indices", [])],
             values=[float(item) for item in value.get("values", [])],
+        )
+    if isinstance(value, tuple) and len(value) == 2:
+        indices, values = value
+        return qmodels.SparseVector(
+            indices=[int(item) for item in indices],
+            values=[float(item) for item in values],
         )
     indices = getattr(value, "indices", None)
     values = getattr(value, "values", None)

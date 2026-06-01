@@ -10,6 +10,8 @@ from legal_rag.simple_rag.prompts import format_context_chunks, format_options
 
 from .models import AdvancedMcqAnswerOutput, AdvancedNoHintAnswerOutput, RerankOutput
 
+RERANK_PROMPT_VERSION = "rerank-v1"
+
 
 def schema_dict(model_cls: type[AdvancedMcqAnswerOutput] | type[AdvancedNoHintAnswerOutput] | type[RerankOutput]) -> dict[str, Any]:
     """Return a JSON schema payload accepted by Ollama-compatible structured chat."""
@@ -96,6 +98,7 @@ def build_no_hint_prompt(record: dict[str, Any], context_text: str) -> str:
 
 
 __all__ = [
+    "RERANK_PROMPT_VERSION",
     "build_mcq_prompt",
     "build_no_hint_prompt",
     "build_rerank_prompt",

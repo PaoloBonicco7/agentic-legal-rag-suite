@@ -39,9 +39,24 @@ class SupportsSparseEmbedding(SupportsEmbedding, Protocol):
         ...
 
 
+class SupportsHybridEmbedding(SupportsSparseEmbedding, Protocol):
+    """Embedding interface for backends that produce dense + sparse in a single pass."""
+
+    def embed_dense_and_sparse_texts(
+        self, texts: list[str]
+    ) -> tuple[list[list[float]], list[SparseVectorData]]:
+        """Embed dense and sparse vectors in a single forward pass."""
+        ...
+
+
 def supports_sparse_embedding(embedder: SupportsEmbedding) -> bool:
     """Return whether the embedder exposes sparse vectors."""
     return callable(getattr(embedder, "embed_sparse_texts", None))
+
+
+def supports_hybrid_embedding(embedder: SupportsEmbedding) -> bool:
+    """Return whether the embedder can produce dense + sparse vectors in one pass."""
+    return callable(getattr(embedder, "embed_dense_and_sparse_texts", None))
 
 
 def _clean_texts(texts: list[str]) -> list[str]:
@@ -161,6 +176,24 @@ class LocalEmbeddingBackend:
             values = list(getattr(vector, "values", []) or [])
             out.append(([int(idx) for idx in indices], [float(value) for value in values]))
         return _validate_sparse_vectors(out, len(cleaned))
+
+    def embed_dense_and_sparse_texts(
+        self, texts: list[str]
+    ) -> tuple[list[list[float]], list[SparseVectorData]]:
+        """Encode dense + sparse in one forward pass when BGE-M3 is the backend."""
+        cleaned = _clean_texts(texts)
+        if self._bge_model is not None:
+            encoded = self._bge_model.encode(cleaned, return_dense=True, return_sparse=True)
+            dense_raw = encoded.get("dense_vecs") if isinstance(encoded, dict) else None
+            lexical_weights = encoded.get("lexical_weights") if isinstance(encoded, dict) else None
+            if dense_raw is None or lexical_weights is None:
+                raise RuntimeError("BGE-M3 hybrid encode did not return both dense and sparse outputs")
+            dense_vectors = _validate_dense_vectors(dense_raw, len(cleaned))
+            sparse_vectors = _validate_sparse_vectors(
+                [_sparse_from_mapping(row) for row in lexical_weights], len(cleaned)
+            )
+            return dense_vectors, sparse_vectors
+        return self.embed_texts(cleaned), self.embed_sparse_texts(cleaned)
 
 
 @dataclass

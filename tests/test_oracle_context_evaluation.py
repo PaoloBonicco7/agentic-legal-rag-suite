@@ -18,9 +18,11 @@ from legal_rag.oracle_context_evaluation import (
     split_reference_values,
 )
 from legal_rag.oracle_context_evaluation.llm import (
+    FallbackStructuredChatClient,
     discover_utopia_api_models,
     parse_openai_structured_content,
     resolve_openai_chat_completions_url,
+    resolve_openrouter_runtime,
 )
 from legal_rag.oracle_context_evaluation.runner import resolve_utopia_runtime
 from legal_rag.oracle_context_evaluation.runner import resolve_answer_model, resolve_judge_model
@@ -47,6 +49,48 @@ class FakeStructuredClient:
         if "score" in properties:
             return {"structured": {"score": 2, "explanation": "Correct fake answer."}}
         raise AssertionError(f"Unexpected schema: {payload_schema}")
+
+
+class TimeoutPrimaryClient:
+    def structured_chat(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        payload_schema: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        import requests
+
+        raise requests.Timeout("utopia unavailable")
+
+
+class BadRequestPrimaryClient:
+    def structured_chat(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        payload_schema: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        raise RuntimeError("HTTP 400 on https://utopia.example/ollama/api/chat. Body: bad model")
+
+
+class RecordingFallbackClient:
+    def __init__(self) -> None:
+        self.model: str | None = None
+
+    def structured_chat(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        payload_schema: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        self.model = model
+        return {"structured": {"ok": True}, "response_json": {"choices": []}}
 
 
 class ObservedSlowClient:
@@ -340,6 +384,63 @@ def test_resolve_utopia_runtime_loads_env_file_without_leaking_key(tmp_path: Pat
     assert runtime["api_key_present"] is True
     assert runtime["env_file_loaded"] is True
     assert "UTOPIA_API_KEY" not in runtime["env_keys_loaded"]
+
+
+def test_resolve_openrouter_runtime_uses_openai_compatible_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_CHAT_COMPLETIONS_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_CHAT_MODEL", raising=False)
+
+    runtime = resolve_openrouter_runtime()
+
+    assert runtime["provider"] == "openrouter"
+    assert runtime["api_url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert runtime["chat_model"] == "openai/gpt-oss-120b"
+    assert runtime["api_key"] == "openrouter-secret"
+
+
+def test_fallback_client_uses_openrouter_model_for_transient_primary_failure() -> None:
+    fallback = RecordingFallbackClient()
+    client = FallbackStructuredChatClient(
+        primary=TimeoutPrimaryClient(),
+        fallback=fallback,
+        fallback_model="openai/gpt-oss-120b",
+        fallback_provider="openrouter",
+    )
+
+    result = client.structured_chat(
+        prompt="test",
+        model="SLURM.gpt-oss:120b",
+        payload_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+        timeout_seconds=1,
+    )
+
+    assert fallback.model == "openai/gpt-oss-120b"
+    assert result["structured"] == {"ok": True}
+    assert result["provider"] == "openrouter"
+    assert result["model"] == "openai/gpt-oss-120b"
+    assert "primary_error" in result
+    assert client.usage_stats() == {"primary_call_count": 0, "fallback_call_count": 1}
+
+
+def test_fallback_client_does_not_hide_primary_configuration_errors() -> None:
+    fallback = RecordingFallbackClient()
+    client = FallbackStructuredChatClient(
+        primary=BadRequestPrimaryClient(),
+        fallback=fallback,
+        fallback_model="openai/gpt-oss-120b",
+        fallback_provider="openrouter",
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        client.structured_chat(
+            prompt="test",
+            model="missing",
+            payload_schema={"type": "object"},
+            timeout_seconds=1,
+        )
+    assert fallback.model is None
 
 
 def test_resolve_utopia_runtime_falls_back_to_legacy_old_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -318,6 +318,39 @@ def test_query_embedder_accepts_current_index_manifest_shape(monkeypatch: Any) -
     assert captured["embedding_api_key"] == "secret"
 
 
+def test_query_embedder_accepts_local_hybrid_index_manifest(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_build_embedder(config: Any) -> FakeEmbedder:
+        captured.update(config.model_dump())
+        return FakeEmbedder()
+
+    monkeypatch.setattr("legal_rag.simple_rag.runner.build_embedder", fake_build_embedder)
+
+    embedder = build_query_embedder(
+        SimpleRagConfig(env_file=None, api_key="secret"),
+        {
+            "hybrid_enabled": True,
+            "embedding": {
+                "backend": "local",
+                "resolved_model": "BAAI/bge-m3",
+                "vector_size": 1024,
+                "hybrid_enabled": True,
+            },
+            "config": {
+                "batch_size": 64,
+                "embedding_timeout_seconds": 60.0,
+            },
+        },
+    )
+
+    assert isinstance(embedder, FakeEmbedder)
+    assert captured["embedding_backend"] == "local"
+    assert captured["embedding_model"] == "BAAI/bge-m3"
+    assert captured["hybrid_enabled"] is True
+    assert captured["embedding_api_key"] == ""
+
+
 def test_dense_search_supports_named_dense_vectors() -> None:
     rows = search_dense(
         _make_named_qdrant(),

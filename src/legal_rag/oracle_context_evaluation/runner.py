@@ -27,6 +27,8 @@ from .llm import (
     StructuredChatClient,
     UtopiaOpenAIChatClient,
     UtopiaStructuredChatClient,
+    add_openrouter_fallback_if_enabled,
+    attach_fallback_usage_stats,
     resolve_ollama_chat_url,
     resolve_openai_chat_completions_url,
 )
@@ -123,16 +125,19 @@ def create_default_client(config: OracleEvaluationConfig) -> StructuredChatClien
     """Create the default remote client from config and environment."""
     runtime = resolve_utopia_runtime(config)
     if runtime["api_mode"] == "openai":
-        return UtopiaOpenAIChatClient(
+        primary: StructuredChatClient = UtopiaOpenAIChatClient(
             api_url=runtime["api_url"],
             api_key=runtime["api_key"],
             retry_attempts=config.retry_attempts,
         )
-    return UtopiaStructuredChatClient(
-        api_url=runtime["api_url"],
-        api_key=runtime["api_key"],
-        retry_attempts=config.retry_attempts,
-    )
+    else:
+        primary = UtopiaStructuredChatClient(
+            api_url=runtime["api_url"],
+            api_key=runtime["api_key"],
+            retry_attempts=config.retry_attempts,
+        )
+    client, _fallback_runtime = add_openrouter_fallback_if_enabled(primary, retry_attempts=config.retry_attempts)
+    return client
 
 
 def resolve_answer_model(config: OracleEvaluationConfig) -> str:
@@ -413,17 +418,23 @@ def run_oracle_context_evaluation(
     if client is None:
         runtime_connection = resolve_utopia_runtime(cfg)
         if runtime_connection["api_mode"] == "openai":
-            remote_client = UtopiaOpenAIChatClient(
+            primary_client: StructuredChatClient = UtopiaOpenAIChatClient(
                 api_url=runtime_connection["api_url"],
                 api_key=runtime_connection["api_key"],
                 retry_attempts=cfg.retry_attempts,
             )
         else:
-            remote_client = UtopiaStructuredChatClient(
+            primary_client = UtopiaStructuredChatClient(
                 api_url=runtime_connection["api_url"],
                 api_key=runtime_connection["api_key"],
                 retry_attempts=cfg.retry_attempts,
             )
+        remote_client, fallback_runtime = add_openrouter_fallback_if_enabled(
+            primary_client,
+            retry_attempts=cfg.retry_attempts,
+        )
+        if fallback_runtime:
+            runtime_connection["fallback"] = fallback_runtime
     else:
         remote_client = client
     answer_model = resolve_answer_model(cfg)
@@ -541,6 +552,7 @@ def run_oracle_context_evaluation(
             "articles": sha256_file(Path(effective_cfg.laws_dir) / "articles.jsonl"),
             "laws_manifest": sha256_file(Path(effective_cfg.laws_dir) / "manifest.json"),
         }
+        attach_fallback_usage_stats(runtime_connection, remote_client)
         manifest = {
             "schema_version": ORACLE_CONTEXT_SCHEMA_VERSION,
             "created_at": now_utc(),

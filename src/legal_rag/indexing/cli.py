@@ -15,6 +15,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--index-dir", default="data/indexes/qdrant")
     parser.add_argument("--runs-dir", default="data/indexing_runs")
     parser.add_argument("--qdrant-url", default=None)
+    parser.add_argument("--qdrant-api-key", default="")
     parser.add_argument("--collection-name", default="legal_chunks")
     parser.add_argument("--force-rebuild", action="store_true")
     parser.add_argument("--chunk-selection-mode", default="full", choices=("full", "sample"))
@@ -26,6 +27,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--disable-hybrid", action="store_true")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--upload-batch-size", type=int, default=64)
+    parser.add_argument("--qdrant-upload-parallel", type=int, default=1)
+    parser.add_argument("--qdrant-shard-number", type=int, default=None)
+    parser.add_argument("--qdrant-bulk-indexing-threshold-kb", type=int, default=None)
+    parser.add_argument("--qdrant-restore-indexing-threshold-kb", type=int, default=20_000)
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--non-strict", action="store_true")
     return parser.parse_args(argv)
@@ -48,11 +53,17 @@ def main(argv: list[str] | None = None) -> int:
         "hybrid_enabled": not args.disable_hybrid,
         "batch_size": args.batch_size,
         "upload_batch_size": args.upload_batch_size,
+        "qdrant_upload_parallel": args.qdrant_upload_parallel,
+        "qdrant_shard_number": args.qdrant_shard_number,
+        "qdrant_bulk_indexing_threshold_kb": args.qdrant_bulk_indexing_threshold_kb,
+        "qdrant_restore_indexing_threshold_kb": args.qdrant_restore_indexing_threshold_kb,
         "env_file": args.env_file,
         "strict": not args.non_strict,
     }
     if args.qdrant_url:
         data["qdrant_url"] = args.qdrant_url
+    if args.qdrant_api_key:
+        data["qdrant_api_key"] = args.qdrant_api_key
     if args.embedding_model:
         data["embedding_model"] = args.embedding_model
     manifest = run_indexing_pipeline(IndexingConfig.model_validate(data))
