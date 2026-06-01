@@ -22,7 +22,13 @@ from legal_rag.oracle_context_evaluation.io import (
     write_json,
     write_jsonl,
 )
-from legal_rag.oracle_context_evaluation.llm import StructuredChatClient, UtopiaStructuredChatClient, resolve_ollama_chat_url
+from legal_rag.oracle_context_evaluation.llm import (
+    StructuredChatClient,
+    UtopiaStructuredChatClient,
+    add_openrouter_fallback_if_enabled,
+    attach_fallback_usage_stats,
+    resolve_ollama_chat_url,
+)
 from legal_rag.oracle_context_evaluation.models import DEFAULT_CHAT_MODEL, JudgeOutput, McqAnswerOutput, NoHintAnswerOutput
 from legal_rag.oracle_context_evaluation.scoring import aggregate_results, score_mcq_label
 
@@ -337,11 +343,17 @@ def run_no_rag_baseline(
     runtime_connection: dict[str, Any] | None = None
     if client is None:
         runtime_connection = resolve_utopia_runtime(cfg)
-        remote_client = UtopiaStructuredChatClient(
+        primary_client = UtopiaStructuredChatClient(
             api_url=runtime_connection["api_url"],
             api_key=runtime_connection["api_key"],
             retry_attempts=cfg.retry_attempts,
         )
+        remote_client, fallback_runtime = add_openrouter_fallback_if_enabled(
+            primary_client,
+            retry_attempts=cfg.retry_attempts,
+        )
+        if fallback_runtime:
+            runtime_connection["fallback"] = fallback_runtime
     else:
         remote_client = client
     answer_model = resolve_answer_model(cfg)
@@ -369,6 +381,7 @@ def run_no_rag_baseline(
             encoding="utf-8",
         )
 
+        attach_fallback_usage_stats(runtime_connection, remote_client)
         manifest = _build_manifest(
             config=effective_cfg,
             runtime_connection=runtime_connection,

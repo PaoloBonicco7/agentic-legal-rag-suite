@@ -25,6 +25,7 @@ This step proves that retrieval, context construction, answer generation, citati
   - `static_filters: dict[str, Any]` (default `{}`): metadata filters applied to every retrieval call (e.g., `{"law_status": "current"}`).
   - `benchmark_size: int | None`, `start: int`, `smoke: bool`, `retry_attempts: int` (consistent with `OracleEvaluationConfig`).
   - `env_file: str | None` (default `.env`).
+  - Optional OpenRouter chat fallback via `.env`: `OPENROUTER_FALLBACK_ENABLED=true`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`), and `OPENROUTER_CHAT_MODEL` (default `openai/gpt-oss-120b`). The fallback is used only for transient Utopia chat failures and must be recorded in the run manifest when enabled.
 
 ## Outputs
 

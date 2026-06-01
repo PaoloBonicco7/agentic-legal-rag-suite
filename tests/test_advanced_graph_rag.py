@@ -18,7 +18,7 @@ from legal_rag.advanced_graph_rag import (
     AdvancedRagConfig,
     run_advanced_graph_rag,
 )
-from legal_rag.advanced_graph_rag.retrieval import GraphIndex, connect_qdrant, expand_with_graph
+from legal_rag.advanced_graph_rag.retrieval import GraphIndex, connect_qdrant, embed_sparse_query, expand_with_graph
 from legal_rag.oracle_context_evaluation.io import sha256_file, write_json, write_jsonl
 from legal_rag.simple_rag.models import RetrievedChunkRecord
 
@@ -47,6 +47,11 @@ class DenseOnlyEmbedder:
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+
+class TupleSparseEmbedder(FakeHybridEmbedder):
+    def embed_sparse_texts(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+        return [([10, 20], [1.0, 0.5]) for _ in texts]
 
 
 class FakeStructuredClient:
@@ -464,6 +469,13 @@ def test_run_advanced_graph_rag_exports_contract_files_and_traces(tmp_path: Path
     assert manifest["diagnostics"]["context_sufficient_counts"] == {"yes": 1}
 
 
+def test_embed_sparse_query_accepts_tuple_sparse_vectors() -> None:
+    sparse = embed_sparse_query(TupleSparseEmbedder(), "question")
+
+    assert sparse.indices == [10, 20]
+    assert sparse.values == [1.0, 0.5]
+
+
 def test_run_advanced_graph_rag_reports_progress(tmp_path: Path) -> None:
     evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
     events: list[dict[str, Any]] = []
@@ -872,3 +884,233 @@ def test_invalid_citation_marks_row_as_generation_failure_even_when_answer_is_co
     assert row["score"] == 1
     assert "citation_error" in row["error"]
     assert row["failure_category"] == "generation_error"
+
+
+class QueryRewritingClient(FakeStructuredClient):
+    """FakeStructuredClient that also serves query rewriting payloads."""
+
+    def __init__(self) -> None:
+        self.call_count_by_schema: dict[str, int] = {}
+
+    def structured_chat(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        payload_schema: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        props = payload_schema.get("properties", {})
+        if "queries" in props:
+            self.call_count_by_schema["multi_query"] = self.call_count_by_schema.get("multi_query", 0) + 1
+            return {"structured": {"queries": ["Domanda variante uno", "Domanda variante due", "Domanda variante tre"]}}
+        if "rewritten_query" in props:
+            self.call_count_by_schema["rewrite"] = self.call_count_by_schema.get("rewrite", 0) + 1
+            return {"structured": {"rewritten_query": "Domanda riformulata"}}
+        if "hypothetical_answer" in props:
+            self.call_count_by_schema["hyde"] = self.call_count_by_schema.get("hyde", 0) + 1
+            return {"structured": {"hypothetical_answer": "Risposta ipotetica."}}
+        return super().structured_chat(prompt=prompt, model=model, payload_schema=payload_schema, timeout_seconds=timeout_seconds)
+
+
+def test_skip_baseline_validation_allows_mismatched_index_hash(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    # Stamp the simple manifest with a bogus index_manifest hash so the default guard would fail.
+    payload = json.loads(simple_manifest.read_text(encoding="utf-8"))
+    payload["source_hashes"]["index_manifest"] = "deadbeef" * 8
+    simple_manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not comparable"):
+        run_advanced_graph_rag(
+            _config(tmp_path, evaluation_dir, laws_dir, index_manifest, simple_manifest, run_name="baseline_check_on"),
+            client=FakeStructuredClient(), qdrant_client=_make_qdrant(), embedder=FakeHybridEmbedder(),
+        )
+
+    # With skip_baseline_validation=True the pipeline runs despite the hash mismatch.
+    manifest = run_advanced_graph_rag(
+        _config(tmp_path, evaluation_dir, laws_dir, index_manifest, simple_manifest,
+                run_name="baseline_check_off", skip_baseline_validation=True),
+        client=FakeStructuredClient(), qdrant_client=_make_qdrant(), embedder=FakeHybridEmbedder(),
+    )
+    assert manifest["summary"]["mcq"]["processed"] == 1
+
+
+def test_query_rewriting_disabled_is_no_op(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    client = QueryRewritingClient()
+
+    manifest = run_advanced_graph_rag(
+        _config(
+            tmp_path,
+            evaluation_dir,
+            laws_dir,
+            index_manifest,
+            simple_manifest,
+            run_name="qr_disabled",
+            query_rewriting_cache_dir=str(tmp_path / "cache"),
+        ),
+        client=client,
+        qdrant_client=_make_qdrant(),
+        embedder=FakeHybridEmbedder(),
+    )
+
+    block = manifest["query_rewriting"]
+    assert block["enabled"] is False
+    assert block["strategy"] == "none"
+    assert block["cache_path"] is None
+    assert block["cache_hits"] == 0
+    assert block["cache_misses"] == 0
+    assert block["failures"] == 0
+    # No multi_query / rewrite / hyde calls should have happened.
+    assert client.call_count_by_schema == {}
+
+
+def test_query_rewriting_multi_query_produces_block_and_uses_cache(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+    client = QueryRewritingClient()
+
+    manifest = run_advanced_graph_rag(
+        _config(
+            tmp_path,
+            evaluation_dir,
+            laws_dir,
+            index_manifest,
+            simple_manifest,
+            run_name="qr_multi",
+            query_rewriting_enabled=True,
+            query_rewriting_strategy="multi_query",
+            query_rewriting_n=3,
+            query_rewriting_cache_dir=str(tmp_path / "cache"),
+        ),
+        client=client,
+        qdrant_client=_make_qdrant(),
+        embedder=FakeHybridEmbedder(),
+    )
+
+    block = manifest["query_rewriting"]
+    assert block["enabled"] is True
+    assert block["strategy"] == "multi_query"
+    assert block["n"] == 3
+    assert block["failures"] == 0
+    # MCQ + no_hint share the same question stem so cache hits once, misses once.
+    assert block["cache_misses"] == 1
+    assert block["cache_hits"] == 1
+    assert client.call_count_by_schema.get("multi_query") == 1
+    cache_path = Path(block["cache_path"])
+    assert cache_path.exists() and cache_path.stat().st_size > 0
+
+
+def test_query_rewriting_rewrite_strategy_falls_back_on_failure(tmp_path: Path) -> None:
+    evaluation_dir, laws_dir, index_manifest, simple_manifest = _make_inputs(tmp_path)
+
+    class FailingRewriteClient(FakeStructuredClient):
+        def structured_chat(self, *, prompt, model, payload_schema, timeout_seconds):
+            if "rewritten_query" in payload_schema.get("properties", {}):
+                raise RuntimeError("simulated_rewrite_failure")
+            return super().structured_chat(prompt=prompt, model=model, payload_schema=payload_schema, timeout_seconds=timeout_seconds)
+
+    manifest = run_advanced_graph_rag(
+        _config(
+            tmp_path,
+            evaluation_dir,
+            laws_dir,
+            index_manifest,
+            simple_manifest,
+            run_name="qr_failing",
+            query_rewriting_enabled=True,
+            query_rewriting_strategy="rewrite",
+            query_rewriting_cache_dir=str(tmp_path / "cache"),
+        ),
+        client=FailingRewriteClient(),
+        qdrant_client=_make_qdrant(),
+        embedder=FakeHybridEmbedder(),
+    )
+
+    block = manifest["query_rewriting"]
+    # Both rows trigger a fresh rewrite attempt (no cache available) and both fail.
+    assert block["failures"] == 2
+    assert block["cache_hits"] == 0
+    assert block["cache_misses"] == 0
+    # The pipeline still produces results because we fall back to the original question.
+    row = json.loads((tmp_path / "advanced_runs" / "qr_failing" / "mcq_results.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["retrieved_chunk_ids"]
+
+
+def _mk_chunk(chunk_id: str) -> RetrievedChunkRecord:
+    return RetrievedChunkRecord(chunk_id=chunk_id, score=1.0, text=chunk_id, payload={"chunk_id": chunk_id})
+
+
+def test_fuse_rrf_promotes_chunks_present_in_multiple_queries() -> None:
+    """RRF cross-query fusion must rank a chunk seen in many queries above one seen in a single query."""
+    from legal_rag.advanced_graph_rag.runner import _fuse_rrf
+
+    # Common chunk appears at rank 3 in every query; rare chunk is rank 1 only in the first.
+    common = "chunk_common"
+    rare = "chunk_rare_first_only"
+    batches = [
+        [_mk_chunk(rare), _mk_chunk("filler_a"), _mk_chunk(common)],
+        [_mk_chunk("filler_b"), _mk_chunk("filler_c"), _mk_chunk(common)],
+        [_mk_chunk("filler_d"), _mk_chunk("filler_e"), _mk_chunk(common)],
+    ]
+    fused = _fuse_rrf(batches, rrf_k=60, limit=5)
+    ids = [chunk.chunk_id for chunk in fused]
+    assert ids[0] == common, f"common chunk should win RRF; got {ids}"
+    assert rare in ids, "rare chunk must still survive the fusion"
+    assert ids.index(common) < ids.index(rare)
+
+
+def test_fuse_rrf_falls_back_to_first_seen_when_single_batch() -> None:
+    """With one query the result must preserve the upstream ranking (no reshuffling)."""
+    from legal_rag.advanced_graph_rag.runner import _fuse_rrf
+
+    batches = [[_mk_chunk("a"), _mk_chunk("b"), _mk_chunk("c")]]
+    fused = _fuse_rrf(batches, rrf_k=60, limit=2)
+    assert [chunk.chunk_id for chunk in fused] == ["a", "b"]
+
+
+def test_apply_query_rewriting_always_includes_original_question(tmp_path: Path) -> None:
+    """When multi-query rewrites succeed, the original question must remain the first variant."""
+    from legal_rag.advanced_graph_rag.runner import QueryRewriteStats, apply_query_rewriting
+    from legal_rag.retrieval_evaluation.query_rewriting import QueryRewriteCache
+
+    config = AdvancedRagConfig(
+        run_name="rewrite_includes_original",
+        query_rewriting_enabled=True,
+        query_rewriting_strategy="multi_query",
+        query_rewriting_n=3,
+    )
+    original = "Che cos'è il GAP?"
+    rewrites = [
+        "Cos'è il gioco d'azzardo patologico?",
+        "GAP definizione legge regionale",
+        "ludopatia significato",
+    ]
+    cache = QueryRewriteCache(tmp_path / "rewrite_cache.jsonl")
+    cache.set(
+        QueryRewriteCache.make_key(
+            question=original,
+            strategy="multi_query",
+            model=config.resolved_query_rewriting_model,
+            prompt_version=config.query_rewriting_prompt_version,
+        ),
+        rewrites,
+    )
+
+    queries = apply_query_rewriting(
+        question=original,
+        config=config,
+        llm_client=None,  # type: ignore[arg-type]
+        cache=cache,
+        stats=QueryRewriteStats(),
+    )
+    assert queries[0] == original
+    assert all(rewrite in queries for rewrite in rewrites)
+    assert len(queries) == len(rewrites) + 1
+
+
+def test_advanced_config_max_context_chunks_falls_back_to_rerank_output_k() -> None:
+    """effective_max_context_chunks returns max_context_chunks when set, else rerank_output_k."""
+    default_cfg = AdvancedRagConfig(run_name="ctx_default", rerank_output_k=10)
+    assert default_cfg.effective_max_context_chunks == 10
+    explicit_cfg = AdvancedRagConfig(run_name="ctx_explicit", rerank_output_k=10, max_context_chunks=3)
+    assert explicit_cfg.effective_max_context_chunks == 3

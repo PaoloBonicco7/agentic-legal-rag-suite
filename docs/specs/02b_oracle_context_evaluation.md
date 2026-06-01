@@ -13,6 +13,7 @@ This step is a controlled evaluation, not a retrieval benchmark. It isolates the
 - Evaluation manifest from step 02: `data/evaluation_clean/evaluation_manifest.json`.
 - Clean legal dataset from step 01: `data/laws_dataset_clean/laws.jsonl`, `data/laws_dataset_clean/articles.jsonl`, and `data/laws_dataset_clean/manifest.json`.
 - Oracle evaluation configuration: answer model identity, judge model identity, prompt versions, benchmark size, random seed if sampling is used, retry policy, and output directory.
+- Optional OpenRouter chat fallback via `.env`: `OPENROUTER_FALLBACK_ENABLED=true`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`), and `OPENROUTER_CHAT_MODEL` (default `openai/gpt-oss-120b`). The fallback is used only for transient Utopia chat failures and must be recorded in the run manifest when enabled.
 
 The oracle context must come only from the legal references already present in the evaluation dataset. No retrieval index is used in this step.
 

@@ -10,8 +10,12 @@ from legal_rag.laws_preprocessing.models import ALLOWED_RELATION_TYPES
 from legal_rag.oracle_context_evaluation.models import DEFAULT_CHAT_MODEL, MCQ_LABELS
 from legal_rag.simple_rag.models import Citation, RetrievedChunkRecord
 
-ADVANCED_RAG_SCHEMA_VERSION = "advanced-graph-rag-v2"
+ADVANCED_RAG_SCHEMA_VERSION = "advanced-graph-rag-v3"
 ADVANCED_RAG_PROMPT_VERSION = "advanced-rag-prompts-v2"
+# Mirrors retrieval_evaluation.query_rewriting_prompts.QUERY_REWRITING_PROMPT_VERSION;
+# kept here to avoid a circular import between the two packages.
+QUERY_REWRITING_PROMPT_VERSION = "query-rewriting-v1"
+QueryRewritingStrategy = Literal["none", "rewrite", "hyde", "multi_query"]
 
 RetrievalMode = Literal["dense", "hybrid"]
 ContextSufficiency = Literal["yes", "partial", "no"]
@@ -72,11 +76,31 @@ class AdvancedRagConfig(BaseModel):
     graph_expansion_hops: int = Field(default=1, ge=1)
     rerank_input_k: int = Field(default=20, gt=0)
     rerank_output_k: int = Field(default=5, gt=0)
+    max_context_chunks: int | None = Field(default=None, gt=0)
     max_context_chars: int = Field(default=16000, gt=0)
+
+    # Query rewriting (Esperimento H di 06b)
+    query_rewriting_enabled: bool = False
+    query_rewriting_strategy: QueryRewritingStrategy = "none"
+    query_rewriting_n: int = Field(default=3, ge=1, le=5)
+    query_rewriting_model: str | None = None
+    query_rewriting_prompt_version: str = QUERY_REWRITING_PROMPT_VERSION
+    query_rewriting_cache_dir: str = "data/cache/query_rewriting"
+
+    # Smoke / debug escape hatch: allow Advanced RAG to run even when the
+    # referenced Simple RAG manifest was generated against a different index.
+    # The thesis comparison still requires re-running Simple RAG on the same
+    # index before publishing metrics — this flag is for plumbing checks only.
+    skip_baseline_validation: bool = False
 
     @field_validator("judge_model")
     @classmethod
     def _empty_judge_model_to_none(cls, value: str | None) -> str | None:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @field_validator("query_rewriting_model")
+    @classmethod
+    def _empty_query_rewriting_model_to_none(cls, value: str | None) -> str | None:
         return value.strip() if isinstance(value, str) and value.strip() else None
 
     @field_validator("run_name")
@@ -113,6 +137,16 @@ class AdvancedRagConfig(BaseModel):
         return self.judge_model or self.chat_model
 
     @property
+    def resolved_query_rewriting_model(self) -> str:
+        """Return the query rewriting model, falling back to the answer model."""
+        return self.query_rewriting_model or self.chat_model
+
+    @property
+    def active_query_rewriting_strategy(self) -> "QueryRewritingStrategy":
+        """Return the active strategy after honouring the enabled flag."""
+        return self.query_rewriting_strategy if self.query_rewriting_enabled else "none"
+
+    @property
     def effective_benchmark_size(self) -> int | None:
         """Return the row limit, using smoke mode as a one-row run."""
         return 1 if self.smoke else self.benchmark_size
@@ -126,6 +160,11 @@ class AdvancedRagConfig(BaseModel):
     def active_static_filters(self) -> dict[str, Any]:
         """Return metadata filters actually applied to retrieval."""
         return dict(self.static_filters) if self.metadata_filters_enabled else {}
+
+    @property
+    def effective_max_context_chunks(self) -> int:
+        """Return the active context cap, falling back to rerank_output_k."""
+        return self.max_context_chunks if self.max_context_chunks is not None else self.rerank_output_k
 
 
 class InteractiveRagConfig(AdvancedRagConfig):
@@ -232,6 +271,8 @@ class _AdvancedTrace(_Record):
     rerank_scores: list[int]
     context_included_count: int
     reference_law_hit: bool
+    reference_article_hit_retrieved: bool = False
+    reference_article_hit_context: bool = False
     failure_category: FailureCategory | None
 
 
@@ -281,6 +322,7 @@ class RetrievalTrace(_Record):
 class InteractiveStepTiming(_Record):
     """Wall-clock timings for a single interactive question."""
 
+    query_rewriting_seconds: float = Field(default=0.0, ge=0.0)
     retrieval_seconds: float = Field(default=0.0, ge=0.0)
     graph_expansion_seconds: float = Field(default=0.0, ge=0.0)
     rerank_seconds: float = Field(default=0.0, ge=0.0)
@@ -314,6 +356,8 @@ class InteractiveRagResult(_Record):
     collection_name: str
     flags: dict[str, bool] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    effective_queries: list[str] = Field(default_factory=list)
+    query_rewriting: dict[str, Any] = Field(default_factory=dict)
     timing: InteractiveStepTiming = Field(default_factory=InteractiveStepTiming)
     error: str | None = None
 

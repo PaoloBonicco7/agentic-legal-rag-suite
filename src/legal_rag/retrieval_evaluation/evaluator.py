@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 
+from legal_rag.advanced_graph_rag.models import RerankOutput
+from legal_rag.advanced_graph_rag.prompts import RERANK_PROMPT_VERSION, build_rerank_prompt
 from legal_rag.advanced_graph_rag.retrieval import search_dense, search_hybrid
 from legal_rag.indexing.embeddings import SupportsEmbedding
 from legal_rag.oracle_context_evaluation.io import (
@@ -20,12 +23,15 @@ from legal_rag.oracle_context_evaluation.io import (
     sha256_text,
     write_json,
 )
+from legal_rag.oracle_context_evaluation.llm import StructuredChatClient
 from legal_rag.oracle_context_evaluation.references import OracleReferenceResolver, split_reference_values
 from legal_rag.simple_rag.models import RetrievedChunkRecord
 
 from .models import (
+    ARTICLE_HIT_K_VALUES,
     RETRIEVAL_EVALUATION_SCHEMA_VERSION,
     CandidateMetrics,
+    QueryRewriteEvaluationRow,
     QuestionTarget,
     ReferenceTarget,
     RerankEvaluationRow,
@@ -205,6 +211,7 @@ def evaluate_candidate_set(
     availability: ChunkAvailabilityIndex,
     retrieval_mode: str,
     top_k: int,
+    rrf_k: int | None = None,
     filter_name: str,
     metadata_filters: dict[str, Any],
     graph_expansion_enabled: bool = False,
@@ -246,6 +253,7 @@ def evaluate_candidate_set(
         question=target.question,
         retrieval_mode=retrieval_mode,  # type: ignore[arg-type]
         top_k=top_k,
+        rrf_k=rrf_k,
         filter_name=filter_name,
         metadata_filters=dict(metadata_filters),
         graph_expansion_enabled=graph_expansion_enabled,
@@ -267,6 +275,7 @@ def evaluate_candidate_set(
         direct_first_law_rank=direct.first_law_rank,
         direct_first_article_rank=direct.first_article_rank,
         direct_article_mrr=direct.article_mrr,
+        direct_article_hit_at_k=direct.article_hit_at_k,
         law_only_false_positive=direct.law_only_false_positive,
         post_law_hit=post.law_hit,
         post_article_hit=post.article_hit,
@@ -274,6 +283,7 @@ def evaluate_candidate_set(
         post_first_law_rank=post.first_law_rank,
         post_first_article_rank=post.first_article_rank,
         post_article_mrr=post.article_mrr,
+        post_article_hit_at_k=post.article_hit_at_k,
         graph_incremental_hit=not direct.article_hit and post.article_hit,
         expanded_expected_article_hits=len(expanded_expected_articles),
         expansion_noise_ratio=expansion_noise_ratio,
@@ -287,6 +297,7 @@ def candidate_metrics(
     *,
     expected_law_ids: Sequence[str],
     expected_article_ids: Sequence[str],
+    k_values: Sequence[int] = ARTICLE_HIT_K_VALUES,
 ) -> CandidateMetrics:
     """Compute hit/rank metrics for an ordered chunk list."""
     expected_laws = set(expected_law_ids)
@@ -305,6 +316,11 @@ def candidate_metrics(
             first_article_rank = index
     law_hit = first_law_rank is not None
     article_hit = first_article_rank is not None
+    article_hit_at_k = {
+        str(int(k)): first_article_rank is not None and first_article_rank <= int(k)
+        for k in k_values
+        if int(k) > 0
+    }
     return CandidateMetrics(
         law_hit=law_hit,
         article_hit=article_hit,
@@ -313,6 +329,7 @@ def candidate_metrics(
         first_article_rank=first_article_rank,
         article_mrr=(1.0 / first_article_rank) if first_article_rank else 0.0,
         law_only_false_positive=law_hit and not article_hit,
+        article_hit_at_k=article_hit_at_k,
     )
 
 
@@ -352,6 +369,7 @@ def evaluate_with_rerank(
     rerank_output_k: int,
     retrieval_mode: str,
     top_k: int,
+    rrf_k: int | None = None,
     filter_name: str,
     metadata_filters: dict[str, Any],
     base_scenario: str,
@@ -383,6 +401,7 @@ def evaluate_with_rerank(
         question=target.question,
         retrieval_mode=retrieval_mode,  # type: ignore[arg-type]
         top_k=top_k,
+        rrf_k=rrf_k,
         filter_name=filter_name,
         metadata_filters=dict(metadata_filters),
         base_scenario=base_scenario,
@@ -406,6 +425,59 @@ def evaluate_with_rerank(
         rerank_scores=reranked_scores,
         cache_hit=cache_hit,
         reranked_chunk_ids=[chunk.chunk_id for chunk in reranked],
+    )
+
+
+def evaluate_query_rewrite(
+    *,
+    target: QuestionTarget,
+    retrieved: Sequence[RetrievedChunkRecord],
+    retrieval_mode: str,
+    top_k: int,
+    rrf_k: int | None = None,
+    filter_name: str,
+    metadata_filters: dict[str, Any],
+    strategy: str,
+    rewritten_queries: Sequence[str],
+    query_rewriting_model: str | None,
+    query_rewriting_prompt_version: str | None,
+    cache_hit: bool,
+) -> QueryRewriteEvaluationRow:
+    """Evaluate a candidate set retrieved from a rewritten query or query variants."""
+    retrieved_chunks = list(retrieved)
+    metrics = candidate_metrics(
+        retrieved_chunks,
+        expected_law_ids=target.expected_law_ids,
+        expected_article_ids=target.expected_article_ids,
+    )
+    return QueryRewriteEvaluationRow(
+        qid=target.qid,
+        level=target.level,
+        question=target.question,
+        retrieval_mode=retrieval_mode,  # type: ignore[arg-type]
+        top_k=top_k,
+        rrf_k=rrf_k,
+        filter_name=filter_name,
+        metadata_filters=dict(metadata_filters),
+        strategy=strategy,  # type: ignore[arg-type]
+        query_rewriting_model=query_rewriting_model,
+        query_rewriting_prompt_version=query_rewriting_prompt_version,
+        cache_hit=cache_hit,
+        rewritten_queries=list(rewritten_queries),
+        transformed_query_count=len(rewritten_queries),
+        expected_law_ids=target.expected_law_ids,
+        expected_article_ids=target.expected_article_ids,
+        expected_law_chunk_count=target.expected_law_chunk_count,
+        expected_article_chunk_count=target.expected_article_chunk_count,
+        retrieved_count=len(retrieved_chunks),
+        direct_law_hit=metrics.law_hit,
+        direct_article_hit=metrics.article_hit,
+        direct_all_expected_articles_hit=metrics.all_expected_articles_hit,
+        direct_first_law_rank=metrics.first_law_rank,
+        direct_first_article_rank=metrics.first_article_rank,
+        direct_article_mrr=metrics.article_mrr,
+        law_only_false_positive=metrics.law_only_false_positive,
+        retrieved_chunk_ids=[chunk.chunk_id for chunk in retrieved_chunks],
     )
 
 
@@ -458,11 +530,12 @@ def summarize_scenario(
 
 
 class RerankCache:
-    """File-backed JSONL cache for LLM rerank scores keyed by (question, candidate set, model)."""
+    """File-backed JSONL cache for LLM rerank scores keyed by prompt/model/candidate set."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._entries: dict[str, list[dict[str, Any]]] = {}
+        self._lock = threading.Lock()
         if self._path.exists():
             with self._path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -481,28 +554,100 @@ class RerankCache:
         return len(self._entries)
 
     @staticmethod
-    def make_key(*, question: str, candidate_chunk_ids: Sequence[str], model: str) -> str:
-        """Build a stable cache key from question, candidate ids, and model identity."""
+    def make_key(
+        *,
+        question: str,
+        candidate_chunk_ids: Sequence[str],
+        model: str,
+        prompt_version: str,
+    ) -> str:
+        """Build a stable cache key from prompt, question, candidate ids, and model identity."""
         payload = {
             "q": str(question or ""),
             "candidates": list(candidate_chunk_ids),
             "model": str(model or ""),
+            "prompt_version": str(prompt_version or ""),
         }
         return sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
     def get(self, key: str) -> list[dict[str, Any]] | None:
         """Return cached score entries (chunk_id, score) for a key, or None."""
-        if key in self._entries:
-            return [dict(entry) for entry in self._entries[key]]
-        return None
+        with self._lock:
+            entries = self._entries.get(key)
+            return [dict(entry) for entry in entries] if entries is not None else None
 
     def set(self, key: str, scores: Sequence[Mapping[str, Any]]) -> None:
         """Append a new entry to memory and to the JSONL file on disk."""
         normalized = [{"chunk_id": str(item["chunk_id"]), "score": int(item["score"])} for item in scores]
-        self._entries[key] = normalized
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"key": key, "scores": normalized}, ensure_ascii=False, sort_keys=True) + "\n")
+        with self._lock:
+            self._entries[key] = normalized
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"key": key, "scores": normalized}, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def sanitize_cache_name(value: str) -> str:
+    """Return a filesystem-safe cache component."""
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9._-]+", "_", text)
+    return text.strip("._-") or "unknown"
+
+
+def rerank_cache_path(cache_root: str | Path, *, model: str) -> Path:
+    """Return the default rerank cache path for a model."""
+    return Path(cache_root) / "rerank" / f"{sanitize_cache_name(model)}.jsonl"
+
+
+def align_rerank_scores(
+    *,
+    candidates: Sequence[RetrievedChunkRecord],
+    score_entries: Sequence[Mapping[str, Any]],
+) -> list[int]:
+    """Align cached or model-produced scores to the candidate order."""
+    scores_by_id = {str(item["chunk_id"]): int(item["score"]) for item in score_entries}
+    return [scores_by_id.get(chunk.chunk_id, 0) for chunk in candidates]
+
+
+def score_rerank_candidates(
+    *,
+    llm_client: StructuredChatClient,
+    question: str,
+    candidates: Sequence[RetrievedChunkRecord],
+    model: str,
+    timeout_seconds: int,
+    cache: RerankCache,
+    prompt_version: str = RERANK_PROMPT_VERSION,
+) -> tuple[list[int], bool]:
+    """Get LLM rerank scores for candidates, reusing a versioned JSONL cache."""
+    candidate_list = list(candidates)
+    candidate_chunk_ids = [chunk.chunk_id for chunk in candidate_list]
+    key = RerankCache.make_key(
+        question=question,
+        candidate_chunk_ids=candidate_chunk_ids,
+        model=model,
+        prompt_version=prompt_version,
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        return align_rerank_scores(candidates=candidate_list, score_entries=cached), True
+
+    call = llm_client.structured_chat(
+        prompt=build_rerank_prompt(question, candidate_list),
+        model=model,
+        payload_schema=RerankOutput.model_json_schema(),
+        timeout_seconds=timeout_seconds,
+    )
+    output = RerankOutput.model_validate(call["structured"])
+    allowed_ids = set(candidate_chunk_ids)
+    score_entries = [
+        {"chunk_id": item.chunk_id, "score": int(item.score)}
+        for item in output.scores
+        if item.chunk_id in allowed_ids
+    ]
+    seen = {entry["chunk_id"] for entry in score_entries}
+    score_entries.extend({"chunk_id": chunk_id, "score": 0} for chunk_id in candidate_chunk_ids if chunk_id not in seen)
+    cache.set(key, score_entries)
+    return align_rerank_scores(candidates=candidate_list, score_entries=score_entries), False
 
 
 _TOKEN_RE = re.compile(r"[a-zà-ù]+", re.IGNORECASE)
@@ -526,6 +671,7 @@ def write_run_artifacts(
     sweep_direct: Sequence[Mapping[str, Any]],
     sweep_graph: Sequence[Mapping[str, Any]],
     sweep_rerank: Sequence[Mapping[str, Any]],
+    sweep_query_rewriting: Sequence[Mapping[str, Any]] = (),
     manifest: Mapping[str, Any],
 ) -> Path:
     """Persist scenarios, sweep tables and manifest under output_dir atomically."""
@@ -539,6 +685,11 @@ def write_run_artifacts(
             tmp_dir / "sweep_rerank.csv",
             sweep_rerank,
             default_fields=["dataset", *RerankEvaluationRow.model_fields],
+        )
+        _write_csv(
+            tmp_dir / "sweep_query_rewriting.csv",
+            sweep_query_rewriting,
+            default_fields=["dataset", *QueryRewriteEvaluationRow.model_fields],
         )
         write_json(tmp_dir / "manifest.json", _augment_manifest(manifest))
         replace_output_dir(tmp_dir, target)

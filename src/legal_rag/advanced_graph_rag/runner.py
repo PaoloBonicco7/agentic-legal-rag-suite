@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
+import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -26,10 +28,23 @@ from legal_rag.oracle_context_evaluation.io import (
     write_json,
     write_jsonl,
 )
-from legal_rag.oracle_context_evaluation.llm import StructuredChatClient, UtopiaStructuredChatClient, resolve_ollama_chat_url
+from legal_rag.oracle_context_evaluation.llm import (
+    StructuredChatClient,
+    UtopiaStructuredChatClient,
+    add_openrouter_fallback_if_enabled,
+    attach_fallback_usage_stats,
+    resolve_ollama_chat_url,
+)
 from legal_rag.oracle_context_evaluation.models import DEFAULT_CHAT_MODEL, JudgeOutput
 from legal_rag.oracle_context_evaluation.references import OracleReferenceResolver, split_reference_values
 from legal_rag.oracle_context_evaluation.scoring import aggregate_results, score_mcq_label
+from legal_rag.retrieval_evaluation.query_rewriting import (
+    QueryRewriteCache,
+    generate_hyde,
+    multi_query,
+    query_rewrite_cache_path,
+    rewrite_query,
+)
 from legal_rag.simple_rag.models import Citation, RetrievedChunkRecord, SimpleRagConfig
 from legal_rag.simple_rag.prompts import format_context_chunks
 from legal_rag.simple_rag.runner import build_query_embedder
@@ -65,6 +80,124 @@ from .retrieval import (
 T = TypeVar("T")
 U = TypeVar("U")
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+@dataclasses.dataclass
+class QueryRewriteStats:
+    """Thread-safe counters for query rewriting cache hits, misses and failures."""
+
+    cache_hits: int = 0
+    cache_misses: int = 0
+    failures: int = 0
+    first_errors: list[str] = dataclasses.field(default_factory=list)
+    _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, repr=False)
+
+    def record_hit(self) -> None:
+        with self._lock:
+            self.cache_hits += 1
+
+    def record_miss(self) -> None:
+        with self._lock:
+            self.cache_misses += 1
+
+    def record_failure(self, message: str) -> None:
+        with self._lock:
+            self.failures += 1
+            if len(self.first_errors) < 5:
+                self.first_errors.append(message[:240])
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "cache_hits": self.cache_hits,
+                "cache_misses": self.cache_misses,
+                "failures": self.failures,
+                "first_errors": list(self.first_errors),
+            }
+
+
+def apply_query_rewriting(
+    *,
+    question: str,
+    config: AdvancedRagConfig,
+    llm_client: StructuredChatClient,
+    cache: QueryRewriteCache | None,
+    stats: QueryRewriteStats,
+) -> list[str]:
+    """Return the query variants to use for retrieval (length 1 when disabled)."""
+    strategy = config.active_query_rewriting_strategy
+    if strategy == "none" or cache is None:
+        return [question]
+    model = config.resolved_query_rewriting_model
+    prompt_version = config.query_rewriting_prompt_version
+    timeout_seconds = config.timeout_seconds
+    try:
+        if strategy == "rewrite":
+            result = rewrite_query(
+                llm_client=llm_client,
+                question=question,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                cache=cache,
+                prompt_version=prompt_version,
+            )
+        elif strategy == "hyde":
+            result = generate_hyde(
+                llm_client=llm_client,
+                question=question,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                cache=cache,
+                prompt_version=prompt_version,
+            )
+        elif strategy == "multi_query":
+            result = multi_query(
+                llm_client=llm_client,
+                question=question,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                cache=cache,
+                n=config.query_rewriting_n,
+                prompt_version=prompt_version,
+            )
+        else:
+            return [question]
+    except Exception as exc:
+        stats.record_failure(f"{type(exc).__name__}: {exc}")
+        return [question]
+    if result.cache_hit:
+        stats.record_hit()
+    else:
+        stats.record_miss()
+    # Always retain the original question alongside generated variants.
+    # Without this, multi-query/HyDE/rewrite paraphrases can dilute literal-match
+    # signal on questions where the original wording is already optimal.
+    variants = list(result.queries)
+    if not variants:
+        return [question]
+    seen: set[str] = set()
+    fused: list[str] = []
+    for text in (question, *variants):
+        key = text.strip().lower()
+        if not key or key in seen:
+            continue
+        fused.append(text)
+        seen.add(key)
+    return fused or [question]
+
+
+def build_query_rewrite_cache(config: AdvancedRagConfig) -> QueryRewriteCache | None:
+    """Build a versioned JSONL cache when query rewriting is active."""
+    strategy = config.active_query_rewriting_strategy
+    if strategy == "none":
+        return None
+    path = query_rewrite_cache_path(
+        config.query_rewriting_cache_dir,
+        strategy=strategy,
+        model=config.resolved_query_rewriting_model,
+        prompt_version=config.query_rewriting_prompt_version,
+    )
+    return QueryRewriteCache(path)
 
 
 def load_inputs(config: AdvancedRagConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -271,31 +404,45 @@ def retrieve_candidates(
     index_manifest: dict[str, Any],
     graph: GraphIndex,
     config: AdvancedRagConfig,
+    query_rewrite_cache: QueryRewriteCache | None = None,
+    query_rewrite_stats: QueryRewriteStats | None = None,
 ) -> RetrievalTrace:
     """Retrieve, expand and optionally rerank candidates for one question."""
     question = str(record[question_key])
     metadata_filters = config.active_static_filters
     retrieval_mode = "hybrid" if config.hybrid_enabled else "dense"
-    if config.hybrid_enabled:
-        retrieved = search_hybrid(
-            qdrant_client,
-            collection_name=collection_name,
-            embedder=embedder,
-            query_text=question,
-            limit=config.top_k,
-            rrf_k=config.rrf_k,
-            static_filters=metadata_filters,
-            index_manifest=index_manifest,
-        )
-    else:
-        retrieved = search_dense(
-            qdrant_client,
-            collection_name=collection_name,
-            embedder=embedder,
-            query_text=question,
-            limit=config.top_k,
-            static_filters=metadata_filters,
-        )
+    stats = query_rewrite_stats or QueryRewriteStats()
+    queries = apply_query_rewriting(
+        question=question,
+        config=config,
+        llm_client=llm_client,
+        cache=query_rewrite_cache,
+        stats=stats,
+    )
+    per_query_batches: list[list[RetrievedChunkRecord]] = []
+    for query_text in queries:
+        if config.hybrid_enabled:
+            batch = search_hybrid(
+                qdrant_client,
+                collection_name=collection_name,
+                embedder=embedder,
+                query_text=query_text,
+                limit=config.top_k,
+                rrf_k=config.rrf_k,
+                static_filters=metadata_filters,
+                index_manifest=index_manifest,
+            )
+        else:
+            batch = search_dense(
+                qdrant_client,
+                collection_name=collection_name,
+                embedder=embedder,
+                query_text=query_text,
+                limit=config.top_k,
+                static_filters=metadata_filters,
+            )
+        per_query_batches.append(batch)
+    retrieved = _fuse_rrf(per_query_batches, rrf_k=config.rrf_k, limit=config.top_k)
 
     expanded: list[RetrievedChunkRecord] = []
     relations: list[GraphRelationUsed] = []
@@ -404,6 +551,8 @@ def run_mcq(
     config: AdvancedRagConfig,
     progress_callback: ProgressCallback | None = None,
     run_name: str = "mcq",
+    query_rewrite_cache: QueryRewriteCache | None = None,
+    query_rewrite_stats: QueryRewriteStats | None = None,
 ) -> list[dict[str, Any]]:
     """Run advanced-RAG MCQ answering and return row-level results."""
 
@@ -426,10 +575,12 @@ def run_mcq(
                 index_manifest=index_manifest,
                 graph=graph,
                 config=config,
+                query_rewrite_cache=query_rewrite_cache,
+                query_rewrite_stats=query_rewrite_stats,
             )
             context_chunks, context_text = build_context(
                 retrieval.reranked,
-                max_context_chunks=config.rerank_output_k,
+                max_context_chunks=config.effective_max_context_chunks,
                 max_context_chars=config.max_context_chars,
             )
             trace = _trace(record=record, retrieval=retrieval, context_chunks=context_chunks, config=config, resolver=reference_resolver)
@@ -506,6 +657,8 @@ def run_no_hint(
     config: AdvancedRagConfig,
     progress_callback: ProgressCallback | None = None,
     run_name: str = "no_hint",
+    query_rewrite_cache: QueryRewriteCache | None = None,
+    query_rewrite_stats: QueryRewriteStats | None = None,
 ) -> list[dict[str, Any]]:
     """Run advanced-RAG open answering and judge each generated answer."""
 
@@ -529,10 +682,12 @@ def run_no_hint(
                 index_manifest=index_manifest,
                 graph=graph,
                 config=config,
+                query_rewrite_cache=query_rewrite_cache,
+                query_rewrite_stats=query_rewrite_stats,
             )
             context_chunks, context_text = build_context(
                 retrieval.reranked,
-                max_context_chunks=config.rerank_output_k,
+                max_context_chunks=config.effective_max_context_chunks,
                 max_context_chars=config.max_context_chars,
             )
             trace = _trace(record=record, retrieval=retrieval, context_chunks=context_chunks, config=config, resolver=reference_resolver)
@@ -645,6 +800,8 @@ def build_diagnostics(*, mcq_results: list[dict[str, Any]], no_hint_results: lis
         "rerank_score_distribution": dict(sorted(Counter(rerank_scores).items())),
         "context_sufficient_counts": dict(sorted(context_sufficient_counts.items())),
         "reference_law_hits": sum(1 for row in rows if row.get("reference_law_hit")),
+        "reference_article_hits_retrieved": sum(1 for row in rows if row.get("reference_article_hit_retrieved")),
+        "reference_article_hits_context": sum(1 for row in rows if row.get("reference_article_hit_context")),
         "failure_category_counts": dict(sorted(failure_counts.items())),
     }
 
@@ -677,6 +834,8 @@ def build_quality_report(
             f"- graph_expanded_rows={diagnostics['graph_expanded_rows']}",
             f"- reranked_rows={diagnostics['reranked_rows']}",
             f"- reference_law_hits={diagnostics['reference_law_hits']}",
+            f"- reference_article_hits_retrieved={diagnostics['reference_article_hits_retrieved']}",
+            f"- reference_article_hits_context={diagnostics['reference_article_hits_context']}",
             f"- context_sufficient_counts={diagnostics['context_sufficient_counts']}",
             "",
             "## Failure Categories",
@@ -705,6 +864,8 @@ def run_datasets(
     reference_resolver: OracleReferenceResolver,
     config: AdvancedRagConfig,
     progress_callback: ProgressCallback | None = None,
+    query_rewrite_cache: QueryRewriteCache | None = None,
+    query_rewrite_stats: QueryRewriteStats | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run MCQ and no-hint datasets, optionally in parallel."""
     kwargs = {
@@ -716,6 +877,8 @@ def run_datasets(
         "graph": graph,
         "reference_resolver": reference_resolver,
         "config": config,
+        "query_rewrite_cache": query_rewrite_cache,
+        "query_rewrite_stats": query_rewrite_stats,
     }
     if not config.parallel_datasets_enabled or not mcq_records or not no_hint_records:
         if progress_callback:
@@ -760,11 +923,17 @@ def run_advanced_graph_rag(
     runtime_connection: dict[str, Any] | None = None
     if client is None:
         runtime_connection = resolve_utopia_runtime(cfg)
-        llm_client = UtopiaStructuredChatClient(
+        primary_client = UtopiaStructuredChatClient(
             api_url=runtime_connection["api_url"],
             api_key=runtime_connection["api_key"],
             retry_attempts=cfg.retry_attempts,
         )
+        llm_client, fallback_runtime = add_openrouter_fallback_if_enabled(
+            primary_client,
+            retry_attempts=cfg.retry_attempts,
+        )
+        if fallback_runtime:
+            runtime_connection["fallback"] = fallback_runtime
     else:
         llm_client = client
         load_env_file(cfg.env_file)
@@ -775,7 +944,10 @@ def run_advanced_graph_rag(
 
     index_manifest_path, index_manifest = load_index_manifest(effective_cfg)
     simple_manifest_path, simple_manifest = load_simple_rag_manifest(effective_cfg)
-    validate_simple_baseline(config=effective_cfg, simple_manifest=simple_manifest, index_manifest_path=index_manifest_path)
+    if effective_cfg.skip_baseline_validation:
+        print("[advanced-rag] WARNING: skip_baseline_validation=True — Simple RAG baseline hashes NOT checked. Do not publish thesis metrics from this run.", flush=True)
+    else:
+        validate_simple_baseline(config=effective_cfg, simple_manifest=simple_manifest, index_manifest_path=index_manifest_path)
     collection_name = resolve_collection_name(effective_cfg, index_manifest)
     qdrant_target = resolve_qdrant_target(effective_cfg, index_manifest)
     owned_qdrant_client = qdrant_client is None
@@ -815,6 +987,8 @@ def run_advanced_graph_rag(
     output_dir = Path(effective_cfg.output_dir)
     tmp_dir = prepare_tmp_output_dir(output_dir)
     started = perf_counter()
+    query_rewrite_cache = build_query_rewrite_cache(effective_cfg)
+    query_rewrite_stats = QueryRewriteStats()
     try:
         mcq_results, no_hint_results = run_datasets(
             mcq_records=mcq_records,
@@ -828,6 +1002,8 @@ def run_advanced_graph_rag(
             reference_resolver=reference_resolver,
             config=effective_cfg,
             progress_callback=progress_callback,
+            query_rewrite_cache=query_rewrite_cache,
+            query_rewrite_stats=query_rewrite_stats,
         )
         summary = build_summary(mcq_results=mcq_results, no_hint_results=no_hint_results)
         diagnostics = build_diagnostics(mcq_results=mcq_results, no_hint_results=no_hint_results)
@@ -868,6 +1044,12 @@ def run_advanced_graph_rag(
             "edges": sha256_file(Path(effective_cfg.laws_dir) / "edges.jsonl"),
             "chunks": sha256_file(Path(effective_cfg.laws_dir) / "chunks.jsonl"),
         }
+        attach_fallback_usage_stats(runtime_connection, llm_client)
+        query_rewriting_block = _build_query_rewriting_block(
+            config=effective_cfg,
+            cache=query_rewrite_cache,
+            stats=query_rewrite_stats,
+        )
         manifest = {
             "schema_version": ADVANCED_RAG_SCHEMA_VERSION,
             "created_at": now_utc(),
@@ -877,7 +1059,9 @@ def run_advanced_graph_rag(
                 "answer_model": effective_cfg.chat_model,
                 "judge_model": effective_cfg.resolved_judge_model,
                 "embedding_model": getattr(embedder, "model_name", None),
+                "query_rewriting_model": effective_cfg.resolved_query_rewriting_model,
             },
+            "query_rewriting": query_rewriting_block,
             "connection": (
                 {key: value for key, value in runtime_connection.items() if key != "api_key"}
                 if runtime_connection
@@ -931,7 +1115,10 @@ def _trace(
 ) -> dict[str, Any]:
     retrieved_plus_expanded = _dedupe_chunks([*retrieval.retrieved, *retrieval.expanded])
     expected_law_ids = _expected_law_ids(record, resolver)
+    expected_article_ids = _expected_article_ids(record, resolver)
     context_law_ids = {str(chunk.payload.get("law_id") or "") for chunk in context_chunks}
+    retrieved_article_ids = {str(chunk.payload.get("article_id") or "") for chunk in retrieved_plus_expanded}
+    context_article_ids = {str(chunk.payload.get("article_id") or "") for chunk in context_chunks}
     return {
         "retrieved_chunk_ids": [chunk.chunk_id for chunk in retrieved_plus_expanded],
         "retrieved_law_ids": _unique(str(chunk.payload.get("law_id") or "") for chunk in retrieved_plus_expanded),
@@ -947,6 +1134,8 @@ def _trace(
         "rerank_scores": retrieval.rerank_scores if config.rerank_enabled else [],
         "context_included_count": len(context_chunks),
         "reference_law_hit": bool(expected_law_ids & context_law_ids),
+        "reference_article_hit_retrieved": bool(expected_article_ids & retrieved_article_ids),
+        "reference_article_hit_context": bool(expected_article_ids & context_article_ids),
     }
 
 
@@ -966,6 +1155,8 @@ def _empty_trace(config: AdvancedRagConfig) -> dict[str, Any]:
         "rerank_scores": [],
         "context_included_count": 0,
         "reference_law_hit": False,
+        "reference_article_hit_retrieved": False,
+        "reference_article_hit_context": False,
     }
 
 
@@ -974,6 +1165,16 @@ def _expected_law_ids(record: dict[str, Any], resolver: OracleReferenceResolver)
     for reference in split_reference_values([str(value) for value in record.get("expected_references", [])]):
         try:
             out.add(resolver.resolve_reference(reference).law_id)
+        except Exception:
+            continue
+    return out
+
+
+def _expected_article_ids(record: dict[str, Any], resolver: OracleReferenceResolver) -> set[str]:
+    out: set[str] = set()
+    for reference in split_reference_values([str(value) for value in record.get("expected_references", [])]):
+        try:
+            out.add(resolver.resolve_reference(reference).article_id)
         except Exception:
             continue
     return out
@@ -1063,6 +1264,45 @@ def _dedupe_chunks(chunks: list[RetrievedChunkRecord]) -> list[RetrievedChunkRec
     return out
 
 
+def _fuse_rrf(
+    batches: list[list[RetrievedChunkRecord]],
+    *,
+    rrf_k: int,
+    limit: int,
+) -> list[RetrievedChunkRecord]:
+    """Fuse multiple ranked lists with Reciprocal Rank Fusion.
+
+    Score = sum over queries of 1 / (rrf_k + rank_in_query). Chunks present in
+    multiple per-query lists rank higher; ties break by smallest best rank, then
+    by first-seen order. Falls back to first-seen dedupe when only one list is
+    provided.
+    """
+    if not batches:
+        return []
+    if len(batches) == 1:
+        return _dedupe_chunks(batches[0])[:limit]
+    scores: dict[str, float] = {}
+    best_rank: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    chunk_by_id: dict[str, RetrievedChunkRecord] = {}
+    counter = 0
+    for batch in batches:
+        for rank, chunk in enumerate(batch, start=1):
+            chunk_id = chunk.chunk_id
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank)
+            if chunk_id not in best_rank or rank < best_rank[chunk_id]:
+                best_rank[chunk_id] = rank
+            if chunk_id not in first_seen:
+                first_seen[chunk_id] = counter
+                chunk_by_id[chunk_id] = chunk
+                counter += 1
+    ordered_ids = sorted(
+        scores.keys(),
+        key=lambda cid: (-scores[cid], best_rank[cid], first_seen[cid]),
+    )
+    return [chunk_by_id[cid] for cid in ordered_ids[:limit]]
+
+
 def _unique(values: Any) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -1080,6 +1320,27 @@ def _safe_config_dump(config: AdvancedRagConfig) -> dict[str, Any]:
     data["api_key_present"] = bool(config.api_key)
     data["output_dir"] = config.output_dir
     return data
+
+
+def _build_query_rewriting_block(
+    *,
+    config: AdvancedRagConfig,
+    cache: QueryRewriteCache | None,
+    stats: QueryRewriteStats,
+) -> dict[str, Any]:
+    """Snapshot the active query rewriting configuration and runtime counters."""
+    strategy = config.active_query_rewriting_strategy
+    snapshot = stats.snapshot()
+    return {
+        "enabled": config.query_rewriting_enabled,
+        "strategy": strategy,
+        "n": config.query_rewriting_n,
+        "model": config.resolved_query_rewriting_model,
+        "prompt_version": config.query_rewriting_prompt_version,
+        "cache_path": str(cache.path) if cache is not None else None,
+        "cache_size": len(cache) if cache is not None else 0,
+        **snapshot,
+    }
 
 
 def _simple_config(config: AdvancedRagConfig) -> SimpleRagConfig:

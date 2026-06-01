@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-RETRIEVAL_EVALUATION_SCHEMA_VERSION = "retrieval-evaluation-v1"
+RETRIEVAL_EVALUATION_SCHEMA_VERSION = "retrieval-evaluation-v4"
 
 
 class _Record(BaseModel):
@@ -42,6 +42,9 @@ class QuestionTarget(_Record):
     expected_article_chunk_count: int = Field(ge=0)
 
 
+ARTICLE_HIT_K_VALUES: tuple[int, ...] = (5, 10, 20)
+
+
 class CandidateMetrics(_Record):
     """Hit and rank metrics for one ordered candidate list."""
 
@@ -52,6 +55,7 @@ class CandidateMetrics(_Record):
     first_article_rank: int | None
     article_mrr: float
     law_only_false_positive: bool
+    article_hit_at_k: dict[str, bool] = Field(default_factory=dict)
 
 
 class RetrievalEvaluationRow(_Record):
@@ -62,6 +66,7 @@ class RetrievalEvaluationRow(_Record):
     question: str
     retrieval_mode: Literal["dense", "hybrid"]
     top_k: int = Field(gt=0)
+    rrf_k: int | None = Field(default=None, gt=0)
     filter_name: str
     metadata_filters: dict[str, Any]
     graph_expansion_enabled: bool
@@ -83,6 +88,7 @@ class RetrievalEvaluationRow(_Record):
     direct_first_law_rank: int | None
     direct_first_article_rank: int | None
     direct_article_mrr: float
+    direct_article_hit_at_k: dict[str, bool] = Field(default_factory=dict)
     law_only_false_positive: bool
     post_law_hit: bool
     post_article_hit: bool
@@ -90,6 +96,7 @@ class RetrievalEvaluationRow(_Record):
     post_first_law_rank: int | None
     post_first_article_rank: int | None
     post_article_mrr: float
+    post_article_hit_at_k: dict[str, bool] = Field(default_factory=dict)
     graph_incremental_hit: bool
     expanded_expected_article_hits: int = Field(ge=0)
     expansion_noise_ratio: float | None
@@ -105,6 +112,7 @@ class RerankEvaluationRow(_Record):
     question: str
     retrieval_mode: Literal["dense", "hybrid"]
     top_k: int = Field(gt=0)
+    rrf_k: int | None = Field(default=None, gt=0)
     filter_name: str
     metadata_filters: dict[str, Any]
     base_scenario: str
@@ -130,12 +138,44 @@ class RerankEvaluationRow(_Record):
     reranked_chunk_ids: list[str]
 
 
+class QueryRewriteEvaluationRow(_Record):
+    """One query-rewriting evaluation row for a question/configuration pair."""
+
+    qid: str
+    level: str
+    question: str
+    retrieval_mode: Literal["dense", "hybrid"]
+    top_k: int = Field(gt=0)
+    rrf_k: int | None = Field(default=None, gt=0)
+    filter_name: str
+    metadata_filters: dict[str, Any]
+    strategy: Literal["none", "rewrite", "hyde", "multi_query"]
+    query_rewriting_model: str | None
+    query_rewriting_prompt_version: str | None
+    cache_hit: bool
+    rewritten_queries: list[str]
+    transformed_query_count: int = Field(ge=0)
+    expected_law_ids: list[str]
+    expected_article_ids: list[str]
+    expected_law_chunk_count: int = Field(ge=0)
+    expected_article_chunk_count: int = Field(ge=0)
+    retrieved_count: int = Field(ge=0)
+    direct_law_hit: bool
+    direct_article_hit: bool
+    direct_all_expected_articles_hit: bool
+    direct_first_law_rank: int | None
+    direct_first_article_rank: int | None
+    direct_article_mrr: float
+    law_only_false_positive: bool
+    retrieved_chunk_ids: list[str]
+
+
 class RetrievalScenarioSummary(_Record):
     """Aggregated metrics for one named scenario in the waterfall table."""
 
     scenario_name: str
     dataset: str
-    stage: Literal["direct", "graph", "rerank"]
+    stage: Literal["direct", "graph", "rerank", "query_rewriting"]
     article_hit_pct: float = Field(ge=0.0, le=100.0)
     law_hit_pct: float = Field(ge=0.0, le=100.0)
     article_mrr: float = Field(ge=0.0, le=1.0)

@@ -22,6 +22,7 @@ data/evaluation_clean/
 data/evaluation_runs/
 data/indexes/
 data/indexing_runs/
+data/cache/
 data/qdrant_indexing/
 data/rag_runs/
 notebooks/data/
@@ -35,4 +36,3 @@ data/retrieval_eval_runs
 # skills
 .agents/
 skills-lock.json
-

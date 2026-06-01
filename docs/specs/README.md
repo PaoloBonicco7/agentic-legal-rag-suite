@@ -15,7 +15,8 @@ The specifications are the source of intent. They describe what each step must p
 5. `04_no_rag_baseline.md`: model-only evaluation without retrieval.
 6. `05_simple_rag.md`: minimal retrieval, context, answer, citation, and evaluation loop.
 7. `06_advanced_graph_rag.md`: explainable improvements with filters, graph expansion, reranking, and optional hybrid retrieval.
-8. `07_evaluation_reporting.md`: shared metrics, comparisons, failure analysis, and thesis-ready reporting.
+8. `06b_retrieval_diagnostics.md`: retrieval-only diagnostics for recall, ranking, and promotion decisions before advanced RAG runs.
+9. `07_evaluation_reporting.md`: shared metrics, comparisons, failure analysis, and thesis-ready reporting.
 
 ## Shared Principles
 
@@ -51,6 +52,7 @@ Each numbered spec uses the same sections:
 - `notebooks/04_no_rag_baseline.ipynb`
 - `notebooks/05_simple_rag.ipynb`
 - `notebooks/06_advanced_graph_rag.ipynb`
+- `notebooks/06b_retrieval_diagnostics.ipynb`
 - `notebooks/07_evaluation_reporting.ipynb`
 
 Each notebook should run one coherent demonstration, display the relevant artifacts, and explain the transformation. It should not contain the main implementation logic.

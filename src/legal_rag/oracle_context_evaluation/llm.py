@@ -1,11 +1,17 @@
-"""Minimal structured chat client compatible with Utopia/Ollama endpoints."""
+"""Minimal structured chat clients compatible with Utopia and OpenAI-style endpoints."""
 
 from __future__ import annotations
 
 import json
+import os
+import re
+import threading
 import time
 from typing import Any, Protocol
 from urllib.parse import urlparse, urlunparse
+
+OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_DEFAULT_CHAT_MODEL = "openai/gpt-oss-120b"
 
 
 class StructuredChatClient(Protocol):
@@ -46,6 +52,31 @@ def resolve_openai_chat_completions_url(base_url: str, explicit_url: str | None 
         return _validate_http_url(explicit_url, field_name="explicit_url")
     normalized_base = _validate_http_url(base_url, field_name="base_url")
     return f"{normalized_base}/chat/completions"
+
+
+def resolve_openrouter_runtime() -> dict[str, Any]:
+    """Resolve OpenRouter fallback settings without exposing secret values."""
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is missing while OpenRouter fallback is enabled")
+    base_url = os.getenv("OPENROUTER_BASE_URL", OPENROUTER_DEFAULT_BASE_URL).strip() or OPENROUTER_DEFAULT_BASE_URL
+    explicit_url = os.getenv("OPENROUTER_CHAT_COMPLETIONS_URL", "").strip()
+    api_url = resolve_openai_chat_completions_url(base_url, explicit_url=explicit_url)
+    chat_model = os.getenv("OPENROUTER_CHAT_MODEL", OPENROUTER_DEFAULT_CHAT_MODEL).strip() or OPENROUTER_DEFAULT_CHAT_MODEL
+    return {
+        "provider": "openrouter",
+        "api_url": api_url,
+        "base_url": base_url,
+        "chat_model": chat_model,
+        "api_key": api_key,
+        "api_key_present": bool(api_key),
+    }
+
+
+def openrouter_fallback_enabled() -> bool:
+    """Return whether OpenRouter fallback is explicitly enabled."""
+    raw = os.getenv("OPENROUTER_FALLBACK_ENABLED", os.getenv("LLM_FALLBACK_ENABLED", "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def resolve_ollama_root_url(url: str) -> str:
@@ -287,10 +318,17 @@ class UtopiaStructuredChatClient:
         raise last_error
 
 
-class UtopiaOpenAIChatClient:
-    """Small HTTP client for Utopia's OpenAI-compatible preset models."""
+class OpenAICompatibleStructuredChatClient:
+    """Small HTTP client for OpenAI-compatible chat completions endpoints."""
 
-    def __init__(self, *, api_url: str, api_key: str, retry_attempts: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        api_key: str,
+        retry_attempts: int = 1,
+        provider_require_parameters: bool = False,
+    ) -> None:
         self.api_url = (
             api_url.rstrip("/")
             if api_url.rstrip("/").endswith("/chat/completions")
@@ -298,6 +336,7 @@ class UtopiaOpenAIChatClient:
         )
         self.api_key = api_key
         self.retry_attempts = max(1, int(retry_attempts))
+        self.provider_require_parameters = bool(provider_require_parameters)
 
     def structured_chat(
         self,
@@ -331,6 +370,8 @@ class UtopiaOpenAIChatClient:
                 },
             },
         }
+        if self.provider_require_parameters:
+            payload["provider"] = {"require_parameters": True}
         last_error: Exception | None = None
         for attempt in range(self.retry_attempts):
             try:
@@ -348,3 +389,118 @@ class UtopiaOpenAIChatClient:
                     time.sleep(min(2**attempt, 5))
         assert last_error is not None
         raise last_error
+
+
+class UtopiaOpenAIChatClient(OpenAICompatibleStructuredChatClient):
+    """Backward-compatible name for Utopia's OpenAI-compatible preset models."""
+
+
+def _fallback_allowed(exc: Exception) -> bool:
+    try:
+        import requests
+    except Exception:  # pragma: no cover - dependency error path
+        requests = None  # type: ignore[assignment]
+    if requests is not None and isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    match = re.search(r"HTTP\s+(\d{3})", str(exc))
+    return bool(match and (int(match.group(1)) in {408, 429} or int(match.group(1)) >= 500))
+
+
+class FallbackStructuredChatClient:
+    """Try a primary structured chat client, then a fallback client for transient failures."""
+
+    def __init__(
+        self,
+        *,
+        primary: StructuredChatClient,
+        fallback: StructuredChatClient,
+        fallback_model: str,
+        fallback_provider: str,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.fallback_model = fallback_model
+        self.fallback_provider = fallback_provider
+        self._lock = threading.Lock()
+        self._primary_call_count = 0
+        self._fallback_call_count = 0
+
+    def usage_stats(self) -> dict[str, int]:
+        """Return primary/fallback call counts observed by this wrapper."""
+        with self._lock:
+            return {
+                "primary_call_count": self._primary_call_count,
+                "fallback_call_count": self._fallback_call_count,
+            }
+
+    def structured_chat(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        payload_schema: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        """Call the primary client, falling back only for transient failures."""
+        try:
+            result = self.primary.structured_chat(
+                prompt=prompt,
+                model=model,
+                payload_schema=payload_schema,
+                timeout_seconds=timeout_seconds,
+            )
+            with self._lock:
+                self._primary_call_count += 1
+            result["provider"] = result.get("provider", "primary")
+            result["model"] = result.get("model", model)
+            return result
+        except Exception as exc:
+            if not _fallback_allowed(exc):
+                raise
+            result = self.fallback.structured_chat(
+                prompt=prompt,
+                model=self.fallback_model,
+                payload_schema=payload_schema,
+                timeout_seconds=timeout_seconds,
+            )
+            with self._lock:
+                self._fallback_call_count += 1
+            result["provider"] = self.fallback_provider
+            result["model"] = self.fallback_model
+            result["primary_error"] = f"{type(exc).__name__}: {exc}"
+            return result
+
+
+def add_openrouter_fallback_if_enabled(
+    primary: StructuredChatClient,
+    *,
+    retry_attempts: int,
+) -> tuple[StructuredChatClient, dict[str, Any] | None]:
+    """Wrap a primary client with OpenRouter fallback when explicitly enabled."""
+    if not openrouter_fallback_enabled():
+        return primary, None
+    runtime = resolve_openrouter_runtime()
+    fallback_client = OpenAICompatibleStructuredChatClient(
+        api_url=runtime["api_url"],
+        api_key=runtime["api_key"],
+        retry_attempts=retry_attempts,
+        provider_require_parameters=True,
+    )
+    return (
+        FallbackStructuredChatClient(
+            primary=primary,
+            fallback=fallback_client,
+            fallback_model=runtime["chat_model"],
+            fallback_provider=runtime["provider"],
+        ),
+        {key: value for key, value in runtime.items() if key != "api_key"},
+    )
+
+
+def attach_fallback_usage_stats(runtime_connection: dict[str, Any] | None, client: StructuredChatClient) -> None:
+    """Attach fallback usage counters to a runtime manifest record when available."""
+    if not runtime_connection or "fallback" not in runtime_connection:
+        return
+    usage_stats = getattr(client, "usage_stats", None)
+    if callable(usage_stats):
+        runtime_connection["fallback"]["usage"] = usage_stats()

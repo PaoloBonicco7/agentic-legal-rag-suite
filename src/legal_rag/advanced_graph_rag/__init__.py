@@ -8,6 +8,7 @@ from legal_rag.oracle_context_evaluation.scoring import aggregate_results, score
 from .models import (
     ADVANCED_RAG_PROMPT_VERSION,
     ADVANCED_RAG_SCHEMA_VERSION,
+    QUERY_REWRITING_PROMPT_VERSION,
     AdvancedMcqAnswerOutput,
     AdvancedMcqResultRow,
     AdvancedNoHintAnswerOutput,
@@ -18,9 +19,11 @@ from .models import (
     InteractiveRagConfig,
     InteractiveRagResult,
     InteractiveStepTiming,
+    QueryRewritingStrategy,
     RerankOutput,
     RerankScore,
 )
+from .prompts import RERANK_PROMPT_VERSION
 from .interactive import InteractiveRagRuntime, answer_interactive_question, build_interactive_runtime
 from .retrieval import (
     GraphIndex,
@@ -37,9 +40,12 @@ from .retrieval import (
     sparse_vector_name,
 )
 from .runner import (
+    QueryRewriteStats,
+    apply_query_rewriting,
     build_advanced_query_embedder,
     build_context,
     build_diagnostics,
+    build_query_rewrite_cache,
     build_quality_report,
     build_summary,
     resolve_answer_model,
@@ -55,6 +61,9 @@ from .runner import (
 __all__ = [
     "ADVANCED_RAG_PROMPT_VERSION",
     "ADVANCED_RAG_SCHEMA_VERSION",
+    "QUERY_REWRITING_PROMPT_VERSION",
+    "QueryRewritingStrategy",
+    "RERANK_PROMPT_VERSION",
     "AdvancedMcqAnswerOutput",
     "AdvancedMcqResultRow",
     "AdvancedNoHintAnswerOutput",
@@ -67,14 +76,17 @@ __all__ = [
     "InteractiveRagResult",
     "InteractiveRagRuntime",
     "InteractiveStepTiming",
+    "QueryRewriteStats",
     "RerankOutput",
     "RerankScore",
     "UtopiaStructuredChatClient",
     "aggregate_results",
     "answer_interactive_question",
+    "apply_query_rewriting",
     "build_advanced_query_embedder",
     "build_context",
     "build_diagnostics",
+    "build_query_rewrite_cache",
     "build_quality_report",
     "build_summary",
     "build_interactive_runtime",

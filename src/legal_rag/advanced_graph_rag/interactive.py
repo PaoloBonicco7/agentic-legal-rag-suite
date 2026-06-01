@@ -11,7 +11,11 @@ from qdrant_client import QdrantClient
 
 from legal_rag.indexing.embeddings import SupportsEmbedding
 from legal_rag.oracle_context_evaluation.env import load_env_file
-from legal_rag.oracle_context_evaluation.llm import StructuredChatClient, UtopiaStructuredChatClient
+from legal_rag.oracle_context_evaluation.llm import (
+    StructuredChatClient,
+    UtopiaStructuredChatClient,
+    add_openrouter_fallback_if_enabled,
+)
 from legal_rag.simple_rag.models import Citation, RetrievedChunkRecord
 
 from .models import (
@@ -35,10 +39,14 @@ from .retrieval import (
     sparse_vector_name,
 )
 from .runner import (
+    QueryRewriteStats,
     _build_citations,
     _dedupe_chunks,
+    _fuse_rrf,
+    apply_query_rewriting,
     build_advanced_query_embedder,
     build_context,
+    build_query_rewrite_cache,
     rerank_candidates,
     resolve_answer_model,
     resolve_judge_model,
@@ -62,11 +70,17 @@ class InteractiveRagRuntime:
         cfg = config if isinstance(config, InteractiveRagConfig) else InteractiveRagConfig.model_validate(config or {})
         if client is None:
             runtime_connection = resolve_utopia_runtime(cfg)
-            self.llm_client = UtopiaStructuredChatClient(
+            primary_client = UtopiaStructuredChatClient(
                 api_url=runtime_connection["api_url"],
                 api_key=runtime_connection["api_key"],
                 retry_attempts=cfg.retry_attempts,
             )
+            self.llm_client, fallback_runtime = add_openrouter_fallback_if_enabled(
+                primary_client,
+                retry_attempts=cfg.retry_attempts,
+            )
+            if fallback_runtime:
+                runtime_connection["fallback"] = fallback_runtime
             self.connection = {key: value for key, value in runtime_connection.items() if key != "api_key"}
         else:
             load_env_file(cfg.env_file)
@@ -128,11 +142,19 @@ class InteractiveRagRuntime:
         invalid_citations: list[str] = []
         timing = InteractiveStepTiming()
         error: str | None = None
+        effective_queries: list[str] = [text]
+        qr_block: dict[str, Any] = _disabled_query_rewriting_block(cfg)
 
         try:
+            step_started = perf_counter()
+            if cfg.active_query_rewriting_strategy != "none":
+                _notify(on_step, f"Generating {cfg.query_rewriting_strategy} variants")
+                effective_queries, qr_block = self._apply_query_rewriting(text, cfg)
+            timing.query_rewriting_seconds = perf_counter() - step_started
+
             _notify(on_step, "Retrieving initial candidates")
             step_started = perf_counter()
-            retrieved = self._retrieve(text, cfg)
+            retrieved = self._retrieve_with_queries(effective_queries, cfg)
             timing.retrieval_seconds = perf_counter() - step_started
 
             _notify(on_step, "Expanding through explicit legal graph edges")
@@ -171,7 +193,7 @@ class InteractiveRagRuntime:
             step_started = perf_counter()
             context_chunks, context_text = build_context(
                 reranked,
-                max_context_chunks=cfg.rerank_output_k,
+                max_context_chunks=cfg.effective_max_context_chunks,
                 max_context_chars=cfg.max_context_chars,
             )
             timing.context_seconds = perf_counter() - step_started
@@ -221,6 +243,8 @@ class InteractiveRagRuntime:
             rerank_scores=rerank_scores if cfg.rerank_enabled else [],
             context_chunks=context_chunks,
             context_text=context_text,
+            effective_queries=effective_queries,
+            query_rewriting=qr_block,
             error=error,
         )
 
@@ -248,26 +272,63 @@ class InteractiveRagRuntime:
             if callable(close):
                 close()
 
-    def _retrieve(self, question: str, config: InteractiveRagConfig) -> list[RetrievedChunkRecord]:
-        if config.hybrid_enabled:
-            return search_hybrid(
-                self.qdrant_client,
-                collection_name=self.collection_name,
-                embedder=self.embedder,
-                query_text=question,
-                limit=config.top_k,
-                rrf_k=config.rrf_k,
-                static_filters=config.active_static_filters,
-                index_manifest=self.index_manifest,
-            )
-        return search_dense(
-            self.qdrant_client,
-            collection_name=self.collection_name,
-            embedder=self.embedder,
-            query_text=question,
-            limit=config.top_k,
-            static_filters=config.active_static_filters,
+    def _retrieve_with_queries(
+        self,
+        queries: list[str],
+        config: InteractiveRagConfig,
+    ) -> list[RetrievedChunkRecord]:
+        per_query_batches: list[list[RetrievedChunkRecord]] = []
+        for query_text in queries:
+            if config.hybrid_enabled:
+                batch = search_hybrid(
+                    self.qdrant_client,
+                    collection_name=self.collection_name,
+                    embedder=self.embedder,
+                    query_text=query_text,
+                    limit=config.top_k,
+                    rrf_k=config.rrf_k,
+                    static_filters=config.active_static_filters,
+                    index_manifest=self.index_manifest,
+                )
+            else:
+                batch = search_dense(
+                    self.qdrant_client,
+                    collection_name=self.collection_name,
+                    embedder=self.embedder,
+                    query_text=query_text,
+                    limit=config.top_k,
+                    static_filters=config.active_static_filters,
+                )
+            per_query_batches.append(batch)
+        return _fuse_rrf(per_query_batches, rrf_k=config.rrf_k, limit=config.top_k)
+
+    def _apply_query_rewriting(
+        self,
+        question: str,
+        config: InteractiveRagConfig,
+    ) -> tuple[list[str], dict[str, Any]]:
+        cache = build_query_rewrite_cache(config)
+        stats = QueryRewriteStats()
+        queries = apply_query_rewriting(
+            question=question,
+            config=config,
+            llm_client=self.llm_client,
+            cache=cache,
+            stats=stats,
         )
+        snapshot = stats.snapshot()
+        block = {
+            "enabled": config.query_rewriting_enabled,
+            "strategy": config.active_query_rewriting_strategy,
+            "n": config.query_rewriting_n,
+            "model": config.resolved_query_rewriting_model,
+            "prompt_version": config.query_rewriting_prompt_version,
+            "cache_path": str(cache.path) if cache is not None else None,
+            "cache_size": len(cache) if cache is not None else 0,
+            "queries_used": list(queries),
+            **snapshot,
+        }
+        return queries, block
 
     def _effective_call_config(self, config: InteractiveRagConfig | dict[str, Any] | None) -> InteractiveRagConfig:
         if config is None:
@@ -305,6 +366,8 @@ class InteractiveRagRuntime:
         rerank_scores: list[int] | None = None,
         context_chunks: list[RetrievedChunkRecord] | None = None,
         context_text: str = "",
+        effective_queries: list[str] | None = None,
+        query_rewriting: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> InteractiveRagResult:
         if timing.total_seconds <= 0:
@@ -335,6 +398,7 @@ class InteractiveRagRuntime:
                 "hybrid_enabled": config.hybrid_enabled,
                 "graph_expansion_enabled": config.graph_expansion_enabled,
                 "rerank_enabled": config.rerank_enabled,
+                "query_rewriting_enabled": config.query_rewriting_enabled,
             },
             parameters={
                 "top_k": config.top_k,
@@ -345,8 +409,13 @@ class InteractiveRagRuntime:
                 "min_edge_confidence": config.min_edge_confidence,
                 "rerank_input_k": config.rerank_input_k,
                 "rerank_output_k": config.rerank_output_k,
+                "max_context_chunks": config.effective_max_context_chunks,
                 "max_context_chars": config.max_context_chars,
+                "query_rewriting_strategy": config.active_query_rewriting_strategy,
+                "query_rewriting_n": config.query_rewriting_n,
             },
+            effective_queries=effective_queries or [question],
+            query_rewriting=query_rewriting or _disabled_query_rewriting_block(config),
             timing=timing,
             error=error,
         )
@@ -385,6 +454,24 @@ def answer_interactive_question(
 
 def _embedder_supports_sparse(embedder: SupportsEmbedding) -> bool:
     return callable(getattr(embedder, "embed_sparse_texts", None)) or callable(getattr(embedder, "sparse_embed_texts", None))
+
+
+def _disabled_query_rewriting_block(config: InteractiveRagConfig) -> dict[str, Any]:
+    """Default snapshot when query rewriting is inactive — keeps the result schema stable."""
+    return {
+        "enabled": config.query_rewriting_enabled,
+        "strategy": config.active_query_rewriting_strategy,
+        "n": config.query_rewriting_n,
+        "model": config.resolved_query_rewriting_model,
+        "prompt_version": config.query_rewriting_prompt_version,
+        "cache_path": None,
+        "cache_size": 0,
+        "queries_used": [],
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "failures": 0,
+        "first_errors": [],
+    }
 
 
 def _notify(callback: StepCallback | None, message: str) -> None:

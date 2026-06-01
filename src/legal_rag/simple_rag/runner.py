@@ -26,7 +26,13 @@ from legal_rag.oracle_context_evaluation.io import (
     write_json,
     write_jsonl,
 )
-from legal_rag.oracle_context_evaluation.llm import StructuredChatClient, UtopiaStructuredChatClient, resolve_ollama_chat_url
+from legal_rag.oracle_context_evaluation.llm import (
+    StructuredChatClient,
+    UtopiaStructuredChatClient,
+    add_openrouter_fallback_if_enabled,
+    attach_fallback_usage_stats,
+    resolve_ollama_chat_url,
+)
 from legal_rag.oracle_context_evaluation.models import DEFAULT_CHAT_MODEL, JudgeOutput
 from legal_rag.oracle_context_evaluation.scoring import aggregate_results, score_mcq_label
 
@@ -118,8 +124,14 @@ def build_query_embedder(config: SimpleRagConfig, index_manifest: dict[str, Any]
     load_env_file(config.env_file)
     embedding = dict(index_manifest.get("embedding") or {})
     manifest_config = dict(index_manifest.get("config") or {})
-    provider = str(embedding.get("backend") or embedding.get("provider") or manifest_config.get("embedding_backend") or manifest_config.get("embedding_provider") or "utopia")
-    if provider != "utopia":
+    provider = str(
+        embedding.get("backend")
+        or embedding.get("provider")
+        or manifest_config.get("embedding_backend")
+        or manifest_config.get("embedding_provider")
+        or "utopia"
+    ).strip().lower()
+    if provider not in {"utopia", "local"}:
         raise RuntimeError(f"Unsupported simple RAG embedding provider from index manifest: {provider!r}")
     model = str(
         embedding.get("resolved_model")
@@ -131,10 +143,15 @@ def build_query_embedder(config: SimpleRagConfig, index_manifest: dict[str, Any]
     )
     if not model:
         raise RuntimeError("Index manifest does not record an embedding model for query embedding")
+    hybrid_enabled = bool(
+        embedding.get("hybrid_enabled")
+        or index_manifest.get("hybrid_enabled")
+        or manifest_config.get("hybrid_enabled")
+    )
     data = {
         "embedding_backend": provider,
         "embedding_model": model,
-        "embedding_api_key": config.api_key or os.getenv("UTOPIA_API_KEY", ""),
+        "embedding_api_key": config.api_key or os.getenv("UTOPIA_API_KEY", "") if provider == "utopia" else "",
         "utopia_base_url": os.getenv("UTOPIA_BASE_URL", manifest_config.get("utopia_base_url", "https://utopia.hpc4ai.unito.it/api")),
         "utopia_embed_url": os.getenv(
             "UTOPIA_EMBED_URL",
@@ -143,7 +160,7 @@ def build_query_embedder(config: SimpleRagConfig, index_manifest: dict[str, Any]
         "utopia_embed_api_mode": str(embedding.get("mode") or manifest_config.get("utopia_embed_api_mode") or "ollama"),
         "batch_size": int(manifest_config.get("batch_size") or 64),
         "embedding_timeout_seconds": float(manifest_config.get("embedding_timeout_seconds") or 60.0),
-        "hybrid_enabled": False,
+        "hybrid_enabled": hybrid_enabled if provider == "local" else False,
         "env_file": config.env_file,
     }
     return build_embedder(IndexingConfig.model_validate(data))
@@ -554,11 +571,17 @@ def run_simple_rag(
     runtime_connection: dict[str, Any] | None = None
     if client is None:
         runtime_connection = resolve_utopia_runtime(cfg)
-        llm_client = UtopiaStructuredChatClient(
+        primary_client = UtopiaStructuredChatClient(
             api_url=runtime_connection["api_url"],
             api_key=runtime_connection["api_key"],
             retry_attempts=cfg.retry_attempts,
         )
+        llm_client, fallback_runtime = add_openrouter_fallback_if_enabled(
+            primary_client,
+            retry_attempts=cfg.retry_attempts,
+        )
+        if fallback_runtime:
+            runtime_connection["fallback"] = fallback_runtime
     else:
         llm_client = client
         load_env_file(cfg.env_file)
@@ -641,6 +664,7 @@ def run_simple_rag(
             "evaluation_manifest": sha256_file(Path(effective_cfg.evaluation_dir) / "evaluation_manifest.json"),
             "index_manifest": sha256_file(index_manifest_path),
         }
+        attach_fallback_usage_stats(runtime_connection, llm_client)
         all_rows = [*mcq_results, *no_hint_results]
         manifest = {
             "schema_version": SIMPLE_RAG_SCHEMA_VERSION,

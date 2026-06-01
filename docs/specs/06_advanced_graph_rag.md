@@ -14,6 +14,7 @@ This step proves whether metadata filters, hybrid retrieval, explicit graph expa
 - Simple RAG run output from step 05 for direct comparison.
 - Advanced RAG configuration (`AdvancedRagConfig` Pydantic model):
   - paths and `chat_model` / `judge_model` consistent with step 05;
+  - optional OpenRouter chat fallback via `.env`: `OPENROUTER_FALLBACK_ENABLED=true`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`), and `OPENROUTER_CHAT_MODEL` (default `openai/gpt-oss-120b`). The fallback is used only for transient Utopia chat failures and must be recorded in the run manifest when enabled;
   - `prompt_version: str` (default `advanced-rag-prompts-v2`);
   - `run_name: str` (default `default`): used to disambiguate ablation runs in the output directory.
   - `parallel_datasets_enabled: bool` (default `True`): run MCQ and no-hint datasets concurrently; each dataset still preserves row order and uses `max_concurrency` internally.
@@ -22,6 +23,7 @@ This step proves whether metadata filters, hybrid retrieval, explicit graph expa
     - `hybrid_enabled: bool` (default `True`).
     - `graph_expansion_enabled: bool` (default `True`).
     - `rerank_enabled: bool` (default `True`).
+    - `query_rewriting_enabled: bool` (default `False`). Set to `True` to apply the strategy selected by Experiment H of 06b (currently `multi_query` n=3, see `recommended_advanced_config.query_rewriting_recommendation`).
   - **Retrieval parameters**:
     - `static_filters: dict[str, Any]` (default `{"law_status": "current"}`): applied when `metadata_filters_enabled=True`.
     - `top_k: int` (default `10`): top-k from each vector type before fusion.
@@ -37,6 +39,12 @@ This step proves whether metadata filters, hybrid retrieval, explicit graph expa
     - `rerank_input_k: int` (default `20`): number of candidates passed to the reranker.
     - `rerank_output_k: int` (default `5`): number of candidates kept after reranking; this is the cap on context chunks.
     - `max_context_chars: int` (default `16000`): same cap as step 05.
+  - **Query rewriting parameters** (Esperimento H di 06b, attivati quando `query_rewriting_enabled=True`):
+    - `query_rewriting_strategy: Literal["none", "rewrite", "hyde", "multi_query"]` (default `"none"`).
+    - `query_rewriting_n: int` (default `3`): number of query variants for `query_rewriting_strategy="multi_query"`.
+    - `query_rewriting_model: str | None` (default `None`, falls back to `chat_model`).
+    - `query_rewriting_prompt_version: str` (default mirrors `legal_rag.retrieval_evaluation.query_rewriting_prompts.QUERY_REWRITING_PROMPT_VERSION`).
+    - `query_rewriting_cache_dir: str` (default `"data/cache/query_rewriting"`): root of the JSONL cache shared with 06b; same `(question, strategy, model, prompt_version)` key ensures cache reuse across notebooks.
 
 ## Outputs
 
@@ -55,31 +63,37 @@ Default generated output directory: `data/rag_runs/advanced/<run_name>/`.
    Why: advanced behavior must be comparable against a known simple RAG baseline, not against an arbitrary one.
 2. For each question, build the retrieval request.
    Why: filters and retrieval mode must be recorded per row before any candidate is fetched.
-3. Apply metadata filters when `metadata_filters_enabled=True`.
+3. Optionally rewrite the retrieval query when `query_rewriting_enabled=True`.
+   Why: Experiment H of 06b has shown that `multi_query` (n=3) lifts `article_hit` by ~+4.3pp over hybrid alone on the diagnostics pilot.
+   - The runner builds the cache via `build_query_rewrite_cache(config)` and calls `apply_query_rewriting()` (in `advanced_graph_rag.runner`), which reuses `rewrite_query / generate_hyde / multi_query` from `legal_rag.retrieval_evaluation.query_rewriting` and the shared `QueryRewriteCache`.
+   - If the active strategy is `"none"` (or `query_rewriting_enabled=False`), the original question is used unchanged with zero LLM calls.
+   - For `multi_query` the n variants are retrieved independently and the results are fused client-side by first-seen rank with `_dedupe_chunks` before the graph and rerank stages.
+   - The runner records `cache_hits`, `cache_misses`, `failures` and `cache_path` in the manifest `query_rewriting` block.
+4. Apply metadata filters when `metadata_filters_enabled=True`.
    Why: filters such as current-law view or law status improve precision when justified by the project; when disabled, the same retrieval runs without them.
-4. Retrieve candidates from Qdrant.
+5. Retrieve candidates from Qdrant.
    - When `hybrid_enabled=True`: use the Qdrant `Query API` with two `prefetch` blocks (dense and sparse), each returning `top_k`, fused by RRF with `rrf_k`.
    - When `hybrid_enabled=False`: use dense-only retrieval with `top_k`.
    Why: hybrid is intended to improve exact legal-reference matching while preserving semantic recall.
-5. Expand candidates via explicit graph edges when `graph_expansion_enabled=True`.
+6. Expand candidates via explicit graph edges when `graph_expansion_enabled=True`.
    Why: related laws (referenced, modifying, modified, replaced) often hold the article that resolves the question.
    - Take the `graph_expansion_seed_k` top retrieved chunks; collect their `law_id` values.
    - For every edge in `edges.jsonl` whose source `law_id` is in the seed set, whose `relation_type` is in `graph_expansion_relation_types`, and whose `confidence` is at least `min_edge_confidence`, add target-law chunks until both the per-law and global caps are respected.
    - When `dst_article_label_norm` is available, filter the target law to that article. Otherwise, fall back to law-level filtering.
    - Rank target-law chunks with a dense mini-search filtered by target `law_id` and optional `article_label_norm`; use deterministic scroll only as a fallback when mini-search returns too few allowed chunks.
    - Record the edges actually used in `graph_relations_used` for traceability.
-6. Rerank candidates when `rerank_enabled=True`.
+7. Rerank candidates when `rerank_enabled=True`.
    Why: the LLM reranker reorders by legal relevance and prunes noisy candidates before the answer step.
    - Pass `rerank_input_k` candidates (retrieval + expansion, deduplicated) to the LLM reranker.
    - The reranker prompt asks the LLM to assign a relevance score in `{0, 1, 2}` per chunk against the question, returning a structured object.
    - Keep the top `rerank_output_k` candidates by score; ties broken by original retrieval rank.
-7. Build bounded context.
+8. Build bounded context.
    Why: the context budget must remain explicit and reproducible, identical in shape to step 05.
    - Concatenate kept candidates in rerank order until either `rerank_output_k` chunks or `max_context_chars` is reached.
-8. Generate MCQ and no-hint answers, attach citations, judge no-hint answers.
+9. Generate MCQ and no-hint answers, attach citations, judge no-hint answers.
    Why: the answer contract must remain compatible with step 05 so that step 07 can compare directly.
    - When `parallel_datasets_enabled=True`, run the MCQ and no-hint dataset loops in parallel. This can use up to roughly `2 * max_concurrency` remote calls, because each dataset loop also parallelizes rows.
-9. Export row-level traces, diagnostics, and summary metrics.
+10. Export row-level traces, diagnostics, and summary metrics.
    Why: improvements must be explainable, not only numerically better.
 
 ## Contract
@@ -120,6 +134,10 @@ The advanced manifest must record every flag value, every parameter value, the s
 - For every row, every flag's effect is observable: `metadata_filters` is empty iff `metadata_filters_enabled=False`; `retrieval_mode` is `dense` iff `hybrid_enabled=False`; expansion fields are empty iff `graph_expansion_enabled=False`; `rerank_scores` is empty iff `rerank_enabled=False`.
 - Every entry in `graph_relations_used` corresponds to an actual record in `edges.jsonl`.
 - Hybrid retrieval is only enabled when the index manifest declares sparse vectors are present.
+- Query rewriting is `enabled=False, strategy="none"` by default; activation requires either an explicit notebook override or a `recommended_advanced_config.query_rewriting_recommendation.enabled=True` from 06b.
+- Query rewriting prompts, schemas, and JSONL cache layout are imported from `src/legal_rag/retrieval_evaluation/query_rewriting.py` rather than duplicated under `advanced_graph_rag`; the runner only orchestrates calls and tracks `cache_hits / cache_misses / failures` in its manifest.
+- `multi_query` strategy must request exactly `query_rewriting_n` non-empty distinct variants; invalid structured output is counted in `manifest.query_rewriting.failures` and the runner silently falls back to the original question for that row.
+- The advanced manifest must include a `query_rewriting` block with `{enabled, strategy, n, model, prompt_version, cache_path, cache_size, cache_hits, cache_misses, failures, first_errors}`.
 - Rerank scores are integers in `{0, 1, 2}`; out-of-range scores cause `judge_error`-style row errors and are excluded from the kept set.
 - No-hint `context_sufficient` values are counted in diagnostics.
 - Summary metric names match the no-RAG and simple RAG contracts so that step 07 can compare directly.

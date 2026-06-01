@@ -40,7 +40,7 @@ Questa separazione permette al modello embedding di vedere il contesto giuridico
 Qdrant puo essere usato in due modalita:
 
 - file locale persistente tramite `qdrant-client`, con default `data/indexes/qdrant`;
-- server locale Docker, passando `qdrant_url="http://127.0.0.1:6333"`.
+- server locale Docker, passando `qdrant_url="http://127.0.0.1:6333"` e usando storage dedicato `data/indexes/qdrant_server`.
 
 La collection contiene:
 
@@ -49,9 +49,18 @@ La collection contiene:
 - payload on disk;
 - indici payload sui campi filtrabili richiesti dalla spec.
 
-La modalita locale riduce le dipendenze operative dello step. La modalita Docker e preferibile per una full run quando si vogliono payload indexes effettivi e un comportamento piu vicino a un deployment server.
+La modalita locale riduce le dipendenze operative dello step. La modalita Docker e preferibile per una full run quando si vogliono payload indexes effettivi, meno limiti del client embedded sopra 20.000 punti e un comportamento piu vicino a un deployment server.
 
 In modalita embedded locale, `qdrant-client` accetta la richiesta di payload index ma segnala che gli indici non hanno effetto prestazionale come in un server Qdrant. La pipeline registra comunque i campi richiesti e mantiene lo stesso contratto, cosi il passaggio a server Qdrant non richiede cambiare payload o retrieval.
+
+Per le full run Docker la pipeline puo usare upload parallelo, un numero di shard esplicito e una soglia temporanea di indexing alta. Questo differisce la costruzione HNSW durante il bulk upload; la soglia normale viene ripristinata a fine ingest.
+
+Comando operativo:
+
+```bash
+docker compose -f docker-compose.qdrant.yml up -d qdrant
+PYTHONPATH=src .venv/bin/python -m legal_rag.indexing --qdrant-url http://127.0.0.1:6333 --index-dir data/indexes/qdrant_server --collection-name legal_chunks_bge_m3 --force-rebuild --embedding-backend local --embedding-model BAAI/bge-m3 --embedding-dim 1024 --qdrant-upload-parallel 4 --qdrant-shard-number 4 --qdrant-bulk-indexing-threshold-kb 10000000
+```
 
 ## Embedding
 
@@ -65,15 +74,19 @@ hybrid_enabled = True
 
 `BAAI/bge-m3` e stato scelto perche supporta italiano e produce sia rappresentazioni dense sia sparse. Questo permette di costruire nello stesso indice la base per retrieval semantico e hybrid retrieval.
 
-Per la full indexing usata in questa fase viene usato il backend Utopia:
+La collection storica `legal_chunks` puo rimanere disponibile come baseline dense-only. Per gli esperimenti di miglioramento retrieval si costruisce invece una collection parallela:
 
 ```text
-embedding_backend = utopia
-embedding_model = UTOPIA_EMBED_MODEL oppure SLURM.nomic-embed-text:latest
-hybrid_enabled = False
+collection_name = legal_chunks_bge_m3
+qdrant_url = http://127.0.0.1:6333
+embedding_backend = local
+embedding_model = BAAI/bge-m3
+hybrid_enabled = True
 ```
 
-Utopia e trattato come dense-only in questo step: `hybrid_enabled` viene disabilitato perche la pipeline non assume disponibilita remota di sparse weights.
+La separazione per collection evita di sovrascrivere l'indice precedente e rende confrontabili baseline e nuovo retrieval. `force_rebuild=True` ricrea solo la collection configurata, non l'intero path Qdrant.
+
+Utopia resta supportato come backend dense-only: `hybrid_enabled` viene disabilitato perche la pipeline non assume disponibilita remota di sparse weights. Per sbloccare hybrid retrieval, la scelta metodologica e quindi BGE-M3 locale.
 
 ## Idempotenza
 
@@ -116,6 +129,8 @@ Sono previste due modalita:
 - `full`: indicizza tutto `chunks.jsonl`, producendo l'indice usabile dagli step successivi.
 
 Entrambe usano la stessa pipeline. La modalita sample non e una pipeline separata: cambia solo la selezione dei chunk.
+
+Nel notebook 03 la full run BGE-M3 e protetta da una variabile esplicita (`RUN_BGE_M3_REINDEX`). Il callback di progresso scrive eventi JSONL in `data/indexing_runs/<run_id>_progress.jsonl` e stampa batch, percentuale, rate, ETA, upsert, skip e failure. Questo rende monitorabile una run lunga senza introdurre un orchestratore separato.
 
 ## Quality Gates
 

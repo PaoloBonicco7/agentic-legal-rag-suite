@@ -6,11 +6,13 @@ from .dataset import DatasetValidationResult, load_chunks, read_manifest, valida
 from .embeddings import (
     LocalEmbeddingBackend,
     SupportsEmbedding,
+    SupportsHybridEmbedding,
     SupportsSparseEmbedding,
     UtopiaOllamaEmbedder,
     build_embedder,
     debug_utopia_embedding_connection,
     discover_utopia_models,
+    supports_hybrid_embedding,
     supports_sparse_embedding,
 )
 from .hashing import content_hash_for_text, point_id_from_chunk_id
@@ -32,6 +34,7 @@ __all__ = [
     "REQUIRED_PAYLOAD_FIELDS",
     "RetrievedChunk",
     "SupportsEmbedding",
+    "SupportsHybridEmbedding",
     "SupportsSparseEmbedding",
     "UtopiaOllamaEmbedder",
     "build_embedder",
@@ -44,6 +47,7 @@ __all__ = [
     "read_manifest",
     "run_indexing_pipeline",
     "search_index",
+    "supports_hybrid_embedding",
     "supports_sparse_embedding",
     "validate_clean_dataset",
 ]
