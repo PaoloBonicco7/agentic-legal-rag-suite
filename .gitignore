@@ -1,42 +1,64 @@
-OLD/
-.env
-
-# Local environment and OS/editor files.
-.venv/
+# OS, editor, and local workspace files.
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-# Python caches and tool output.
+# Python environments, caches, and build artifacts.
+.venv/
+venv/
+env/
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+build/
+dist/
+*.egg-info/
 
-# Generated data and runtime artifacts should stay out of Git.
+# Environment files and secrets.
+.env
+.env.*
+!.env.example
+
+# Notebook and local UI artifacts.
+.ipynb_checkpoints/
+notebooks/data/
+notebooks/rag_pipeline/artifacts/
+notebooks/rag_pipeline/checkpoints/
+.streamlit/secrets.toml
+
+# Generated Legal RAG data, indexes, caches, and run outputs.
 data/laws_html/
 data/laws_dataset/
 data/laws_dataset_clean/
 data/evaluation_clean/
+data/baseline_runs/
 data/evaluation_runs/
 data/indexes/
 data/indexing_runs/
 data/cache/
 data/qdrant_indexing/
 data/rag_runs/
-notebooks/data/
-notebooks/rag_pipeline/artifacts/
-notebooks/rag_pipeline/checkpoints/
+data/retrieval_eval_runs/
 
-# Evaluation source data is intentionally versioned:
-# - data/evaluation/
-data/retrieval_eval_runs
+# Evaluation source data is intentionally versioned.
+!data/evaluation/
+!data/evaluation/*.csv
 
-# skills
+# Local agent and legacy reference files.
 .agents/
-skills-lock.json
-
-# Coding agents
+.claude/
 AGENTS.md
 CLAUDE.md
+skills-lock.json
+OLD/
