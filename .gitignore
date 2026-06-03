@@ -36,3 +36,7 @@ data/retrieval_eval_runs
 # skills
 .agents/
 skills-lock.json
+
+# Coding agents
+AGENTS.md
+CLAUDE.md
