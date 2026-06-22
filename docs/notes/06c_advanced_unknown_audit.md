@@ -1,5 +1,11 @@
 # Audit dei 22 casi `unknown` — no-hint advanced full_100
 
+> Nota di contesto: audit eseguito sulla run advanced **pre-BGE-M3** (`full_100_dense_graph_rerank`:
+> dense + graph + rerank sul vecchio indice). Le sue conclusioni hanno motivato il passaggio a
+> BGE-M3 hybrid e l'abbandono di graph/rerank, documentati in
+> [results/06b](../results/06b_retrieval_diagnostics.md). I numeri qui **non** corrispondono alla run
+> advanced finale, riportata in [results/06](../results/06_advanced_rag.md).
+
 Run analizzata: `data/rag_runs/advanced/full_100_dense_graph_rerank/no_hint_results.jsonl` (100 record). Distribuzione `failure_category`: 57 successi, 22 `unknown`, 20 `context_noise`, 1 `generation_error`.
 
 I casi `unknown` per definizione del runner sono righe in cui non si è verificato un retrieval miss esplicito né un errore strutturato, ma il judge ha dato score 0. L'ipotesi iniziale era che fossero "problemi di generazione" (modello che fraintende un buon contesto). **L'audit ribalta questa ipotesi**: solo una minoranza dei 22 sono fallimenti puri di generazione; la maggioranza sono problemi a monte (chunking o retrieval) mascherati come unknown perché la legge giusta è in contesto ma l'articolo/comma giusto no.
@@ -134,5 +140,3 @@ L'audit cambia il ranking dei batch del piano originale:
 - `data/rag_runs/advanced/full_100_dense_graph_rerank/no_hint_results.jsonl`
 - `data/laws_dataset_clean/chunks.jsonl` (per il testo completo dei chunk in contesto)
 - `data/rag_runs/advanced/full_100_dense_graph_rerank/mcq_results.jsonl` (per cross-check MCQ pari)
-
-Dump intermedio per ispezione: `/tmp/unknown_audit_dump.md` (85 KB, 22 casi con domanda, risposta predetta, risposta corretta, judge_explanation, contesto chunk-by-chunk).

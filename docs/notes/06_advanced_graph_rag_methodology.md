@@ -37,15 +37,17 @@ Gli artifact stanno in `data/rag_runs/advanced/<run_name>/`.
 - `advanced_rag_summary.json` mantiene le metriche compatibili con gli step precedenti.
 - `quality_report.md` è il riepilogo umano della run e degli errori principali.
 
-Le ablation run si ottengono cambiando solo i flag e assegnando un `run_name` diverso. Per esempio, `all_on`, `no_hybrid`, `no_graph` e `no_rerank` producono directory affiancate e confrontabili.
+Le ablation run si ottengono cambiando solo i flag e assegnando un `run_name` diverso: il notebook 06 percorre una scala A0–A4 (da equivalente al simple RAG fino alla configurazione promossa) in directory affiancate e confrontabili.
+
+La configurazione **promossa** dai diagnostics [06b](../results/06b_retrieval_diagnostics.md), usata per la run riportata in [results/06](../results/06_advanced_rag.md), attiva solo `hybrid` + `multi_query`. Graph expansion, rerank e filtri metadata sono stati valutati e **non** promossi (rispettivamente: rumore quasi totale, perdita di recall, esclusione di domande valide); restano nel codice come leve di ablation, non come parte della pipeline raccomandata.
 
 ## Integrazione multi-query da 06b
 
-L'Esperimento H del notebook diagnostico 06b ha promosso `multi_query` (n=3) come leva utile con guadagno `+4.3pp` di `article_hit` sul pilot (vedi `docs/notes/06b_retrieval_diagnostics_report.md`). L'integrazione nel runner segue tre principi:
+L'Esperimento H del notebook diagnostico 06b ha promosso `multi_query` (n=3) come leva utile con guadagno `+4.3pp` di `article_hit` sul pilot (vedi [docs/results/06b_retrieval_diagnostics.md](../results/06b_retrieval_diagnostics.md)). L'integrazione nel runner segue tre principi:
 
 - **Niente duplicazione**: `apply_query_rewriting` in `advanced_graph_rag/runner.py` riusa direttamente `rewrite_query / generate_hyde / multi_query` da `retrieval_evaluation/query_rewriting.py`, con la stessa `QUERY_REWRITING_PROMPT_VERSION` e lo stesso `QueryRewriteCache` JSONL.
 - **Cache condivisa con 06b**: il default `query_rewriting_cache_dir = data/cache/query_rewriting` coincide con quello del diagnostico. Se modello e prompt version restano invariati tra 06b e 06, la prima full run hit la cache esistente con zero chiamate LLM aggiuntive per il rewriting.
-- **Fusione client-side semplice**: per `multi_query` si esegue un `search_hybrid` per ciascuna variante e si fondono i candidati con `_dedupe_chunks` preservando l'ordine di prima apparizione, troncando a `top_k`. L'approccio è deterministico e coerente con la nota tecnica della roadmap (`RETRIEVAL_IMPROVEMENT_ROADMAP.md`).
+- **Fusione client-side semplice**: per `multi_query` si esegue un `search_hybrid` per ciascuna variante e si fondono i candidati con `_dedupe_chunks` preservando l'ordine di prima apparizione, troncando a `top_k`. L'approccio è deterministico.
 
 I contatori cache (`cache_hits / cache_misses / failures`) e i primi errori sono registrati in `manifest.query_rewriting` per audit. Strategy `"none"` resta un no-op senza overhead.
 

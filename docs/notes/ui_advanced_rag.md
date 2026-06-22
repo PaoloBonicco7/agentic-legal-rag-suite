@@ -1,4 +1,4 @@
-# 06b - UI Advanced Graph RAG
+# UI Advanced Graph RAG
 
 Questa UI Streamlit serve a testare una domanda libera contro la pipeline Advanced Graph RAG e a visualizzare, passo per passo, cosa accade durante il retrieval. Non sostituisce i notebook e non produce artifact in `data/rag_runs/`: è uno strumento locale di ispezione e demo.
 

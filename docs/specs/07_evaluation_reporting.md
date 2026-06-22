@@ -6,6 +6,8 @@ Define the shared reporting layer for the thesis PoC.
 
 This step proves the project results in a consistent, explainable way by comparing no-RAG, simple RAG, and advanced Graph RAG with common metrics and failure analysis.
 
+> Status: this spec is the target contract. The reporting notebook and the `data/reports/` artifacts are not produced yet. The cross-method headline comparison currently lives in `docs/results/00_overview.md`, derived by hand from the run summaries.
+
 ## Inputs
 
 - No-RAG outputs from step 04.

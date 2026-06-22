@@ -27,6 +27,16 @@ This step proves that retrieval, context construction, answer generation, citati
   - `env_file: str | None` (default `.env`).
   - Optional OpenRouter chat fallback via `.env`: `OPENROUTER_FALLBACK_ENABLED=true`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`), and `OPENROUTER_CHAT_MODEL` (default `openai/gpt-oss-120b`). The fallback is used only for transient Utopia chat failures and must be recorded in the run manifest when enabled.
 
+## Thesis run configuration
+
+The Pydantic defaults above define the contract. The run reported in the thesis
+(`data/rag_runs/simple/`, see `docs/results/05_simple_rag.md`) overrides them to a deliberately lean
+budget:
+
+- `collection_name = legal_chunks_bge_m3` (the BGE-M3 index from step 03);
+- `top_k = 3`, `max_context_chunks = 3`, `max_context_chars = 8000`;
+- `static_filters = {"law_status": "current"}`.
+
 ## Outputs
 
 Default generated output directory: `data/rag_runs/simple/`.

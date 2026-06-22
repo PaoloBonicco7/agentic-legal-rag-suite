@@ -39,12 +39,29 @@ This step proves whether metadata filters, hybrid retrieval, explicit graph expa
     - `rerank_input_k: int` (default `20`): number of candidates passed to the reranker.
     - `rerank_output_k: int` (default `5`): number of candidates kept after reranking; this is the cap on context chunks.
     - `max_context_chars: int` (default `16000`): same cap as step 05.
-  - **Query rewriting parameters** (Esperimento H di 06b, attivati quando `query_rewriting_enabled=True`):
+  - **Query rewriting parameters** (Experiment H of 06b; applied when `query_rewriting_enabled=True`):
     - `query_rewriting_strategy: Literal["none", "rewrite", "hyde", "multi_query"]` (default `"none"`).
     - `query_rewriting_n: int` (default `3`): number of query variants for `query_rewriting_strategy="multi_query"`.
     - `query_rewriting_model: str | None` (default `None`, falls back to `chat_model`).
     - `query_rewriting_prompt_version: str` (default mirrors `legal_rag.retrieval_evaluation.query_rewriting_prompts.QUERY_REWRITING_PROMPT_VERSION`).
     - `query_rewriting_cache_dir: str` (default `"data/cache/query_rewriting"`): root of the JSONL cache shared with 06b; same `(question, strategy, model, prompt_version)` key ensures cache reuse across notebooks.
+
+## Promoted configuration vs code defaults
+
+The feature flags default to `True` in `AdvancedRagConfig` so that ablation runs can switch each
+component off one at a time. The configuration promoted by the retrieval diagnostics (06b) and used
+for the headline advanced run enables only two of them:
+
+- on: `hybrid_enabled` (`top_k=100`, `rrf_k=60`) and `query_rewriting_enabled` (`multi_query`, `n=3`);
+- off: `graph_expansion_enabled`, `rerank_enabled`, `metadata_filters_enabled`.
+
+Graph expansion and reranking were evaluated in 06b and **not** promoted (graph expansion added
+almost only noise; reranking lost recall). They stay in the code as ablatable features rather than as
+part of the recommended pipeline. The notebook runs an A0–A4 ladder (A0 ≈ simple-RAG equivalent → A4
+= promoted config) under distinct `run_name` values; A4 (`a4_combined_best_v2`) is the run reported
+in `docs/results/06_advanced_rag.md`.
+
+Versions: schema `advanced-graph-rag-v3`; prompts `advanced-rag-prompts-v2` and `query-rewriting-v1`.
 
 ## Outputs
 

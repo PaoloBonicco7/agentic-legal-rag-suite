@@ -14,7 +14,7 @@ The specifications are the source of intent. They describe what each step must p
 4. `03_indexing_contract.md`: clean legal chunks to a retrieval-ready index contract.
 5. `04_no_rag_baseline.md`: model-only evaluation without retrieval.
 6. `05_simple_rag.md`: minimal retrieval, context, answer, citation, and evaluation loop.
-7. `06_advanced_graph_rag.md`: explainable improvements with filters, graph expansion, reranking, and optional hybrid retrieval.
+7. `06_advanced_graph_rag.md`: explainable retrieval improvements (hybrid, query rewriting, graph expansion, reranking) compared by ablation; the promoted pipeline is hybrid + multi-query.
 8. `06b_retrieval_diagnostics.md`: retrieval-only diagnostics for recall, ranking, and promotion decisions before advanced RAG runs.
 9. `07_evaluation_reporting.md`: shared metrics, comparisons, failure analysis, and thesis-ready reporting.
 
@@ -46,6 +46,7 @@ Each numbered spec uses the same sections:
 ## Notebook Mapping
 
 - `notebooks/01_laws_preprocessing.ipynb`
+- `notebooks/01b_laws_graph_exploration.ipynb` (graph structure analysis; no dedicated spec)
 - `notebooks/02_evaluation_dataset.ipynb`
 - `notebooks/02b_oracle_context_evaluation.ipynb`
 - `notebooks/03_indexing_contract.ipynb`
@@ -53,10 +54,11 @@ Each numbered spec uses the same sections:
 - `notebooks/05_simple_rag.ipynb`
 - `notebooks/06_advanced_graph_rag.ipynb`
 - `notebooks/06b_retrieval_diagnostics.ipynb`
-- `notebooks/07_evaluation_reporting.ipynb`
 
 Each notebook should run one coherent demonstration, display the relevant artifacts, and explain the transformation. It should not contain the main implementation logic.
 
+Step 07 (`07_evaluation_reporting.md`) is specified but not yet built as a notebook or report artifact. The cross-method headline comparison currently lives in `docs/results/00_overview.md`, derived by hand from the run summaries.
+
 ## Results Notes
 
-After implementation, each step should have a short result note under `docs/results/` with the same numbering. The note should record the implementation choices, run configuration, observed counts, metrics, and known limitations.
+After implementation, each step has a short result note under `docs/results/` with the same numbering, recording run configuration, observed counts, metrics, and known limitations. `docs/results/00_overview.md` holds the cross-method headline comparison. Result notes are in Italian, keeping technical terms in English.

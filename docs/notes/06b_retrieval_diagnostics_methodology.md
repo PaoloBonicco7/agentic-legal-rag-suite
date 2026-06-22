@@ -21,9 +21,7 @@ La baseline retroattiva è `default__20260511T180530Z`. Le fasi successive usera
 - Distinguere sempre miglioramenti reali da aumenti degenerati dovuti solo a budget `top_k` molto grandi.
 - Promuovere in step 06 solo configurazioni con metriche e limiti documentati.
 
-## Stato
-
-Stub iniziale creato nella Fase 0. Le sezioni metodologiche verranno estese quando saranno disponibili le run di Fase 1-5.
+Gli esiti delle run, le leve promosse e quelle scartate sono in [results/06b](../results/06b_retrieval_diagnostics.md).
 
 ## Hybrid retrieval
 

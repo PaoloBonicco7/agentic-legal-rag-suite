@@ -1,77 +1,40 @@
-# 03 - Indexing Contract Results
+# 03 — Indicizzazione
 
-## Implemented Scope
+Step implementato in `legal_rag.indexing`: valida il dataset pulito, calcola l'embedding di
+`text_for_embedding`, scrive point ID deterministici (UUIDv5 da `chunk_id`), salva il payload
+completo, crea i payload index sui campi filtrabili e produce artifact riproducibili in
+`data/indexing_runs/<run_id>/`. Metodologia in
+[note/03](../notes/03_indexing_contract_methodology.md).
 
-The indexing step is implemented in `legal_rag.indexing`.
+## Indice usato dalla pipeline
 
-It validates `data/laws_dataset_clean/`, embeds `text_for_embedding`, writes deterministic Qdrant point IDs from `chunk_id`, stores the complete payload contract, creates payload indexes for filterable fields, and writes reproducible run artifacts under `data/indexing_runs/<run_id>/`.
+Gli step 05 e 06 consumano la collection `legal_chunks_bge_m3`, prodotta dalla full run
+`bge_m3_full_20260523_095655` in modalità Qdrant server.
 
-## Implementation Choices
+- Embedding: `BAAI/bge-m3` locale, dense 1024 + sparse nativo (hybrid abilitato).
+- Qdrant: server `http://127.0.0.1:6333`, storage `data/indexes/qdrant_server`, distanza cosine,
+  HNSW `m=16` / `ef_construct=100`.
+- Idempotenza: `content_hash = sha256(text_for_embedding)`, point ID UUIDv5 da `chunk_id`.
+- Validazione: `ready_for_retrieval=true`, `selected = indexed = collection_points = 76.467`,
+  `failure_count = 0`, smoke retrieval dense e hybrid non vuoti.
 
-- Qdrant is used through the official `qdrant-client` SDK.
-- The historical notebook full run targeted Qdrant local file mode at `data/indexes/qdrant`; new full runs should target Qdrant Docker/server mode at `http://127.0.0.1:6333` with storage under `data/indexes/qdrant_server`.
-- The collection uses named vectors: `dense`, plus `sparse` when `hybrid_enabled=True`.
-- The historical `legal_chunks` collection is preserved for baseline runs.
-- The BGE-M3 re-index setup writes to the parallel `legal_chunks_bge_m3` collection with local `BAAI/bge-m3`, dense size `1024`, and native sparse vectors enabled.
-- Docker/server indexing supports parallel upload, explicit shard count, and temporary HNSW indexing-threshold deferral for bulk load.
-- The pipeline stores `content_hash = sha256(text_for_embedding.strip())` and uses UUIDv5 point IDs derived from `chunk_id` for idempotent reruns.
+La collection storica `legal_chunks` (Utopia/Nomic, dense-only 768) resta disponibile come baseline;
+il confronto retrieval-only tra i due indici è in [06b](06b_retrieval_diagnostics.md).
 
-## Generated Artifacts
+## Artifact per run
 
-Each run writes:
+`index_manifest.json`, `payload_profile.json`, `index_quality_report.md`, `diagnostic_queries.json`,
+`failures.jsonl`. Il manifest registra hash sorgente, embedding, topologia dei vettori, conteggi,
+stato dei payload index e quality gate.
 
-- `index_manifest.json`
-- `payload_profile.json`
-- `index_quality_report.md`
-- `sample_retrieval_report.json`
-- `diagnostic_queries.json`
-- `failures.jsonl`
+## Riproduzione
 
-The manifest records dataset hashes, embedding backend/model/dimension, Qdrant path or URL, vector names, hybrid flag, indexing counts, requested payload indexes with creation statuses, duplicate checks, filter checks, and quality gates.
+Full run BGE-M3 in modalità server, dalla root con Qdrant attivo:
 
-## Verification
+```bash
+PYTHONPATH=src python -m legal_rag.indexing --qdrant-url http://127.0.0.1:6333 \
+  --index-dir data/indexes/qdrant_server --collection-name legal_chunks_bge_m3 \
+  --embedding-backend local --embedding-model BAAI/bge-m3 --embedding-dim 1024
+```
 
-Focused tests cover dataset validation, stable hashes and point IDs, Qdrant in-memory indexing, idempotent reuse, CLI smoke behavior, Utopia dense adapter behavior, and local BGE-M3 dense/sparse adapter parsing.
-Additional tests cover Docker/server tuning fields, Qdrant optimizer threshold wiring, and the `upload_points(..., parallel=...)` branch.
-
-## BGE-M3 Re-index Setup
-
-The monitorable setup for the Phase 1 re-index is available in `notebooks/03_indexing_contract.ipynb`, section 7.
-
-Configuration prepared for the manual full run:
-
-- `collection_name`: `legal_chunks_bge_m3`
-- `index_dir`: `data/indexes/qdrant_server`
-- `qdrant_url`: `http://127.0.0.1:6333`
-- `embedding_backend`: `local`
-- `embedding_model`: `BAAI/bge-m3`
-- `embedding_dim`: `1024`
-- `hybrid_enabled`: `True`
-- `force_rebuild`: `True`, scoped only to `legal_chunks_bge_m3`
-- `qdrant_upload_parallel`: `4`
-- `qdrant_shard_number`: `4`
-- `qdrant_bulk_indexing_threshold_kb`: `10000000`
-
-The notebook writes progress events to `data/indexing_runs/<run_id>_progress.jsonl` and, after completion, reports the `legal_chunks` state, verifies that `legal_chunks_bge_m3` has `dense` and `sparse` vectors, checks that the manifest is ready for retrieval, and runs dense/hybrid smoke retrieval.
-
-## BGE-M3 Full Re-index Run
-
-Run artifact:
-
-- Manifest: `data/indexing_runs/20260512_212818/index_manifest.json`
-- Progress log: `data/indexing_runs/bge_m3_full_20260512_212742_progress.jsonl`
-- Collection: `legal_chunks_bge_m3`
-
-Validation summary:
-
-- `ready_for_retrieval`: `true`
-- `selected_count`: `76467`
-- `indexed_count`: `76467`
-- `collection_points_count`: `76467`
-- `failure_count`: `0`
-- embedding backend/model: `local` / `BAAI/bge-m3`
-- dense vector size: `1024`
-- sparse vector: `sparse`
-- quality gates: all `true`
-
-Dense and hybrid smoke retrieval both returned non-empty results for `contributi regionali`. Qdrant local mode emits a performance warning for collections above 20,000 points; this is acceptable for the thesis PoC but should be considered when running long sweeps.
+Notebook: `notebooks/03_indexing_contract.ipynb`.

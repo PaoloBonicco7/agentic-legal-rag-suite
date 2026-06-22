@@ -34,7 +34,7 @@ Default generated output directory: `data/retrieval_eval_runs/<run_name>__<YYYYM
 - Row-level diagnostic files: per-question candidates, expected references, hit flags, ranking positions, and skipped/error status.
 - Historical comparison tables and plots when a previous dense-only run is configured.
 - Optional cache files under `data/cache/` for expensive rerank or query rewriting calls.
-- Human-readable notes in `docs/notes/06b_retrieval_experiments_log.md`.
+- A human-readable results report in `docs/results/06b_retrieval_diagnostics.md`.
 
 ## Pipeline
 
@@ -94,7 +94,7 @@ Query rewriting row-level diagnostics must additionally preserve `strategy`, `qu
 - `multi_query(n=3)` must return exactly three non-empty distinct strings; invalid structured outputs fail the row and are counted in the manifest.
 - The notebook comparison separates old-index dense performance, new-index dense performance, and new-index hybrid performance.
 - Rerank and query rewriting experiments use caches and versioned prompts.
-- The experiment log records the run id, key metrics, artifacts, checks, and next action.
+- Experiment decisions (promoted vs rejected levers, key metrics) are recorded in `docs/results/06b_retrieval_diagnostics.md`.
 
 ## Notebook Role
 
@@ -111,5 +111,5 @@ Query rewriting row-level diagnostics must additionally preserve `strategy`, `qu
 
 - A reader can reproduce the retrieval-only baseline and understand why each later retrieval experiment was selected or rejected.
 - `scenarios.csv` contains enough information to compare article hit rate, law hit rate, MRR, status, and configuration across scenarios.
-- Experiment decisions are recorded in `docs/notes/06b_retrieval_experiments_log.md`.
+- Experiment decisions are recorded in `docs/results/06b_retrieval_diagnostics.md`.
 - The selected retrieval configuration can be promoted to Advanced Graph RAG without relying on notebook-only state.
