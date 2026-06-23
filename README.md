@@ -1,90 +1,103 @@
 # Agentic Legal RAG Suite
 
-A reproducible, thesis-oriented Legal RAG project that turns a legal corpus and evaluation questions into a clear end-to-end question answering workflow.
+Minimal, reproducible Legal RAG research codebase for a thesis project.
 
-## What This Project Builds
+The project tests whether better retrieval improves legal question answering on a fixed benchmark of questions about Italian regional laws. It compares:
 
-This repository is being refactored into a minimal research codebase for building, running, and explaining a Legal RAG pipeline.
+- **no-RAG**: the model answers without retrieved context;
+- **simple RAG**: dense retrieval over the legal corpus;
+- **advanced RAG**: hybrid dense + sparse retrieval with multi-query rewriting;
+- **oracle context**: the model receives the expected legal articles, used as an upper reference.
 
-The goal is not to preserve the complexity of the previous implementation. The goal is to keep the same research flow while making each step understandable, reproducible, and easy to discuss with a research team.
+The detailed workflow is in [`docs/specs/README.md`](docs/specs/README.md). The current result summary is in [`docs/results/00_overview.md`](docs/results/00_overview.md).
 
-The evaluation question datasets are part of the application and are intended to be versioned in the repository.
-The HTML legal corpus is expected locally under `data/laws_html/`, but is not tracked in Git.
+## Project Layout
 
-## Refactored Pipeline
+- `src/legal_rag/`: reusable implementation for each pipeline step.
+- `notebooks/`: demonstration notebooks; reusable logic should stay in `src/`.
+- `docs/specs/`: compact contracts for each numbered step.
+- `docs/results/`: run summaries and thesis-facing result notes.
+- `data/evaluation/`: versioned source evaluation CSV files.
+- `data/laws_html/`: local HTML legal corpus required by preprocessing, not tracked in Git.
+- `data/*_clean`, `data/indexes`, `data/*_runs`, `data/reports`: generated artifacts.
+- `OLD/`: historical reference only.
 
-1. Prepare evaluation questions.
-2. Evaluate a no-retrieval baseline.
-3. Prepare the legal corpus.
-4. Build the retrieval index.
-5. Run simple RAG.
-6. Run advanced RAG.
-7. Compare results.
+Generated datasets, indexes, caches, and benchmark runs are reproducible outputs. Do not treat them as source data.
 
-## Repository Shape
+## Setup
 
-- Core reusable code contains the implementation for each pipeline step.
-- Pydantic v2 defines data contracts, configuration models, validation, and structured outputs.
-- External libraries are welcome when they make the code simpler, clearer, and easier to reproduce.
-- Notebooks provide short demonstration runs with explanatory text and visible outputs.
-- Markdown specifications are the source of intent for each step.
-- Markdown implementation notes record choices, results, and lessons learned.
-- `data/laws_html/` contains the local source legal corpus and is ignored by Git.
-- `data/evaluation/` contains the evaluation question datasets.
-- `OLD/` is historical reference only; it is not the target architecture.
+The project uses Python 3.11+ and `uv`.
 
-## Reproducibility Contract
-
-The repository should include the full set of evaluation questions used by the application.
-The legal HTML corpus should be kept locally under `data/laws_html/` and documented as an external input.
-
-Runs should be reproducible from a fresh clone once the local corpus has been placed under `data/laws_html/`. Any generated dataset, retrieval index, benchmark output, or cache should be documented as a derived artifact, not as source data.
-
-Outputs used in the thesis or shared with the research team should be traceable to their input data, configuration, and pipeline step.
-
-## Development Setup
-
-This project uses `uv` for dependency management.
-
-Install the base development and notebook environment:
+Install the base development environment:
 
 ```bash
-uv sync --group dev --group notebooks
+uv sync --group dev
 ```
 
-Install the optional RAG dependencies when working on retrieval or generation:
-
-```bash
-uv sync --group dev --group notebooks --group rag
-```
-
-Run the local Advanced Graph RAG UI:
+Install notebook and UI dependencies when needed:
 
 ```bash
 uv sync --group dev --group notebooks --group ui
-uv run --group ui streamlit run src/legal_rag/ui/advanced_rag_app.py
 ```
 
-Run the basic checks:
+Create a local `.env` file for Utopia-backed LLM calls:
 
 ```bash
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy src
+UTOPIA_API_KEY=...
+UTOPIA_BASE_URL=...
+UTOPIA_CHAT_MODEL=SLURM.gpt-oss:120b
 ```
 
-## Documentation Model
+`UTOPIA_BASE_URL` and `UTOPIA_CHAT_MODEL` already match the project defaults, so only the API key is normally required.
 
-Each major pipeline step should have two documents:
+## Basic Commands
 
-- a specification file describing purpose, inputs, outputs, contracts, and acceptance criteria;
-- an implementation/results note describing what was built, what choices were made, and what results were observed.
+Run tests:
 
-Repository-level documentation should remain minimal. Details belong in the step-specific Markdown files.
+```bash
+PYTHONPATH=src uv run --no-sync pytest
+```
 
-## Current Status
+Build the clean legal dataset from the local HTML corpus:
 
-The refactor is in progress.
+```bash
+PYTHONPATH=src uv run --no-sync python -m legal_rag.laws_preprocessing
+```
 
-The previous implementation has been archived under `OLD/` and should be used only to understand the historical workflow, expected outputs, and prior experiments.
+Build the clean evaluation dataset:
+
+```bash
+PYTHONPATH=src uv run --no-sync python -m legal_rag.evaluation_dataset
+```
+
+Run a smoke check for model connectivity and structured output:
+
+```bash
+PYTHONPATH=src uv run --no-sync python -m legal_rag.oracle_context_evaluation --smoke
+PYTHONPATH=src uv run --no-sync python -m legal_rag.no_rag_baseline --smoke
+```
+
+Build a local Qdrant index:
+
+```bash
+PYTHONPATH=src uv run --no-sync python -m legal_rag.indexing --collection-name legal_chunks_bge_m3 --force-rebuild
+```
+
+Run simple and advanced RAG smoke checks:
+
+```bash
+PYTHONPATH=src uv run --no-sync python -m legal_rag.simple_rag --smoke
+PYTHONPATH=src uv run --no-sync python -m legal_rag.advanced_graph_rag --smoke --run-name smoke --no-metadata-filters --no-graph-expansion --no-rerank --top-k 100
+```
+
+Generate the comparison report from existing run outputs:
+
+```bash
+PYTHONPATH=src uv run --no-sync python -m legal_rag.evaluation_reporting --allow-partial
+```
+
+Start the local Advanced RAG UI:
+
+```bash
+PYTHONPATH=src uv run --no-sync --group ui streamlit run src/legal_rag/ui/advanced_rag_app.py
+```
