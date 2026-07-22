@@ -55,7 +55,7 @@ Il risultato è un dataset pulito di 100 domande MCQ e 100 domande no-hint, bila
   - **Notes**: Il concetto ripreso da LegalBench è che un benchmark legale dovrebbe rendere esplicito quale capacità sta misurando, invece di trattare tutte le domande come semplice QA generico. Il paper costruisce task con il contributo di esperti e li organizza per forme di ragionamento giuridico; nel progetto questo principio viene riadattato in modo più semplice attraverso i livelli L1-L4 e la separazione tra formato MCQ e formato no-hint. LegalBench non viene usato come dataset perché lavora su task in inglese e non valuta direttamente il retrieval su un corpus normativo locale. Rimane però utile per motivare la struttura del benchmark: ogni domanda conserva livello, risposta corretta e riferimento atteso, così gli esperimenti successivi possono leggere i risultati non solo come accuratezza aggregata, ma anche rispetto alla difficoltà della domanda e al tipo di capacità richiesta.
 
 - [LegalBench-RAG: A Benchmark for Retrieval-Augmented Generation in the Legal Domain, 2024](https://arxiv.org/abs/2408.10343) — benchmark RAG legali con domande associate a riferimenti normativi attesi.
-  - **Notes**: Il concetto ripreso da LegalBench-RAG è che un benchmark per Legal RAG non dovrebbe valutare solo la risposta finale, ma anche la capacità del sistema di recuperare evidenza giuridica precisa e citabile. Il paper costruisce coppie query-snippet e tratta i passaggi rilevanti come ground truth del retrieval, invece di fermarsi al documento corretto o a chunk ampi. Nel progetto questo principio viene riadattato al corpus di leggi regionali: lo step 2 conserva per ogni domanda gli `expected_references` testuali, che negli step successivi vengono risolti in legge e articolo attesi. Da qui derivano le metriche retrieval-only (`law_hit`, `article_hit`, `MRR`) e il vincolo end-to-end per cui le citazioni devono provenire dai chunk effettivamente passati al modello. Il dataset LegalBench-RAG non viene usato direttamente perché lavora su documenti legali in inglese, soprattutto contratti e privacy policies; viene però riprocessata la sua idea centrale di benchmark retrieval-aware, adattandola a normativa italiana e riferimenti articolo-legge.
+  - **Notes**: Il concetto ripreso da LegalBench-RAG è che un benchmark per Legal RAG non dovrebbe valutare solo la risposta finale, ma anche la capacità del sistema di recuperare evidenza giuridica precisa e citabile. Il paper costruisce coppie query-snippet e tratta i passaggi rilevanti come ground truth del retrieval, invece di fermarsi al documento corretto o a chunk ampi. Nel progetto questo principio viene riadattato al corpus di leggi regionali: lo step 2 conserva per ogni domanda gli `expected_references` testuali, che negli step successivi vengono risolti in legge e articolo attesi. Da qui derivano le metriche retrieval-only Article/Law Success, Macro Recall, All-Relevant, MRR e MAP, oltre al vincolo end-to-end per cui le citazioni devono provenire dai chunk effettivamente passati al modello. Il dataset LegalBench-RAG non viene usato direttamente perché lavora su documenti legali in inglese, soprattutto contratti e privacy policies; viene però ripresa la sua idea centrale di benchmark retrieval-aware, adattandola a normativa italiana e riferimenti articolo-legge.
 
 - [A Reasoning-Focused Legal Retrieval Benchmark, 2025](https://arxiv.org/abs/2505.03970) — benchmark legal RAG realistici orientati a retrieval+QA.
   - **Notes**: Il concetto ripreso da questo paper è che le domande legali realistiche non sempre coincidono lessicalmente con il passaggio normativo che serve per rispondere. Nei benchmark Bar Exam QA e Housing Statute QA il retrieval deve quindi trovare evidenza utile per sostenere una risposta, non solo testo semanticamente vicino alla query. Nel progetto questa idea viene applicata in forma più semplice: il formato MCQ originale è mantenuto perché permette scoring deterministico, ma viene affiancato da una vista no-hint per verificare se il sistema riesce a produrre una risposta senza essere guidato dalle opzioni. Anche la divisione L1-L4 si legge in questa direzione: le domande più difficili dovrebbero richiedere un collegamento più robusto tra formulazione della domanda, fonte normativa e risposta. Il dataset del paper non viene usato perché riguarda il diritto statunitense; viene invece ripreso l'approccio di valutare retrieval e risposta come parti collegate dello stesso compito legale.
@@ -172,11 +172,11 @@ Lo step 6 risponde a questa domanda prima della generazione finale. L'obiettivo 
 
 ### Approccio
 
-La diagnosi separa il retrieval dalla generazione. Per ogni configurazione misura tre segnali: `article_hit`, cioè presenza dell'articolo atteso tra i candidati; `law_hit`, cioè presenza almeno della legge corretta; `MRR`, cioè posizione del primo riferimento utile nel ranking. Le metriche sono calcolate sugli `expected_references` preparati nello step 2, quindi il confronto resta legato a evidenza normativa esplicita e non a una valutazione generica di similarità.
+La diagnosi separa il retrieval dalla generazione. Per ogni configurazione misura la presenza di almeno un articolo o di una legge attesi (Article/Law Success), la copertura degli articoli attesi (Macro Recall e All-Relevant) e il loro ordinamento (MRR e MAP). Le metriche sono calcolate sugli `expected_references` preparati nello step 2, quindi il confronto resta legato a evidenza normativa esplicita e non a una valutazione generica di similarità. Gli artifact storici chiamano Article Success `article_hit`: non è una recall completa, perché vale 1 anche quando viene trovato uno solo di più articoli attesi.
 
 Il notebook confronta in modo incrementale le principali leve disponibili: aumento di `top_k` nella ricerca dense, filtri metadata, espansione tramite edge normativi, retrieval hybrid dense+sparse, reranking LLM e riformulazione della query. Ogni leva viene valutata contro la stessa baseline BGE-M3 dense, così il miglioramento è attribuibile alla componente testata e non a cambiamenti di corpus, modello embedding o dataset.
 
-Il risultato è una selezione netta. L'hybrid retrieval viene promosso: rispetto a `dense@10` porta `article_hit` da 73% a 89% e migliora anche il ranking (`MRR` da 0.519 a 0.551). La strategia `multi_query` viene promossa sul pilot perché aggiunge un ulteriore guadagno rispetto all'hybrid puro e raggiunge `law_hit=100%` sul campione. I filtri statici su stato normativo vengono scartati perché escludono alcuni riferimenti storici presenti nella ground truth; la graph expansion viene scartata perché aggiunge quasi solo candidati non rilevanti; il reranking LLM migliora la precisione in alto ma perde recall e produce troppi errori di output strutturato.
+Il risultato è una selezione netta, con alcune cautele. A parità di `k=100`, l'hybrid retrieval migliora il dense di +1 punto percentuale di Article Success e +0.027 MRR; il confronto 73% → 89% rispetto a `dense@10` include invece quasi interamente l'effetto dell'aumento del candidate budget. Nel pilot paired su 30 qid, `multi_query` recupera tre domande aggiuntive rispetto all'hybrid senza rewriting (+10pp di Success e `law_hit=100%`), ma riduce MRR di 0.026: è quindi un'ipotesi promettente da validare, non un guadagno conclusivo. I filtri statici su stato normativo vengono scartati perché escludono alcuni riferimenti storici presenti nella ground truth; la graph expansion viene scartata perché aggiunge quasi solo candidati non rilevanti; il reranking LLM riordina i positivi già trovati, ma non ne recupera di nuovi e produce troppi errori di output strutturato.
 
 Gli output principali sono `scenarios.csv`, le diagnostics a livello di domanda, le cache versionate per reranking e query rewriting, e `recommended_advanced_config.json`. Quest'ultimo è il passaggio operativo verso lo step 7: attiva hybrid retrieval e `multi_query`, lascia disattivati filtri metadata, graph expansion e reranking LLM, e rende tracciabile la ragione di ogni scelta.
 
@@ -204,7 +204,7 @@ Gli output principali sono `scenarios.csv`, le diagnostics a livello di domanda,
   - **Notes**: Il paper combina testo, modelli di retrieval e conoscenza strutturata per il recupero di norme giuridiche, mostrando che segnali lessicali, semantici e relazionali possono essere complementari. Nel progetto questo schema viene semplificato: non vengono usati BM25 separato, precedenti o knowledge graph esterno; la parte lessicale è coperta dalla sparse di BGE-M3, mentre la parte strutturale è rappresentata dagli edge estratti nel preprocessing. Lo step 6 riprende quindi dal paper due domande sperimentali: l'hybrid dense+sparse aiuta davvero? seguire gli edge normativi migliora il candidate set? I risultati separano le due risposte: l'hybrid viene promosso, la graph expansion viene scartata per rumore. La citazione è utile perché motiva il test congiunto di segnali testuali e strutturali, ma anche perché chiarisce il limite dell'adattamento: un grafo usato come semplice espansione post-retrieval non equivale a una pipeline knowledge-graph pienamente integrata.
 
 - [LegalBench-RAG, 2024](https://arxiv.org/abs/2408.10343) — retrieval di snippet legali minimi e citabili; criterio retrieval-only.
-  - **Notes**: LegalBench-RAG distingue esplicitamente la valutazione del retrieval dalla valutazione della risposta generata e insiste su segmenti legali piccoli, precisi e citabili. Lo step 6 adatta questo principio al corpus regionale italiano: non usa il dataset LegalBench-RAG, ma valuta ogni configurazione contro gli `expected_references` dello step 2. La metrica centrale diventa `article_hit`, perché recuperare solo la legge corretta non basta se la risposta deve citare un passaggio normativo specifico. `law_hit` resta come segnale più debole e `MRR` misura quanto presto compare il riferimento utile. Il paper motiva quindi la separazione tra §6 e §7: un retrieval buono non garantisce una risposta corretta, ma senza retrieval diagnostico non sarebbe possibile capire se un fallimento nasce dal recupero o dalla generazione.
+  - **Notes**: LegalBench-RAG distingue esplicitamente la valutazione del retrieval dalla valutazione della risposta generata e insiste su segmenti legali piccoli, precisi e citabili. Lo step 6 adatta questo principio al corpus regionale italiano: non usa il dataset LegalBench-RAG, ma valuta ogni configurazione contro gli `expected_references` dello step 2. Article Success verifica se compare almeno un articolo atteso, Macro Recall e All-Relevant ne misurano la copertura, mentre MRR e MAP ne valutano l'ordine. Law Success resta un segnale più permissivo. Il paper motiva quindi la separazione tra §6 e §7: un retrieval buono non garantisce una risposta corretta, ma senza retrieval diagnostico non sarebbe possibile capire se un fallimento nasce dal recupero o dalla generazione.
 
 - [An Ontology-Driven Graph RAG for Legal Norms, 2026](https://journals.sagepub.com/doi/10.3233/FAIA251598) — Graph RAG legale structure-aware; framework per cui la graph expansion va vincolata e non usata in modo indiscriminato.
   - **Notes**: Il paper propone un Graph RAG giuridico in cui struttura gerarchica, versioni temporali, provenienza e azioni legislative sono modellate esplicitamente. Lo step 6 non implementa questa architettura: non costruisce una vera ontologia, non modella versioni temporali come nodi separati e non usa Action node per rappresentare le modifiche. Riprende solo l'idea minima di non trattare i chunk come testo isolato, testando se gli edge normativi estratti nello step 1 possano espandere il retrieval. L'esito negativo della graph expansion non smentisce il paper; mostra piuttosto che una semplice espansione post-retrieval è troppo debole e rumorosa per sostituire un grafo giuridico vincolato da struttura, tempo e causalità. La citazione resta utile perché spiega perché gli edge vengono comunque conservati nel payload e perché la componente graph rimane una direzione di Future Work, non una parte attiva della configurazione finale.
@@ -251,11 +251,42 @@ La conclusione dello step è quindi doppia. Hybrid retrieval e multi-query sono 
 
 ## 8. Risultati
 
+### 8.0 Protocollo di valutazione: unità, ground truth e metriche
+
+Le metriche vanno separate per fase della pipeline. Una metrica di retrieval non misura la correttezza della risposta; una metrica di risposta non identifica se l'errore nasce dal retrieval, dalla selezione del contesto o dalla generazione.
+
+| fase | unità valutata | ground truth disponibile | domanda a cui risponde |
+|---|---|---|---|
+| candidate retrieval | lista ordinata di chunk, prima del taglio di contesto | legge e articolo in `expected_references` | almeno un articolo atteso è stato trovato e a quale rank? |
+| context selection | chunk effettivamente inseriti nel prompt | stessa ground truth a livello articolo | il generatore ha ricevuto almeno una fonte attesa? |
+| answer generation | una risposta MCQ o no-hint | etichetta MCQ oppure risposta gold + rubric 0–2 | la risposta è corretta o parzialmente corretta? |
+| grounding | claim e citazioni della risposta | oggi solo validità degli ID; manca una qrel answer-bearing | le affermazioni sono sostenute dai chunk citati? |
+
+Per una domanda `q`, siano `G_q` l'insieme degli articoli attesi e `A_q@k` gli articoli distinti rappresentati nei primi `k` chunk. Le metriche usate o proposte hanno il seguente significato:
+
+- **Article Success@k**, chiamata `article_hit` negli artifact correnti: `1` se `G_q ∩ A_q@k` non è vuoto, `0` altrimenti. La media è una *success rate*, non una recall completa: basta trovare uno degli articoli attesi.
+- **Law Success@k**, chiamata `law_hit`: stessa definizione a livello di legge. È più permissiva di Article Success@k e non dimostra che sia stato trovato il passaggio normativo corretto.
+- **Macro Recall@k**: media di `|G_q ∩ A_q@k| / |G_q|`. È la misura primaria di copertura quando una domanda richiede più articoli.
+- **All-Relevant@k**: quota di domande per cui tutti gli articoli in `G_q` sono presenti. Rende immediatamente visibili i fallimenti multi-reference.
+- **MRR@k**: media di `1/rank_q`, dove `rank_q` è la posizione del primo chunk appartenente a un articolo atteso; vale `0` se non esiste entro `k`. Misura quanto presto compare la prima evidenza nota, non la completezza del set recuperato.
+- **MAP@k**: media dell'Average Precision per domanda. Ha senso quando esistono più elementi rilevanti e le qrel sono ragionevolmente complete. Nell'evaluation set corrente 95 domande hanno un solo articolo atteso, 4 ne hanno due e 1 ne ha tre: sul 95% del benchmark `AP@k = RR@k`, quindi MAP aggiunge quasi la stessa informazione di MRR. Sulla sweep corrente, per esempio, Dense@10 ha `MAP@10=0.515` contro `MRR@10=0.519`, mentre Hybrid@100 ha `MAP@100=0.548` contro `MRR@100=0.551`. MAP può essere riportata come metrica secondaria, ma non va presentata come una nuova evidenza indipendente.
+- **nDCG@k**: valuta l'intero ordinamento e supporta rilevanza graduata. Con le sole etichette binarie a livello articolo e quasi sempre un solo positivo, il suo contributo rispetto a MRR è limitato. Diventa invece utile dopo aver annotato i chunk con gradi come `0=non rilevante`, `1=contestuale`, `2=answer-bearing`.
+- **Precision@k / Context Precision@k**: richiede di sapere quali chunk siano realmente utili. Oggi `expected_references` identifica fonti positive, ma non giudica tutti gli altri chunk; considerarli automaticamente irrilevanti penalizzerebbe fonti alternative valide. La precision va quindi introdotta solo dopo una valutazione pooled dei candidati, almeno sui top-15 che entrano nel prompt.
+
+Questa scelta è coerente con la letteratura IR e RAG. [BEIR](https://arxiv.org/abs/2104.08663) usa `nDCG@10` come metrica rank-aware comune e affianca `Recall@100`; [LegalBench-RAG](https://arxiv.org/abs/2408.10343) valuta `Precision@k` e `Recall@k` contro snippet minimi annotati da esperti; [ARES](https://aclanthology.org/2024.naacl-long.20/) separa context relevance, answer faithfulness e answer relevance. Il punto metodologico comune è non comprimere retrieval, grounding e correttezza finale in un solo numero.
+
+Nel progetto il protocollo raccomandato è quindi:
+
+1. riportare subito `Article Success@k`, `Macro Recall@k`, `All-Relevant@k` e `MRR@k` a `k ∈ {10, 15, 100}`;
+2. usare `k=100` per la copertura della candidate list e `k=15` per ciò che il generatore può davvero vedere;
+3. costruire una piccola qrel answer-bearing, con annotazione umana pooled dei candidati dei sistemi confrontati, prima di usare `Context Precision@15`, answer-bearing `MAP@15`, `nDCG@15` e metriche claim-level di faithfulness;
+4. accompagnare i delta end-to-end con intervalli di confidenza paired-bootstrap, perché tutti i sistemi rispondono agli stessi `qid`.
+
 ### 8.1 Embedder upgrade (step 3)
 
-Confronto retrieval-only sullo stesso corpus e stesse 100 domande, vecchio indice Utopia/Nomic dense-only vs nuovo indice BGE-M3 dense+sparse (fonte: `docs/results/06b_embedding_index_comparison.md`).
+Confronto retrieval-only sullo stesso corpus e sulle stesse 100 domande, vecchio indice Utopia/Nomic dense-only vs nuovo indice BGE-M3 dense+sparse (fonte: `docs/results/06b_retrieval_diagnostics.md` e relativi `sweep_direct.csv`). `k` è il numero massimo di chunk nella lista valutata.
 
-| indice | configurazione | article_hit | law_hit | MRR |
+| indice | configurazione | Article Success@k | Law Success@k | MRR@k |
 |---|---|---:|---:|---:|
 | Utopia/Nomic dense | top_k=10 | 45.0% | 72.0% | 0.288 |
 | Utopia/Nomic dense | top_k=100 | 66.0% | 87.0% | 0.295 |
@@ -263,29 +294,38 @@ Confronto retrieval-only sullo stesso corpus e stesse 100 domande, vecchio indic
 | BGE-M3 dense | top_k=100 | 88.0% | 99.0% | 0.524 |
 | **BGE-M3 hybrid** | top_k=100, rrf_k=30 | **89.0%** | 99.0% | **0.551** |
 
-Il re-index BGE-M3 porta +28pp di `article_hit@10` e +0.231 di MRR rispetto a Nomic dense@10, prima ancora di attivare hybrid. L'attivazione hybrid aggiunge +16pp di `article_hit` sopra la nuova baseline dense@10 e +0.032 di MRR. Il salto giustifica il cambio di embedder come scelta architetturale: senza BGE-M3 le altre leve della pipeline (multi-query, fix F1/F2/F3) avrebbero un effetto trascurabile.
+Il confronto controllato Dense@10 mostra che il re-index BGE-M3 porta **+28 punti percentuali di Article Success@10** e **+0.231 MRR@10** rispetto a Nomic. È il guadagno architetturale più netto.
+
+L'effetto hybrid va invece isolato dall'effetto del budget. Passare da BGE-M3 Dense@10 a Hybrid@100 produce +16pp, ma 15 di questi punti sono già ottenuti aumentando Dense da `k=10` a `k=100`. A parità di `k=100`, Hybrid migliora Dense di **+1pp di Success@100** e **+0.027 MRR@100**. Hybrid resta utile, soprattutto per il ranking, ma il +16pp non può essere attribuito interamente alla fusione dense+sparse.
 
 ### 8.2 Retrieval diagnostics (step 6, notebook 06b)
 
-Waterfall completo della run `diagnostic_full_utopia_throttled__20260525T091921Z`. Baseline = `dense@10` su 100 domande; LLM per G e H = `SLURM.gpt-oss:120b` via Utopia.
+Waterfall della run `diagnostic_full_utopia_throttled__20260525T091921Z`. Le viste MCQ e no-hint condividono gli stessi 100 stem e gli stessi riferimenti semantici; per il retrieval costituiscono quindi **100 query uniche**, non 200 osservazioni indipendenti. Le cinque domande multi-reference sono codificate nella vista no-hint con riferimenti separati da `|`, che il resolver divide prima dello scoring.
 
-| stage | scenario | n | article_hit | law_hit | MRR | δ vs baseline | esito |
-|---|---|---:|---:|---:|---:|---:|---|
-| baseline | Dense@10 (no filter) | 100 | 73.0% | 97.0% | 0.519 | — | riferimento |
-| direct ceiling | Dense top_k=100 | 100 | 88.0% | 99.0% | 0.524 | +15.0pp | informativo |
-| B — filter | + Filter `law_status=current` | 100 | 71.0% | 93.0% | 0.507 | −2.0pp | scartato |
-| C — graph | + Best graph from sweep | 100 | 74.0% | 97.0% | 0.520 | +1.0pp | scartato (noise=99.7%) |
-| **F — hybrid** | **Hybrid top_k=100, rrf_k=30** | 100 | **89.0%** | 99.0% | **0.551** | **+16.0pp** | **promosso** |
-| G — rerank | + LLM rerank (input_k=20, output_k=10) | 23 (pilot) | 82.6% | 100.0% | 0.711 | +9.6pp | scartato (−6.4pp vs hybrid) |
-| **H — rewriting** | **+ multi-query (n=3)** | 30 (pilot) | **93.3%** | 100.0% | 0.467 | **+20.3pp** | **promosso (+4.3pp vs hybrid)** |
+Scenari full-size (`n=100`). Macro Recall e All-Relevant sono ricalcolate dalle trace row-level della stessa run; ogni articolo atteso conta una sola volta anche se più chunk appartengono a quell'articolo.
+
+| stage | scenario | cutoff | Article Success@k | Macro Recall@k | All-Relevant@k | Law Success@k | MRR@k | esito |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| baseline | Dense, no filter | 10 | 73.0% | 71.8% | 71.0% | 97.0% | 0.519 | riferimento |
+| direct ceiling | Dense, no filter | 100 | 88.0% | 87.5% | 87.0% | 99.0% | 0.524 | informativo |
+| B — filter | Dense + `law_status=current` | 10 | 71.0% | 69.8% | 69.0% | 93.0% | 0.507 | scartato |
+| C — graph | Dense@10 + best graph | 10 + expansion | 74.0% | 72.8% | 72.0% | 97.0% | 0.520 | scartato (noise=99.7%) |
+| **F — hybrid** | **Hybrid, rrf_k=30** | **100** | **89.0%** | **88.5%** | **88.0%** | 99.0% | **0.551** | **promosso** |
+
+I pilot LLM vanno letti separatamente, perché hanno un campione e una base di confronto diversi:
+
+| esperimento pilot | confronto omogeneo sullo stesso subset | Article Success | MRR | lettura |
+|---|---|---:|---:|---|
+| G — rerank | pre-rerank vs post-rerank, 23 output MCQ validi | 82.6% → 82.6% | 0.539 → 0.711 | riordina i positivi già presenti, ma non recupera nuovi articoli; il failure rate complessivo delle chiamate pilot è 30.6% |
+| H — multi-query | `none` vs `multi_query`, stessi 30 qid MCQ | 83.3% → 93.3% | 0.493 → 0.467 | recupera 3 domande aggiuntive, ma peggiora il rank medio del primo positivo; evidenza esplorativa, non conclusiva |
 
 Sintesi degli esiti:
 
-- **Hybrid (F) promosso**: +16pp `article_hit` sopra dense@10 con MRR che cresce da 0.519 a 0.551. Il guadagno non è solo recall: dense@100 raggiunge 88% di hit ma resta a MRR 0.524 — RRF promuove in cima i chunk che entrambe le viste (dense e sparse) considerano rilevanti.
-- **Multi-query (H) promossa**: +4.3pp sopra hybrid puro sul pilot di 30 domande, con `law_hit=100%`. Le riformulazioni alternative coprono meglio la varietà del vocabolario normativo della stessa intent informativa.
+- **Hybrid (F) promosso**: a parità di `k=100` aggiunge +1pp di Article Success, +1pp di Macro Recall e +0.027 MRR rispetto a Dense. Il guadagno maggiore rispetto a Dense@10 dipende soprattutto dall'aumento del candidate budget.
+- **Multi-query (H) promossa come ipotesi da validare end-to-end**: sul pilot paired recupera tre domande in più rispetto a hybrid senza rewriting (+10pp), ma MRR scende di 0.026. Il confronto `93.3%` pilot vs `89%` full-size (+4.3pp) non è metodologicamente valido, perché usa subset diversi.
 - **Filtri metadata (B) scartati**: `law_status=current` esclude 4 domande dell'evaluation set i cui riferimenti puntano a leggi abrogate, abbassando il hit di 2pp.
 - **Graph expansion (C) scartata**: la best config ha `expansion_noise_ratio=0.997` — oltre il 99% dei chunk aggiunti non è rilevante.
-- **LLM reranking (G) scartato**: `recovered=0` su tutte le 18 configurazioni pilot — l'LLM non promuove mai in `output_k` un articolo che hybrid aveva escluso da `input_k`. Migliora la precision-at-top (MRR 0.71 vs 0.55) ma a costo della recall e con `failure_rate=30.6%` sull'output strutturato.
+- **LLM reranking (G) scartato**: `recovered=0` su tutte le 18 configurazioni pilot. Sui 23 output validi della configurazione mostrata mantiene invariata la Success e migliora MRR, ma l'instabilità dell'output strutturato impedisce di considerarlo un miglioramento affidabile.
 
 Configurazione promossa (`recommended_advanced_config.json` della run):
 
@@ -307,17 +347,33 @@ Configurazione promossa (`recommended_advanced_config.json` della run):
 
 ### 8.3 End-to-end Advanced RAG (step 7, notebook 06)
 
-Run finale `full_100__answer_slurm_gpt_oss_120b__judge_slurm_gpt_oss_120b__a4_combined_best_v2` — variante A4 (F1+F2+F3 combinati): `top_k=100`, `rrf_k=60`, `max_context_chunks=15`, multi-query attiva con n=3.
+Run finale `full_100__answer_slurm_gpt_oss_120b__judge_slurm_gpt_oss_120b__a4_combined_best_v2` — variante A4: retrieval hybrid dense+sparse con multi-query (`n=3`), `top_k=100`, `rrf_k=60` e al massimo 15 chunk nel contesto; filtri metadata, graph expansion e reranking LLM sono disattivati.
 
-Confronto sui 200 record di valutazione (100 MCQ + 100 no_hint):
+Il benchmark contiene **100 qid**, ciascuno valutato in due condizioni di risposta: 100 MCQ e 100 no-hint. Le due condizioni producono 200 answer attempt e 200 trace di pipeline, ma non raddoppiano la dimensione indipendente del campione.
 
-| metrica | no-RAG | Simple RAG | Advanced (A4) | δ vs Simple | δ vs no-RAG |
-|---|---:|---:|---:|---:|---:|
-| MCQ accuracy / strict | 0.81 | 0.79 | **0.84** | **+0.05** | +0.03 |
-| no_hint accuracy | 0.485 | 0.59 | **0.63** | **+0.04** | +0.145 |
-| no_hint mean score (0–2) | 0.97 | 1.18 | **1.26** | **+0.08** | +0.29 |
+| dataset e metrica | definizione e denominatore | no-RAG | Simple RAG | Advanced (A4) | δ vs Simple | δ vs no-RAG |
+|---|---|---:|---:|---:|---:|---:|
+| MCQ exact accuracy | `P(score=1)`, 100 risposte | 0.81 | 0.79 | **0.84** | **+0.05** | +0.03 |
+| no-hint fully-correct rate | `P(judge_score=2)`, 100 risposte | 0.39 | 0.56 | **0.60** | **+0.04** | +0.21 |
+| no-hint mean judge score | media ordinale su scala 0–2 | 0.97 | 1.18 | **1.26** | **+0.08** | +0.29 |
+| no-hint normalized judge score | `mean_score / 2` | 0.485 | 0.590 | **0.630** | **+0.040** | +0.145 |
 
-Strict accuracy per livello di difficoltà (no_hint):
+Il campo `accuracy`/`strict_accuracy` degli artifact no-hint coincide qui con il **normalized judge score** perché la coverage è 100%; non è la percentuale di risposte pienamente corrette. Quest'ultima è 60%, non 63%.
+
+I delta sono paired per `qid`. La tabella seguente riporta intervalli percentile paired-bootstrap al 95% ottenuti dalle trace row-level con 100.000 resample e seed `20260722`:
+
+| confronto | metrica | delta puntuale | IC 95% del delta |
+|---|---|---:|---:|
+| Advanced − Simple | MCQ exact accuracy | +5pp | [−2pp, +13pp] |
+| Advanced − Simple | no-hint fully-correct rate | +4pp | [−6pp, +14pp] |
+| Advanced − Simple | no-hint normalized judge score | +4pp | [−4.5pp, +12.5pp] |
+| Advanced − no-RAG | MCQ exact accuracy | +3pp | [−6pp, +12pp] |
+| Advanced − no-RAG | no-hint fully-correct rate | +21pp | [+9pp, +33pp] |
+| Advanced − no-RAG | no-hint normalized judge score | +14.5pp | [+3.5pp, +26pp] |
+
+I miglioramenti Advanced vs Simple sono quindi **descrittivi ma non conclusivi** sul campione di 100 qid, perché tutti e tre gli intervalli includono zero. Il miglioramento no-hint rispetto a no-RAG è invece più stabile. Gli intervalli quantificano l'incertezza del test set; non catturano la variabilità del modello o del judge tra run, che richiederebbe repliche indipendenti.
+
+Normalized judge score per livello di difficoltà no-hint (`mean_score / 2`, 25 qid per livello):
 
 | livello | no-RAG | Simple RAG | Advanced (A4) | δ vs Simple |
 |---|---:|---:|---:|---:|
@@ -326,29 +382,32 @@ Strict accuracy per livello di difficoltà (no_hint):
 | L3 | 0.46 | **0.64** | 0.48 | **−0.16** |
 | L4 | 0.60 | 0.38 | **0.64** | **+0.26** |
 
-Diagnostics retrieval (Advanced A4, su 200 domande):
+I delta per livello sono esplorativi: ogni cella riassume solo 25 domande e non è accompagnata da un intervallo di confidenza. In particolare, il +26pp su L4 e il −16pp su L3 non vanno generalizzati come effetti stabili senza ampliare il benchmark o replicare la valutazione.
 
-| metrica | valore |
-|---|---:|
-| `reference_article_hit` retrieved (top_k=100, post multi-query fusion) | 93.0% (186/200) |
-| `reference_article_hit` in context (top 15 chunk) | 72.0% (144/200) |
-| `reference_law_hit` retrieved | 95.0% (190/200) |
-| `context_sufficient` (no_hint, judge) | 86/100 |
+Diagnostics retrieval di Advanced A4. I conteggi sono riportati separatamente per formato, così il denominatore resta 100 qid:
 
-Failure categories (Advanced A4, 200 domande):
+| fase | metrica | MCQ | no-hint | interpretazione |
+|---|---|---:|---:|---|
+| candidate retrieval | Article Success@100 post multi-query fusion | 93/100 | 93/100 | almeno un articolo atteso compare nei 100 chunk candidati |
+| context selection | Article Success@15 | 72/100 | 72/100 | almeno un articolo atteso compare nei chunk realmente inseriti nel prompt |
+| context selection | Law Success@15 (`reference_law_hit`) | 95/100 | 95/100 | la legge attesa è nel contesto; il campo corrente non misura la candidate list |
+| answer model self-report | `context_sufficient=yes` | n/a | 86/100 | autovalutazione del modello risposta, non giudizio indipendente |
+
+Failure categories sui 200 answer attempt. Le categorie sono mutuamente esclusive e sommano a 200:
 
 | categoria | conteggio |
 |---|---:|
 | nessun fallimento (`none`) | 147 |
 | `unknown` (risposta non riconducibile a categoria specifica) | 43 |
 | `context_noise` | 5 |
-| `generation_error` (errore di plumbing) | 4 |
+| `generation_error` | 4 |
 | `abstention` | 1 |
-| `citation_error: invalid_chunk_ids` (errori operativi) | 4 (3 MCQ + 1 no_hint) |
 
-Cache multi-query: 200 hit / 0 miss / 0 failure (cache versionata interamente riutilizzata dalla pipeline 06b).
+I quattro `generation_error` sono precisamente i quattro casi con `citation_error: invalid_chunk_ids` (3 MCQ + 1 no-hint): non sono quattro errori aggiuntivi. Inoltre `none` significa MCQ corretta oppure risposta no-hint con judge score maggiore di zero; include quindi anche 6 risposte no-hint solo parzialmente corrette.
 
-Funnel di perdita tra retrieval, context selection e risposta:
+Cache multi-query: 200 lookup hit / 0 miss / 0 failure sui 200 answer attempt; la cache versionata è stata interamente riutilizzata dalla pipeline 06b.
+
+Funnel di perdita tra retrieval, context selection e risposta. Qui il denominatore 200 indica trace di pipeline, due per qid; `strict-correct` significa `score=1` per MCQ e `judge_score=2` per no-hint:
 
 | stato della pipeline | conteggio | interpretazione |
 |---|---:|---|
@@ -357,19 +416,30 @@ Funnel di perdita tra retrieval, context selection e risposta:
 | articolo atteso nel contesto ma risposta non strict-correct | 27/200 | limite di estrazione/generazione, chunk incompleti o judge severo |
 | articolo atteso nel contesto e risposta strict-correct | 117/200 | successo end-to-end completo |
 
-La distribuzione del primo chunk appartenente all'articolo atteso conferma il punto: 116/200 record hanno l'articolo atteso entro rank 1-3, 28/200 entro rank 4-15, 42/200 solo tra rank 16-100 e 14/200 mai nei top-100. La metrica retrieval-only di 06b conta come successo sia rank 3 sia rank 90; la pipeline end-to-end, invece, usa solo i primi 15 chunk. Per questo `reference_article_hit_retrieved=93%` non può essere letto come probabilità che il modello abbia davvero l'evidenza risolutiva nel prompt.
+La distribuzione del primo chunk appartenente all'articolo atteso conferma il punto: 116/200 trace hanno l'articolo atteso entro rank 1–3, 28/200 entro rank 4–15, 42/200 solo tra rank 16–100 e 14/200 mai nei top-100. Success@100 conta come successo sia rank 3 sia rank 90; la pipeline end-to-end usa invece al massimo 15 chunk (15 in 198 trace, 14 in 2). Per questo `reference_article_hit_retrieved=93%` non può essere letto come probabilità che il modello abbia davvero l'evidenza risolutiva nel prompt.
 
-La differenza MCQ/no_hint mostra quanto questo collo di bottiglia pesi sulla generazione. Quando l'articolo atteso è nel contesto, MCQ sale a 91.7% e no_hint a 73.6% di accuracy; quando non è nel contesto, MCQ resta comunque a 64.3% grazie a segnali parziali o scelta per esclusione, mentre no_hint scende a 35.7%. Quindi la performance MCQ può mascherare una debolezza di grounding che diventa evidente nelle risposte aperte.
+La differenza MCQ/no-hint mostra quanto questo collo di bottiglia pesi sulla generazione. Quando l'articolo atteso è nel contesto, l'accuracy MCQ è 91.7% e il normalized judge score no-hint è 73.6%; quando non è nel contesto, MCQ resta a 64.3% grazie a segnali parziali o scelta per esclusione, mentre il normalized judge score no-hint scende a 35.7%. I due valori no-hint sono punteggi normalizzati, non quote di risposte pienamente corrette.
 
 I 43 casi `unknown` vanno letti in questa luce: non indicano solo "errore generativo" generico. Una parte rilevante deriva da articolo o comma corretti recuperati troppo in basso, chunk dell'articolo giusto ma non risolutivi, oppure chunk introduttivi/di rubrica che attivano `reference_article_hit_context=true` senza contenere davvero la risposta. Anche `context_sufficient` è ottimistico: su no_hint il modello marca 86 contesti come `yes`, ma 22 di questi ricevono comunque judge score 0. Il limite residuo è quindi soprattutto di **context selection e answer-bearing evidence**, non di pura copertura top-100.
 
-### 8.4 Letture chiave
+### 8.4 Metriche introdotte e prossimo ciclo sperimentale
 
-**Cosa funziona.** Sul totale, Advanced batte sia Simple RAG sia no-RAG: +5pp MCQ accuracy, +4pp no_hint accuracy, +0.08 mean score no_hint. Il salto più consistente è su L4 no_hint (+26pp vs Simple), il livello a maggiore richiesta di ragionamento giuridico: hybrid + multi-query portano nel contesto i passaggi normativi che Simple RAG con top_k=3 lasciava fuori. A livello retrieval, il `reference_article_hit` retrieved del 93% e il `reference_law_hit` del 95% confermano che la candidate list — dopo fusione cross-query e RRF — copre quasi tutta la ground truth: la diagnosi di 06b si trasferisce end-to-end.
+L'aggiunta più utile non è un elenco indiscriminato di metriche NLP, ma una ground truth più fine. Il protocollo minimo proposto è:
 
-**Cosa non funziona ancora.** L3 no_hint regredisce di 16pp rispetto a Simple RAG (0.48 vs 0.64). Il gap tra `article_hit` retrieved (93%) e `article_hit` in context (72%) indica che 21pp di chunk corretti sono nei 100 candidati ma cadono fuori dai 15 nel contesto: F3 (`max_context_chunks=15`) ha attenuato il problema ma non l'ha risolto. La regressione è concentrata su L3, dove i chunk rilevanti competono con distrattori semanticamente vicini che hybrid non separa. In più, `article_hit_context` è ancora una metrica ottimistica: se il chunk incluso è solo una rubrica, un'introduzione tipo "Sono organi..." o un comma che rinvia ad altri sotto-chunk, l'articolo è formalmente presente ma la risposta non è davvero estraibile. Questo spiega perché 27 record con articolo atteso nel contesto non siano strict-correct.
+1. **Già implementato, senza nuove annotazioni**: lo schema `retrieval-evaluation-v5` esporta Macro Recall@k, All-Relevant@k e MAP@k dalla stessa lista ordinata già usata per Success e MRR. MAP resta secondaria per la quasi equivalenza con MRR sul benchmark corrente. Gli artifact storici v4 non vengono riscritti: i nuovi campi saranno prodotti dalla prossima run diagnostica.
+2. **Con un piccolo costo di annotazione**: fare pooling dei top-15 di Dense, Hybrid e Advanced e far assegnare a ogni chunk un grado `0/1/2`. Da queste qrel derivano Context Precision@15, answer-bearing Recall@15, MAP@15 binaria e nDCG@15 graduata. Questa è la misura più diretta del collo di bottiglia osservato tra 93% candidate Success e 72% context Success.
+3. **Per il grounding della risposta**: segmentare un campione di risposte in claim e annotare se ogni claim è supportato dalle citazioni. Riportare citation validity, citation precision e claim-support recall separatamente dalla correttezza. Un LLM judge può assistere, ma va calibrato su un subset umano, come suggerisce l'impostazione di [ARES](https://aclanthology.org/2024.naacl-long.20/).
+4. **Per la robustezza statistica**: mantenere confronti paired per qid, IC bootstrap dei delta e, se si fanno molte ablation, correggere le comparazioni multiple. La necessità di scegliere test coerenti con metrica e dipendenze è discussa da [Dror et al., 2018](https://aclanthology.org/P18-1128/); l'uso degli intervalli per quantificare la dimensione dell'effetto è sostenuto da [Bestgen, 2022](https://aclanthology.org/2022.lrec-1.640/).
 
-**Gap rispetto ai target della roadmap.** I target dichiarati erano MCQ +10pp, no_hint judge score +5pp, `reference_article_hit` +20pp, `reference_law_hit` +15pp vs Simple RAG. I risultati sono parzialmente raggiunti: il target retrieval-only su `article_hit` è centrato (93% retrieved corrisponde a +20pp sopra il `dense@10=73%` baseline di 06b), ma i delta downstream sono più contenuti (MCQ +5pp invece di +10pp, no_hint mean score +0.08 invece di +5pp sul 200-score, corrispondente a circa +4pp). Il significato è quello atteso dalla letteratura su Lost in the Middle: un retrieval migliore non si traduce automaticamente in risposte migliori se il context window mette al margine i chunk rilevanti, e una riformulazione multi-query introduce distrattori che il generatore non sempre disambigua. Le direzioni di Future Work sono quindi mirate: (1) cross-encoder locale o reranker dedicato prima del taglio a 15, non LLM rerank zero-shot già scartato; (2) MMR/diversity cap per `law_id` e `article_id`, così da evitare che varianti dello stesso tema saturino il contesto; (3) sibling expansion per chunk introduttivi e liste spezzate; (4) metrica aggiuntiva di `answer-bearing_chunk_hit`, più severa di `article_hit`, per distinguere articolo formalmente presente da evidenza realmente sufficiente.
+Non sono invece prioritarie BLEU, ROUGE o la sola similarità embedding tra risposta generata e risposta gold: nel QA giuridico formulazioni lessicalmente diverse possono essere equivalenti e risposte semanticamente simili possono differire su una condizione normativa decisiva. Per MCQ resta preferibile l'exact accuracy; per no-hint sono più interpretabili la distribuzione 0/1/2, la fully-correct rate, la media ordinale e una valutazione separata di faithfulness.
+
+### 8.5 Letture chiave
+
+**Cosa funziona.** Le stime puntuali di Advanced sono superiori a Simple RAG: +5pp MCQ exact accuracy, +4pp no-hint fully-correct rate e +0.08 mean judge score. Il retrieval trova almeno un articolo atteso nel 93% dei qid per ciascun formato. Tuttavia gli IC paired-bootstrap dei delta Advanced vs Simple includono zero: sul benchmark corrente il risultato sostiene un segnale positivo, non ancora una superiorità statisticamente conclusiva.
+
+**Cosa non funziona ancora.** Il gap tra Article Success@100 (93%) e Article Success@15 nel contesto (72%) mostra una perdita di 21pp nella selezione. Inoltre Article Success@15 è ottimistica: un chunk di rubrica, introduttivo o non answer-bearing rende la metrica positiva anche se la risposta non è estraibile. Questo spiega perché 27 trace con articolo atteso nel contesto non producano una risposta pienamente corretta. La regressione L3 e il guadagno L4 restano segnali esplorativi su 25 qid ciascuno.
+
+**Gap rispetto ai target della roadmap.** Il target MCQ di +10pp non è raggiunto (+5pp). Sul no-hint il mean judge score cresce di 0.08 su scala 0–2, cioè +4pp dopo normalizzazione; la fully-correct rate cresce anch'essa di 4pp. Il +20pp retrieval dichiarato in precedenza confrontava Advanced Success@100 con Dense@10 e include quindi l'effetto del candidate budget: non isola il contributo di hybrid o rewriting. Le direzioni di lavoro restano reranking prima del taglio a 15, diversificazione per legge/articolo, sibling expansion e qrel answer-bearing, ma dovranno essere giudicate con confronti a budget fisso e metriche di contesto più severe.
 
 ## Bibliografia di riferimento
 
@@ -378,9 +448,13 @@ I paper che sostengono più scelte della pipeline e meritano lettura preliminare
 - [BGE M3-Embedding, 2024](https://arxiv.org/abs/2402.03216) — embedder multilingue dense+sparse. Step 3, 5, 6 (base di tutto il retrieval).
 - [Reciprocal Rank Fusion, 2009](https://doi.org/10.1145/1571941.1572114) — fusione di ranking eterogenei. Step 3, 6 (Esperimento F).
 - [LegalBench-RAG, 2024](https://arxiv.org/abs/2408.10343) — benchmark RAG legale, snippet minimi e citazioni vincolate. Step 2, 3, 4, 5, 6, 7.
+- [BEIR, 2021](https://arxiv.org/abs/2104.08663) — protocollo IR rank-aware con nDCG@10 e Recall@100; riferimento per distinguere copertura e qualità del ranking.
+- [Cumulated Gain-based Evaluation of IR Techniques, 2002](https://doi.org/10.1145/582415.582418) — riferimento fondativo per DCG/nDCG e rilevanza graduata.
+- [ARES, 2024](https://aclanthology.org/2024.naacl-long.20/) — separazione tra context relevance, answer faithfulness e answer relevance con calibrazione umana.
+- [The Hitchhiker's Guide to Testing Statistical Significance in NLP, 2018](https://aclanthology.org/P18-1128/) — scelta di test coerenti con task, metrica e dipendenza tra output.
 - [Query Rewriting for Retrieval-Augmented Large Language Models, 2023](https://arxiv.org/abs/2305.14283) + [DMQR-RAG, 2024](https://arxiv.org/abs/2411.13154) — pattern rewrite-retrieve-read e multi-query. Step 6 (Esperimento H).
 - [Lost in the Middle, 2023](https://arxiv.org/abs/2307.03172) — i modelli usano peggio i contesti lunghi. Step 7 (motiva il controllo sul contesto finale).
 - [Hallucination-Free?, 2024](https://arxiv.org/abs/2405.20362) — RAG riduce ma non elimina le allucinazioni. Step 5, 7 (motiva trace row-level e citazioni vincolate).
 - [An Ontology-Driven Graph RAG for Legal Norms, 2026](https://journals.sagepub.com/doi/10.3233/FAIA251598) — framework di riferimento per Graph RAG legale. Step 1, 6 (Esperimento C; motiva perché in questo progetto il graph resta off ma è esposto per Future Work).
 
-Per le direzioni di **Future Work** (§8.4) restano utili due riferimenti dedicati che non rientrano nella lista *top picks* e non motivano la configurazione finale di §7: [MMR — Carbonell & Goldstein, 1998](https://dl.acm.org/doi/10.1145/290941.291025) per la diversificazione del contesto (cap per legge), e [BGE-Reranker / C-Pack, 2024](https://arxiv.org/abs/2309.07597) come alternativa cross-encoder al LLM reranking scartato.
+Per le direzioni di **Future Work** (§8.4–§8.5) restano utili due riferimenti dedicati che non rientrano nella lista *top picks* e non motivano la configurazione finale di §7: [MMR — Carbonell & Goldstein, 1998](https://dl.acm.org/doi/10.1145/290941.291025) per la diversificazione del contesto (cap per legge), e [BGE-Reranker / C-Pack, 2024](https://arxiv.org/abs/2309.07597) come alternativa cross-encoder al LLM reranking scartato.

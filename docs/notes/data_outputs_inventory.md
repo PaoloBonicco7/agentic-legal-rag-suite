@@ -41,29 +41,6 @@ La run diagnostics di riferimento è:
 - collection `legal_chunks_bge_m3`;
 - usata da `docs/results/06b_retrieval_diagnostics.md` per motivare hybrid + multi-query.
 
-## Cosa tenere sicuramente
-
-### Sorgenti
-
-| Path | Dimensione | Stato | Motivo |
-|---|---:|---|---|
-| `data/laws_html/` | 40 MB | tenere | Corpus HTML sorgente. Il manifest del preprocessing registra 3.145 leggi valide; nella directory ci sono anche file non sorgente come `.DS_Store`. |
-| `data/evaluation/` | 68 KB | tenere | CSV sorgente versionati (`questions.csv`, `questions_no_hint.csv`). Sono l'autorita del benchmark. |
-
-Nota: `data/laws_html/` è ignorata da `.gitignore`, ma il progetto la tratta come sorgente locale
-di prima classe. Non cancellarla se si vuole poter rigenerare il dataset pulito.
-
-### Dataset generati fondamentali
-
-| Path | Dimensione | Stato | Contenuto |
-|---|---:|---|---|
-| `data/laws_dataset_clean/` | 289 MB | tenere | Output step 01: `laws`, `articles`, `passages`, `chunks`, `edges`, `notes`, manifest e quality report. |
-| `data/evaluation_clean/` | 124 KB | tenere | Output step 02: 100 MCQ + 100 no-hint normalizzate, manifest e quality report. |
-
-Manifest principali:
-
-- `data/laws_dataset_clean/manifest.json`: `ready_for_indexing=true`, 76.467 chunk, 35.159 edge, 17.774 articoli.
-- `data/evaluation_clean/evaluation_manifest.json`: `ready_for_evaluation=true`, 100 MCQ e 100 no-hint allineate.
 
 ### Run usate nel confronto di tesi
 
@@ -189,52 +166,6 @@ la run completa, ma non dà benefici di spazio.
 Le cache sono piccole e aiutano a evitare chiamate LLM ripetute. Conviene tenerle finché si lavora
 sui notebook 06/06b. Sono cancellabili solo se si accetta di rigenerarle.
 
-## Candidati di pulizia
-
-### Cancellabili subito
-
-Questi file/directory non hanno valore scientifico e non sono richiesti dai manifest:
-
-- `data/.DS_Store`;
-- `data/laws_html/.DS_Store`;
-- `data/indexing_runs/.20260504_184426.tmp/`;
-- `data/indexing_runs/.20260505_084444.tmp/`;
-- `data/indexing_runs/.bge_m3_sample_20260512.tmp/`;
-- `data/rag_runs/advanced/.full_100_b1_b2_b3_parallel.tmp/`.
-
-### Cancellabili se non serve debug
-
-- `data/rag_runs/advanced/_debug_utopia_rag_flow/`;
-- `data/rag_runs/advanced/smoke_dense_graph_rerank/`;
-- `data/rag_runs/simple_smoke/`;
-- `data/baseline_runs/no_rag_smoke/`;
-- `data/retrieval_eval_runs/h_only_utopia_gpt_oss_120b__20260518T175414Z/` (nessun manifest, solo progress);
-- `data/retrieval_eval_runs/complete_pilot_mcq_no_hint_v2__20260517T155404Z/` (nessun manifest, solo progress).
-
-### Da archiviare prima di cancellare
-
-Queste directory sono grandi o storicamente importanti. Se serve spazio, spostarle fuori dal repo o
-salvare almeno `manifest.json`, `scenarios.csv`, `recommended_advanced_config.json` e la nota
-risultato collegata.
-
-| Path | Dimensione | Motivo |
-|---|---:|---|
-| `data/retrieval_eval_runs/default__20260511T180530Z/` | 2.3 GB | Full run vecchio indice `legal_chunks`, citata per il confronto re-index in 06b. |
-| `data/retrieval_eval_runs/default__20260511T180421Z/` | 251 MB | Run vecchio indice su campione 10+10. |
-| `data/retrieval_eval_runs/default__20260511T130345Z/` | 140 MB | Sweep vecchio indice. |
-| `data/retrieval_eval_runs/default__20260511T150838Z/` | 140 MB | Sweep vecchio indice. |
-| `data/retrieval_eval_runs/default__20260511T162358Z/` | 140 MB | Sweep vecchio indice. |
-| `data/retrieval_eval_runs/default__20260511T163108Z/` | 140 MB | Sweep vecchio indice. |
-| `data/retrieval_eval_runs/default__20260511T164017Z/` | 140 MB | Sweep vecchio indice. |
-| `data/retrieval_eval_runs/default__20260511T174603Z/` | 140 MB | Sweep vecchio indice con graph. |
-
-Per recuperare spazio senza perdere la traccia scientifica, la strategia migliore è:
-
-1. conservare la run diagnostics di riferimento `diagnostic_full_utopia_throttled__20260525T091921Z`;
-2. conservare almeno una run vecchio indice per audit (`default__20260511T180530Z`) oppure archiviare
-   fuori repo i suoi CSV completi;
-3. cancellare solo gli sweep vecchi ridondanti dopo aver verificato che i numeri importanti sono
-   già in `docs/results/06b_retrieval_diagnostics.md`.
 
 ### Indici Qdrant locali
 
@@ -253,31 +184,3 @@ Quindi `data/indexes/qdrant/` è un buon candidato di archiviazione, ma non va c
    rigenerare l'indice;
 2. decidere se mantenere il vecchio indice `legal_chunks` come audit locale;
 3. salvare i manifest delle run che lo usano.
-
-## Raccomandazione pratica
-
-Non cancellerei le run principali né i dataset puliti. Per mettere ordine senza rischiare la
-riproducibilita:
-
-1. rimuovere subito `.DS_Store` e directory `.tmp`;
-2. rimuovere o archiviare le run senza manifest e le cartelle `*_smoke` / `_debug_*`;
-3. archiviare esternamente i vecchi `default__20260511*` pesanti, lasciando nel repo solo i manifest
-   e la sintesi in `docs/results/06b_retrieval_diagnostics.md`;
-4. valutare la rimozione di `data/indexes/qdrant/` solo dopo un rerun controllato della pipeline
-   recente contro `data/indexes/qdrant_server/`.
-
-## Stato atteso dopo pulizia conservativa
-
-Dopo una pulizia conservativa, dovrebbero restare almeno:
-
-- sorgenti: `data/laws_html/`, `data/evaluation/`;
-- dataset puliti: `data/laws_dataset_clean/`, `data/evaluation_clean/`;
-- indice attivo: `data/indexes/qdrant_server/`, `data/indexing_runs/bge_m3_full_20260523_095655/`;
-- confronto finale: `data/baseline_runs/no_rag/`, `data/rag_runs/simple/`,
-  `data/rag_runs/advanced/full_100__answer_slurm_gpt_oss_120b__judge_slurm_gpt_oss_120b__a4_combined_best_v2/`,
-  `data/evaluation_runs/oracle_context/`;
-- diagnostics promossi: `data/retrieval_eval_runs/diagnostic_full_utopia_throttled__20260525T091921Z/`;
-- cache query rewriting, se si vuole evitare nuove chiamate LLM.
-
-Gap ancora aperto: lo step 07 prevede `data/reports/`, ma la cartella non è ancora prodotta. La
-sintesi cross-method oggi vive in `docs/results/00_overview.md`.

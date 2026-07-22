@@ -685,10 +685,14 @@ def _direct_row(qid: str, *, hit: bool, top_k: int = 10, mode: str = "dense", fi
         "metadata_filters": {},
         "dataset": "mcq",
         "direct_article_hit": hit,
+        "direct_article_recall": 1.0 if hit else 0.0,
+        "direct_article_average_precision": 1.0 if hit else 0.0,
         "direct_law_hit": hit,
         "direct_article_mrr": 1.0 if hit else 0.0,
         "direct_all_expected_articles_hit": hit,
         "post_article_hit": hit,
+        "post_article_recall": 1.0 if hit else 0.0,
+        "post_article_average_precision": 1.0 if hit else 0.0,
         "post_law_hit": hit,
         "post_article_mrr": 1.0 if hit else 0.0,
         "filter_excluded": False,
@@ -726,8 +730,11 @@ def test_build_waterfall_produces_required_scenario_columns() -> None:
         "dataset",
         "stage",
         "article_hit_pct",
+        "article_recall_pct",
+        "all_expected_articles_pct",
         "law_hit_pct",
         "article_mrr",
+        "article_map",
         "n_questions",
         "n_filter_excluded",
         "config",
@@ -740,6 +747,9 @@ def test_build_waterfall_produces_required_scenario_columns() -> None:
     baseline = scenarios[scenarios["experiment_name"] == "dense_baseline_top10"].iloc[0]
     assert baseline["status"] == "run"
     assert baseline["article_hit_pct"] == 60.0
+    assert baseline["article_recall_pct"] == 60.0
+    assert baseline["all_expected_articles_pct"] == 60.0
+    assert baseline["article_map"] == 0.6
 
 
 def test_select_best_scenario_returns_highest_hit() -> None:
@@ -846,3 +856,45 @@ def test_candidate_metrics_article_hit_at_k_is_false_when_no_hit() -> None:
     )
     assert metrics.article_hit is False
     assert metrics.article_hit_at_k == {"5": False, "10": False}
+
+
+def test_candidate_metrics_reports_recall_and_average_precision_for_multiple_articles() -> None:
+    from legal_rag.retrieval_evaluation import candidate_metrics
+
+    expected_articles = [f"{LAW_EXPECTED}#art:2", f"{LAW_EXPECTED}#art:3"]
+    chunks = [
+        RetrievedChunkRecord(
+            chunk_id="wrong",
+            score=1.0,
+            text="",
+            payload={"law_id": LAW_SEED, "article_id": f"{LAW_SEED}#art:1"},
+        ),
+        RetrievedChunkRecord(
+            chunk_id="first_expected",
+            score=0.9,
+            text="",
+            payload={"law_id": LAW_EXPECTED, "article_id": expected_articles[0]},
+        ),
+        RetrievedChunkRecord(
+            chunk_id="duplicate_expected",
+            score=0.8,
+            text="",
+            payload={"law_id": LAW_EXPECTED, "article_id": expected_articles[0]},
+        ),
+        RetrievedChunkRecord(
+            chunk_id="second_expected",
+            score=0.7,
+            text="",
+            payload={"law_id": LAW_EXPECTED, "article_id": expected_articles[1]},
+        ),
+    ]
+
+    metrics = candidate_metrics(
+        chunks,
+        expected_law_ids=[LAW_EXPECTED],
+        expected_article_ids=expected_articles,
+    )
+
+    assert metrics.article_recall == 1.0
+    assert metrics.all_expected_articles_hit is True
+    assert metrics.article_average_precision == 0.5

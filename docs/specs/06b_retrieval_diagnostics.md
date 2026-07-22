@@ -58,9 +58,12 @@ Each scenario summary must include:
 - `scenario_name`
 - `dataset`
 - `stage`
-- `article_hit_pct`
-- `law_hit_pct`
-- `article_mrr`
+- `article_hit_pct`: Article Success@k, i.e. the percentage of questions with at least one expected article in the evaluated candidate list.
+- `article_recall_pct`: macro-average percentage of distinct expected articles found in the evaluated candidate list.
+- `all_expected_articles_pct`: percentage of questions for which every expected article is found.
+- `law_hit_pct`: Law Success@k, i.e. the percentage of questions with at least one expected law in the evaluated candidate list.
+- `article_mrr`: mean reciprocal rank of the first chunk belonging to an expected article.
+- `article_map`: mean average precision over expected articles, counting each expected article at most once even when multiple retrieved chunks belong to it.
 - `n_questions`
 - `n_filter_excluded`
 - `config`
@@ -73,6 +76,10 @@ Skipped scenarios must keep a row in `scenarios.csv` with `status="skipped"` and
 
 Row-level diagnostics must preserve the question id, expected references, retrieved chunk ids, retrieved law/article ids, hit flags, retrieval mode, `top_k`, `rrf_k` when applicable, and rank of the first matching article when present.
 
+Row-level metrics must additionally preserve `article_recall` and `article_average_precision` for each evaluated candidate stage. Both are in `[0, 1]`. Average precision uses the number of distinct expected articles as denominator; repeated chunks from the same expected article do not create additional relevant hits. With one expected article, average precision equals reciprocal rank.
+
+The current qrels are article-level positive references, not exhaustive chunk-level relevance judgments. `Precision@k` and graded `nDCG@k` must not be reported as primary metrics until the candidate chunks have pooled relevance or answer-bearing annotations.
+
 Rerank row-level diagnostics must additionally preserve `base_scenario`, `rerank_model`, `rerank_input_k`, `rerank_output_k`, `cache_hit`, `reranked_chunk_ids`, `rerank_scores`, and whether rerank recovered or demoted the expected article.
 
 Query rewriting row-level diagnostics must additionally preserve `strategy`, `query_rewriting_model`, `query_rewriting_prompt_version`, `cache_hit`, `rewritten_queries`, `transformed_query_count`, and the candidate ids retrieved after the transformation.
@@ -81,6 +88,8 @@ Query rewriting row-level diagnostics must additionally preserve `strategy`, `qu
 
 - Diagnostic runs never overwrite previous runs.
 - Scenario metrics are derived from row-level diagnostics, not hand-edited.
+- Article Success@k, macro Recall@k, All-Relevant@k, MRR@k, and MAP@k are computed over the same ordered candidate list and cutoff.
+- Each expected article contributes at most one relevant hit, regardless of how many of its chunks are retrieved.
 - The baseline dense scenario is always present for each evaluated dataset.
 - Skipped experiments are explicit and explain why they could not run.
 - Hybrid scenarios run only when the tested index exposes sparse vectors and the embedder can produce sparse embeddings.
@@ -110,6 +119,6 @@ Query rewriting row-level diagnostics must additionally preserve `strategy`, `qu
 ## Acceptance Criteria
 
 - A reader can reproduce the retrieval-only baseline and understand why each later retrieval experiment was selected or rejected.
-- `scenarios.csv` contains enough information to compare article hit rate, law hit rate, MRR, status, and configuration across scenarios.
+- `scenarios.csv` contains enough information to compare Article Success, macro Recall, All-Relevant, law Success, MRR, MAP, status, and configuration across scenarios.
 - Experiment decisions are recorded in `docs/results/06b_retrieval_diagnostics.md`.
 - The selected retrieval configuration can be promoted to Advanced Graph RAG without relying on notebook-only state.
