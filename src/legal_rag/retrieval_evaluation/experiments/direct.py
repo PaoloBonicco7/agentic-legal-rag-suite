@@ -41,12 +41,9 @@ class DirectExperimentCache:
 
     @staticmethod
     def _key(
-        dataset: str,
         retrieval_mode: str,
         top_k: int,
         rrf_k: int | None,
-        filter_name: str,
-        qid: str,
         *,
         collection_identity: str = "",
         query_text: str = "",
@@ -65,11 +62,8 @@ class DirectExperimentCache:
             retrieval_mode,
             int(top_k),
             rrf_k,
-            filter_name,
             filter_identity,
             bool(exact),
-            dataset,
-            qid,
         )
 
     def get_or_retrieve(
@@ -93,12 +87,9 @@ class DirectExperimentCache:
         effective_rrf_k = int(rrf_k or rrf_k_default) if retrieval_mode == "hybrid" else None
         identity = build_collection_identity(collection_name, index_manifest)
         key = self._key(
-            dataset,
             retrieval_mode,
             top_k,
             effective_rrf_k,
-            filter_name,
-            target.qid,
             collection_identity=identity,
             query_text=target.question,
             filters=filters,
@@ -106,6 +97,19 @@ class DirectExperimentCache:
         )
         with self._lock:
             cached = self._store.get(key)
+            # Hybrid fusion depends on its cutoff; only dense rankings are prefix-reusable.
+            if cached is None and retrieval_mode == "dense":
+                larger_keys = [
+                    candidate_key
+                    for candidate_key in self._store
+                    if candidate_key[:3] == key[:3]
+                    and candidate_key[3] >= int(top_k)
+                    and candidate_key[4:] == key[4:]
+                ]
+                if larger_keys:
+                    larger_key = min(larger_keys, key=lambda candidate_key: candidate_key[3])
+                    cached = list(self._store[larger_key][:top_k])
+                    self._store[key] = cached
         if cached is not None:
             return cached
         retrieved = retrieve_direct(
@@ -153,7 +157,11 @@ def run_direct_experiment(
 
     plan: list[tuple] = []
     for mode in modes:
-        mode_top_k_values = hybrid_top_k_values if mode == "hybrid" else list(top_k_values)
+        mode_top_k_values = (
+            hybrid_top_k_values
+            if mode == "hybrid"
+            else sorted((int(value) for value in top_k_values), reverse=True)
+        )
         mode_rrf_k_values = hybrid_rrf_k_values if mode == "hybrid" else [None]
         mode_filter_names = (
             list(filter_names)

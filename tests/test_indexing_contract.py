@@ -322,6 +322,121 @@ def test_run_indexing_pipeline_creates_qdrant_contract_artifacts(tmp_path: Path)
         )
 
 
+def test_filter_audit_preflight_reconciles_every_live_payload(tmp_path: Path) -> None:
+    dataset = tmp_path / "laws_dataset_clean"
+    _write_dataset(
+        dataset,
+        [_chunk("c1", text="Contributi regionali."), _chunk("c2", text="Formazione professionale.")],
+    )
+    client = QdrantClient(":memory:")
+    run_indexing_pipeline(
+        IndexingConfig(
+            clean_dataset_dir=str(dataset),
+            runs_dir=str(tmp_path / "runs"),
+            collection_name="preflight_collection",
+            run_id="preflight",
+            embedding_backend="local",
+            embedding_model="fake-embedding",
+            diagnostic_queries=["contributi"],
+        ),
+        embedder=FakeEmbedder(),
+        client=client,
+    )
+    manifest_path = tmp_path / "runs" / "preflight" / "index_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    point_ids = {
+        chunk_id: point_id_from_chunk_id(chunk_id)
+        for chunk_id in ("c1", "c2")
+    }
+    originals = {
+        str(record.payload["chunk_id"]): dict(record.payload)
+        for record in client.retrieve(
+            collection_name="preflight_collection",
+            ids=list(point_ids.values()),
+            with_payload=True,
+            with_vectors=False,
+        )
+    }
+    preflight_kwargs = {
+        "laws_dir": dataset,
+        "source_dir": dataset.parent / "laws_html",
+        "index_manifest_path": manifest_path,
+        "index_manifest": manifest,
+        "qdrant_client": client,
+        "collection_name": "preflight_collection",
+        "require_clean_provenance": False,
+    }
+
+    client.set_payload(
+        collection_name="preflight_collection",
+        payload={"article_status": "past"},
+        points=[point_ids["c1"]],
+        wait=True,
+    )
+    with pytest.raises(RuntimeError, match="payload_hash mismatch"):
+        validate_filter_audit_preflight(**preflight_kwargs)
+    client.overwrite_payload(
+        collection_name="preflight_collection",
+        payload=originals["c1"],
+        points=[point_ids["c1"]],
+        wait=True,
+    )
+
+    client.set_payload(
+        collection_name="preflight_collection",
+        payload={"text_for_embedding": "changed embedding text"},
+        points=[point_ids["c1"]],
+        wait=True,
+    )
+    with pytest.raises(RuntimeError, match="content_hash mismatch"):
+        validate_filter_audit_preflight(**preflight_kwargs)
+    client.overwrite_payload(
+        collection_name="preflight_collection",
+        payload=originals["c1"],
+        points=[point_ids["c1"]],
+        wait=True,
+    )
+
+    client.delete_payload(
+        collection_name="preflight_collection",
+        keys=["dataset_chunks_hash"],
+        points=[point_ids["c1"]],
+        wait=True,
+    )
+    with pytest.raises(RuntimeError, match="required payload fields are missing"):
+        validate_filter_audit_preflight(**preflight_kwargs)
+    client.overwrite_payload(
+        collection_name="preflight_collection",
+        payload=originals["c1"],
+        points=[point_ids["c1"]],
+        wait=True,
+    )
+
+    client.set_payload(
+        collection_name="preflight_collection",
+        payload={"chunk_id": "c1"},
+        points=[point_ids["c2"]],
+        wait=True,
+    )
+    with pytest.raises(RuntimeError, match="duplicate chunk_id"):
+        validate_filter_audit_preflight(**preflight_kwargs)
+    client.overwrite_payload(
+        collection_name="preflight_collection",
+        payload=originals["c2"],
+        points=[point_ids["c2"]],
+        wait=True,
+    )
+
+    client.set_payload(
+        collection_name="preflight_collection",
+        payload={"chunk_id": "extra"},
+        points=[point_ids["c2"]],
+        wait=True,
+    )
+    with pytest.raises(RuntimeError, match=r"chunk_id mismatch: missing=1 .*extra=1"):
+        validate_filter_audit_preflight(**preflight_kwargs)
+
+
 def test_run_indexing_pipeline_reuse_skips_unchanged_points(tmp_path: Path) -> None:
     dataset = tmp_path / "laws_dataset_clean"
     chunks = [_chunk("c1", text="Contributi regionali.")]

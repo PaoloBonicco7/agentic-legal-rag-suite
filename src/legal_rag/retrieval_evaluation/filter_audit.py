@@ -6,6 +6,7 @@ import csv
 import json
 import math
 import random
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,13 +16,22 @@ from typing import Any
 import pandas as pd
 from qdrant_client import QdrantClient
 
-from legal_rag.indexing.dataset import read_manifest, validate_clean_dataset
+from legal_rag.indexing.dataset import load_chunks, read_manifest, validate_clean_dataset
 from legal_rag.indexing.embeddings import SupportsEmbedding
+from legal_rag.indexing.hashing import (
+    canonical_dumps,
+    content_hash_for_text,
+    payload_hash,
+    sha256_text,
+)
 from legal_rag.indexing.io import sha256_file
 from legal_rag.indexing.models import (
     IDENTITY_PAYLOAD_FIELDS,
     INDEXING_SCHEMA_VERSION,
+    REQUIRED_PAYLOAD_FIELDS,
 )
+from legal_rag.indexing.pipeline import prepare_points
+from legal_rag.indexing.qdrant_store import PreparedPoint
 from legal_rag.laws_preprocessing import (
     LAWS_PREPROCESSING_SCHEMA_VERSION,
     LEGAL_STATUS_RULES_VERSION,
@@ -62,6 +72,49 @@ _ACTIVE_STATUSES = frozenset({"current", "partial"})
 _VALID_STATUSES = frozenset({"current", "partial", "past", "unknown"})
 
 
+def _filter_audit_pipeline_identity() -> dict[str, Any]:
+    source_root = Path(__file__).resolve().parents[1]
+    source_hashes = {
+        str(path.relative_to(source_root)): sha256_file(path)
+        for path in sorted(source_root.rglob("*.py"))
+    }
+    identity: dict[str, Any] = {
+        "source_dir": str(source_root),
+        "source_files": source_hashes,
+        "source_files_hash": sha256_text(canonical_dumps(source_hashes)),
+        "git_commit": None,
+        "git_dirty": None,
+    }
+    try:
+        repository_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=source_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        identity["repository_root"] = repository_root
+        identity["git_commit"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        identity["git_dirty"] = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=normal"],
+                cwd=repository_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return identity
+
+
 def validate_filter_audit_preflight(
     *,
     laws_dir: str | Path,
@@ -84,6 +137,7 @@ def validate_filter_audit_preflight(
     clean_manifest = read_manifest(dataset_dir)
     clean_hash = sha256_file(dataset_dir / "manifest.json")
     index_hash = sha256_file(manifest_path)
+    audit_pipeline_identity = _filter_audit_pipeline_identity()
 
     if index_manifest.get("schema_version") != INDEXING_SCHEMA_VERSION:
         errors.append(
@@ -157,17 +211,35 @@ def validate_filter_audit_preflight(
     if manifest_identity != {"collection_name": collection_name, **expected_identity}:
         errors.append("index collection_identity does not match the reconciled dataset identity")
 
-    identity_values = _live_collection_identity(
+    embedding = dict(index_manifest.get("embedding") or {})
+    embedding_model = str(
+        embedding.get("resolved_model")
+        or embedding.get("model")
+        or (index_manifest.get("config") or {}).get("embedding_model")
+        or ""
+    )
+    if not embedding_model:
+        errors.append("index manifest does not declare the resolved embedding model")
+    try:
+        expected_points = prepare_points(
+            load_chunks(dataset_dir),
+            dataset_source_hash=actual_source_hash,
+            dataset_manifest_hash=clean_hash,
+            dataset_chunks_hash=str(validation.actual_output_hashes.get("chunks") or ""),
+            preprocessing_schema_version=LAWS_PREPROCESSING_SCHEMA_VERSION,
+            status_rules_version=LEGAL_STATUS_RULES_VERSION,
+            embedding_model=embedding_model,
+        )
+    except ValueError as exc:
+        expected_points = []
+        errors.append(f"cannot prepare expected collection payloads: {exc}")
+    live_errors, live_reconciliation = _reconcile_live_collection(
         qdrant_client,
         collection_name=collection_name,
+        expected_points=expected_points,
+        expected_identity=expected_identity,
     )
-    for field, expected in expected_identity.items():
-        values = identity_values[field]
-        if values != {str(expected)}:
-            errors.append(
-                f"live collection identity mismatch for {field}: "
-                f"expected={expected!r}, actual={sorted(values)!r}"
-            )
+    errors.extend(live_errors)
 
     false_quality_gates = sorted(
         key
@@ -181,6 +253,11 @@ def validate_filter_audit_preflight(
     index_git_dirty = (index_manifest.get("pipeline_identity") or {}).get("git_dirty")
     if require_clean_provenance and index_git_dirty is not False:
         errors.append("definitive index was not built from a clean worktree")
+    if (
+        require_clean_provenance
+        and audit_pipeline_identity.get("git_dirty") is not False
+    ):
+        errors.append("definitive filter audit requires a clean worktree")
 
     if errors:
         raise RuntimeError("Filter audit preflight failed: " + "; ".join(errors))
@@ -195,11 +272,13 @@ def validate_filter_audit_preflight(
         "collection_count": live_count,
         "collection_name": collection_name,
         "collection_identity": expected_identity,
+        "live_payload_reconciliation": live_reconciliation,
         "index_run_id": index_manifest.get("run_id"),
         "index_git_commit": (index_manifest.get("pipeline_identity") or {}).get(
             "git_commit"
         ),
         "index_git_dirty": index_git_dirty,
+        "audit_pipeline_identity": audit_pipeline_identity,
     }
 
 
@@ -386,8 +465,13 @@ def build_filter_exclusions(reference_audit_df: pd.DataFrame) -> pd.DataFrame:
     """Return both partial and full exclusions from a reference audit."""
     if reference_audit_df.empty:
         return reference_audit_df.copy()
+    support_retained = reference_audit_df.get(
+        "supporting_passage_retained",
+        pd.Series(None, index=reference_audit_df.index, dtype=object),
+    )
+    support_lost = support_retained == False  # noqa: E712
     return reference_audit_df[
-        reference_audit_df["coverage_status"] != "fully_eligible"
+        (reference_audit_df["coverage_status"] != "fully_eligible") | support_lost
     ].reset_index(drop=True)
 
 
@@ -677,10 +761,12 @@ def run_filter_audit(
         )
     sweep_direct = pd.concat([direct, exact], ignore_index=True) if not exact.empty else direct
     exact_control = build_filter_exact_control(sweep_direct)
+    exclusions = build_filter_exclusions(reference_audit)
     manifest = {
         "schema_version": RETRIEVAL_EVALUATION_SCHEMA_VERSION,
         "filter_audit_schema_version": FILTER_AUDIT_SCHEMA_VERSION,
         "filter_audit_prompt_version": FILTER_AUDIT_PROMPT_VERSION,
+        "pipeline_identity": _filter_audit_pipeline_identity(),
         "profile": profile.model_dump(mode="json"),
         "collection_name": collection_name,
         "collection_identity": identity,
@@ -692,11 +778,7 @@ def run_filter_audit(
         "row_counts": {
             "sweep_direct": len(sweep_direct),
             "filter_reference_audit": len(reference_audit),
-            "filter_exclusions": int(
-                (reference_audit["coverage_status"] != "fully_eligible").sum()
-            )
-            if not reference_audit.empty
-            else 0,
+            "filter_exclusions": len(exclusions),
             "filter_impact": len(impact),
             "filter_exact_control": len(exact_control),
             "status_transitions_v1_to_v2": len(status_transitions),
@@ -705,7 +787,7 @@ def run_filter_audit(
     return FilterAuditResult(
         sweep_direct=sweep_direct,
         filter_reference_audit=reference_audit,
-        filter_exclusions=build_filter_exclusions(reference_audit),
+        filter_exclusions=exclusions,
         filter_impact=impact,
         filter_exact_control=exact_control,
         status_transitions=status_transitions,
@@ -766,31 +848,144 @@ def _has_unknown_status(chunk: Mapping[str, Any]) -> bool:
     )
 
 
-def _live_collection_identity(
+def _reconcile_live_collection(
     client: QdrantClient,
     *,
     collection_name: str,
-) -> dict[str, set[str]]:
-    values = {field: set() for field in IDENTITY_PAYLOAD_FIELDS}
+    expected_points: Sequence[PreparedPoint],
+    expected_identity: Mapping[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    expected_by_chunk = {point.chunk_id: point for point in expected_points}
+    required_fields = set(REQUIRED_PAYLOAD_FIELDS) | {"embedding_model"}
+    seen_chunk_ids: set[str] = set()
+    duplicate_chunk_ids: set[str] = set()
+    extra_chunk_ids: set[str] = set()
+    missing_field_counts: dict[str, int] = {}
+    missing_chunk_id_count = 0
+    point_id_mismatches: list[str] = []
+    content_hash_mismatches: list[str] = []
+    payload_hash_mismatches: list[str] = []
+    identity_mismatches: list[str] = []
+    scrolled_count = 0
     offset: Any = None
     while True:
         records, next_offset = client.scroll(
             collection_name=collection_name,
             limit=512,
             offset=offset,
-            with_payload=list(IDENTITY_PAYLOAD_FIELDS),
+            with_payload=True,
             with_vectors=False,
         )
         for record in records:
+            scrolled_count += 1
             payload = record.payload or {}
+            missing_fields = sorted(field for field in required_fields if field not in payload)
+            for field in missing_fields:
+                missing_field_counts[field] = missing_field_counts.get(field, 0) + 1
+            chunk_id = str(payload.get("chunk_id") or "")
+            if not chunk_id:
+                missing_chunk_id_count += 1
+                continue
+            if chunk_id in seen_chunk_ids:
+                duplicate_chunk_ids.add(chunk_id)
+            seen_chunk_ids.add(chunk_id)
+            expected = expected_by_chunk.get(chunk_id)
+            if expected is None:
+                extra_chunk_ids.add(chunk_id)
+                continue
+            if str(record.id) != expected.point_id:
+                _append_sample(point_id_mismatches, chunk_id)
+
+            live_content_hash = str(payload.get("content_hash") or "")
+            recomputed_content_hash = content_hash_for_text(
+                str(payload.get("text_for_embedding") or "")
+            )
+            if (
+                live_content_hash != expected.content_hash
+                or recomputed_content_hash != expected.content_hash
+                or recomputed_content_hash != live_content_hash
+            ):
+                _append_sample(content_hash_mismatches, chunk_id)
+
+            live_payload_hash = str(payload.get("payload_hash") or "")
+            recomputed_payload_hash = payload_hash(dict(payload))
+            if (
+                live_payload_hash != expected.payload_hash
+                or recomputed_payload_hash != expected.payload_hash
+                or recomputed_payload_hash != live_payload_hash
+            ):
+                _append_sample(payload_hash_mismatches, chunk_id)
+
             for field in IDENTITY_PAYLOAD_FIELDS:
-                value = payload.get(field)
-                if value is not None:
-                    values[field].add(str(value))
+                expected_value = str(expected_identity[field])
+                if field not in payload or str(payload.get(field)) != expected_value:
+                    _append_sample(identity_mismatches, f"{chunk_id}:{field}")
         if next_offset is None:
             break
         offset = next_offset
-    return values
+
+    missing_chunk_ids = set(expected_by_chunk) - seen_chunk_ids
+    errors: list[str] = []
+    if scrolled_count != len(expected_points):
+        errors.append(
+            "live collection point count mismatch during reconciliation: "
+            f"expected={len(expected_points)}, scrolled={scrolled_count}"
+        )
+    if missing_chunk_id_count:
+        errors.append(
+            f"live collection contains {missing_chunk_id_count} points without chunk_id"
+        )
+    if duplicate_chunk_ids:
+        errors.append(
+            "live collection contains duplicate chunk_id values: "
+            f"count={len(duplicate_chunk_ids)}, examples={_examples(duplicate_chunk_ids)}"
+        )
+    if missing_chunk_ids or extra_chunk_ids:
+        errors.append(
+            "live collection chunk_id mismatch: "
+            f"missing={len(missing_chunk_ids)} examples={_examples(missing_chunk_ids)}, "
+            f"extra={len(extra_chunk_ids)} examples={_examples(extra_chunk_ids)}"
+        )
+    if missing_field_counts:
+        errors.append(
+            "live collection required payload fields are missing: "
+            + ", ".join(
+                f"{field}={count}" for field, count in sorted(missing_field_counts.items())
+            )
+        )
+    for label, samples in (
+        ("point id", point_id_mismatches),
+        ("content_hash", content_hash_mismatches),
+        ("payload_hash", payload_hash_mismatches),
+        ("identity", identity_mismatches),
+    ):
+        if samples:
+            errors.append(
+                f"live collection {label} mismatch: "
+                f"count>={len(samples)}, examples={samples}"
+            )
+    return errors, {
+        "expected_points": len(expected_points),
+        "scrolled_points": scrolled_count,
+        "missing_chunk_ids": len(missing_chunk_ids),
+        "extra_chunk_ids": len(extra_chunk_ids),
+        "duplicate_chunk_ids": len(duplicate_chunk_ids),
+        "points_without_chunk_id": missing_chunk_id_count,
+        "missing_required_fields": dict(sorted(missing_field_counts.items())),
+        "point_id_mismatch_samples": point_id_mismatches,
+        "content_hash_mismatch_samples": content_hash_mismatches,
+        "payload_hash_mismatch_samples": payload_hash_mismatches,
+        "identity_mismatch_samples": identity_mismatches,
+    }
+
+
+def _append_sample(samples: list[str], value: str, *, limit: int = 10) -> None:
+    if len(samples) < limit:
+        samples.append(value)
+
+
+def _examples(values: Sequence[str] | set[str], *, limit: int = 5) -> list[str]:
+    return sorted(str(value) for value in values)[:limit]
 
 
 def _jsonl_by_id(path: Path, *, id_field: str) -> dict[str, dict[str, Any]]:
@@ -917,18 +1112,23 @@ def _coverage_decision(
         (subset["active_target_chunks"] > 0)
         & (subset["retained_active_target_chunks"] == 0)
     ).any()
-    reviewed_active_support_lost = (
-        subset["expected_reference_validity"].isin(["current", "partial"])
-        & (subset["supporting_passage_retained"] == False)  # noqa: E712
-    ).any()
+    support_retained = subset.get(
+        "supporting_passage_retained",
+        pd.Series(None, index=subset.index, dtype=object),
+    )
+    reviewed_support_lost = (support_retained == False).any()  # noqa: E712
+    support_passage_ids = subset.get(
+        "answer_supporting_passage_id",
+        pd.Series(None, index=subset.index, dtype=object),
+    )
+    declared_support = support_passage_ids.map(
+        lambda value: bool(_optional_text(value))
+    )
+    unresolved_support = (declared_support & support_retained.isna()).any()
     unknown_excluded = subset["unknown_status_excluded"].astype(bool).any()
-    reviewed_unknown_support_lost = (
-        (subset["expected_reference_validity"] == "unknown")
-        & (subset["supporting_passage_retained"] == False)  # noqa: E712
-    ).any()
-    if active_lost or reviewed_active_support_lost:
+    if active_lost or reviewed_support_lost:
         safety = "unsafe"
-    elif unknown_excluded or reviewed_unknown_support_lost:
+    elif unknown_excluded or unresolved_support:
         safety = "unresolved"
     else:
         safety = "safe"

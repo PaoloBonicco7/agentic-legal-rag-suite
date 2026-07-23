@@ -102,7 +102,7 @@ def _payload_from_chunk(
     return payload
 
 
-def _prepare_points(
+def prepare_points(
     chunks: Sequence[dict[str, Any]],
     *,
     dataset_source_hash: str,
@@ -112,6 +112,7 @@ def _prepare_points(
     status_rules_version: str,
     embedding_model: str,
 ) -> list[PreparedPoint]:
+    """Build deterministic point payloads and hashes from clean chunks."""
     seen: set[str] = set()
     points: list[PreparedPoint] = []
     for chunk in chunks:
@@ -779,7 +780,7 @@ def run_indexing_pipeline(
         preprocessing_schema_version = str(manifest.get("schema_version") or "")
         status_rules_version = str(manifest.get("status_rules_version") or "")
         pipeline_identity = _pipeline_identity()
-        points = _prepare_points(
+        points = prepare_points(
             chunks,
             dataset_source_hash=source_hash,
             dataset_manifest_hash=manifest_hash,

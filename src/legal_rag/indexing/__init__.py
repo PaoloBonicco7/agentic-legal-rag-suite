@@ -22,7 +22,7 @@ from .models import (
     REQUIRED_PAYLOAD_FIELDS,
     IndexingConfig,
 )
-from .pipeline import run_indexing_pipeline
+from .pipeline import prepare_points, run_indexing_pipeline
 from .retrieval import RetrievedChunk, build_qdrant_filter, search_index
 
 __all__ = [
@@ -44,6 +44,7 @@ __all__ = [
     "discover_utopia_models",
     "load_chunks",
     "point_id_from_chunk_id",
+    "prepare_points",
     "read_manifest",
     "run_indexing_pipeline",
     "search_index",

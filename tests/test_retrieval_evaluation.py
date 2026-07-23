@@ -32,6 +32,7 @@ from legal_rag.retrieval_evaluation import (
     answer_overlap,
     build_collection_identity,
     build_filter_exact_control,
+    build_filter_exclusions,
     build_filter_impact,
     build_filter_reference_audit,
     build_status_transitions,
@@ -48,6 +49,7 @@ from legal_rag.retrieval_evaluation import (
     resolve_question_targets,
     retrieve_direct,
     retrieve_query_variants,
+    run_direct_experiment,
     sanitize_cache_name,
     score_rerank_candidates,
     select_best_scenario,
@@ -297,12 +299,9 @@ def test_hybrid_search_applies_filter_to_both_prefetches() -> None:
 def test_direct_cache_key_includes_query_index_filter_and_exact() -> None:
     identity = build_collection_identity("collection", {"run_id": "run-1"})
     base = DirectExperimentCache._key(
-        "mcq",
-        "dense",
+        "hybrid",
         10,
-        None,
-        "active",
-        "q1",
+        30,
         collection_identity=identity,
         query_text="question",
         filters={"law_status": ["current", "partial"]},
@@ -310,30 +309,143 @@ def test_direct_cache_key_includes_query_index_filter_and_exact() -> None:
     )
 
     assert base != DirectExperimentCache._key(
-        "mcq",
-        "dense",
+        "hybrid",
         10,
-        None,
-        "active",
-        "q1",
+        30,
         collection_identity=identity,
         query_text="different",
         filters={"law_status": ["current", "partial"]},
         exact=False,
     )
     assert base != DirectExperimentCache._key(
-        "mcq",
-        "dense",
+        "hybrid",
         10,
-        None,
-        "active",
-        "q1",
+        30,
         collection_identity=identity,
         query_text="question",
         filters={"law_status": ["current", "partial"]},
         exact=True,
     )
-    assert identity != build_collection_identity("collection", {"run_id": "run-2"})
+    assert base != DirectExperimentCache._key(
+        "dense",
+        10,
+        30,
+        collection_identity=identity,
+        query_text="question",
+        filters={"law_status": ["current", "partial"]},
+        exact=False,
+    )
+    assert base != DirectExperimentCache._key(
+        "hybrid",
+        20,
+        30,
+        collection_identity=identity,
+        query_text="question",
+        filters={"law_status": ["current", "partial"]},
+        exact=False,
+    )
+    assert base != DirectExperimentCache._key(
+        "hybrid",
+        10,
+        60,
+        collection_identity=identity,
+        query_text="question",
+        filters={"law_status": ["current", "partial"]},
+        exact=False,
+    )
+    assert base != DirectExperimentCache._key(
+        "hybrid",
+        10,
+        30,
+        collection_identity=identity,
+        query_text="question",
+        filters={"law_status": ["current"]},
+        exact=False,
+    )
+    other_identity = build_collection_identity("collection", {"run_id": "run-2"})
+    assert base != DirectExperimentCache._key(
+        "hybrid",
+        10,
+        30,
+        collection_identity=other_identity,
+        query_text="question",
+        filters={"law_status": ["current", "partial"]},
+        exact=False,
+    )
+
+
+def _run_counted_direct_sweep(
+    monkeypatch: Any,
+    *,
+    mode: str,
+) -> tuple[list[tuple[str, int]], DirectExperimentCache, pd.DataFrame]:
+    import legal_rag.retrieval_evaluation.experiments.direct as direct_module
+
+    target, availability = _target()
+    other_target = target.model_copy(update={"qid": "eval-0002"})
+    calls: list[tuple[str, int]] = []
+    candidates = [
+        RetrievedChunkRecord(
+            chunk_id=f"candidate-{rank}",
+            score=1.0 - rank / 100.0,
+            text=f"Candidate {rank}",
+            payload={
+                "chunk_id": f"candidate-{rank}",
+                "law_id": LAW_EXPECTED,
+                "article_id": f"{LAW_EXPECTED}#art:2",
+            },
+        )
+        for rank in range(10)
+    ]
+
+    def fake_retrieve_direct(**kwargs: Any) -> list[RetrievedChunkRecord]:
+        calls.append((str(kwargs["retrieval_mode"]), int(kwargs["limit"])))
+        return candidates[: int(kwargs["limit"])]
+
+    monkeypatch.setattr(direct_module, "retrieve_direct", fake_retrieve_direct)
+    cache = DirectExperimentCache()
+    rows = run_direct_experiment(
+        targets_by_dataset={"mcq": [target], "no_hint": [other_target]},
+        cache=cache,
+        qdrant_client=object(),  # type: ignore[arg-type]
+        collection_name="collection",
+        embedder=FakeEmbedder(),
+        index_manifest={"run_id": "run-1"},
+        rrf_k_default=30,
+        availability=availability,
+        modes=[mode],
+        filter_names=["none"],
+        filter_variants={"none": {}},
+        top_k_values=[5, 10],
+        hybrid_top_k_values=[5, 10],
+        hybrid_rrf_k_values=[30],
+        hybrid_filters_enabled=True,
+        show_progress=False,
+    )
+    return calls, cache, rows
+
+
+def test_direct_experiment_reuses_larger_dense_cutoff_across_datasets(
+    monkeypatch: Any,
+) -> None:
+    calls, cache, rows = _run_counted_direct_sweep(monkeypatch, mode="dense")
+
+    assert calls == [("dense", 10)]
+    assert len(cache) == 2
+    assert rows.groupby("top_k")["retrieved_count"].unique().to_dict() == {
+        5: [5],
+        10: [10],
+    }
+
+
+def test_direct_experiment_keeps_hybrid_cutoffs_distinct_but_shares_datasets(
+    monkeypatch: Any,
+) -> None:
+    calls, cache, rows = _run_counted_direct_sweep(monkeypatch, mode="hybrid")
+
+    assert calls == [("hybrid", 5), ("hybrid", 10)]
+    assert len(cache) == 2
+    assert len(rows) == 4
 
 
 def test_resolve_question_targets_supports_mcq_question_stem() -> None:
@@ -507,6 +619,115 @@ def test_filter_reference_audit_distinguishes_partial_from_full_exclusion() -> N
     assert active["active_target_chunks"] == 1
     assert active["retained_active_target_chunks"] == 1
     assert active["datasets"] == ["mcq", "no_hint"]
+
+
+def test_resolved_support_loss_is_unsafe_and_exported_as_an_exclusion() -> None:
+    target, _ = _target()
+    article_id = target.expected_article_ids[0]
+    supporting_article_id = f"{LAW_EXPECTED}#art:3"
+    supporting_passage_id = f"{supporting_article_id}#p:c1"
+    chunks = [
+        {
+            "chunk_id": "target",
+            "law_id": LAW_EXPECTED,
+            "article_id": article_id,
+            "passage_id": f"{article_id}#p:c1",
+            "law_status": "current",
+            "article_status": "current",
+            "passage_status": "current",
+            "content_availability": "substantive",
+            "index_views": ["historical", "current", "not_explicitly_past"],
+            "status_event_ids": [],
+            "status_rule_ids": ["passage-default-current"],
+        },
+        {
+            "chunk_id": "support",
+            "law_id": LAW_EXPECTED,
+            "article_id": supporting_article_id,
+            "passage_id": supporting_passage_id,
+            "law_status": "current",
+            "article_status": "past",
+            "passage_status": "past",
+            "content_availability": "substantive",
+            "index_views": ["historical"],
+            "status_event_ids": ["event-1"],
+            "status_rule_ids": ["passage-repeal"],
+        },
+    ]
+    filters = {
+        "none": {},
+        "passage_active": {"passage_status": ["current", "partial"]},
+    }
+    audit = build_filter_reference_audit(
+        targets_by_dataset={"no_hint": [target]},
+        availability=ChunkAvailabilityIndex(chunks),
+        filter_names=list(filters),
+        filter_variants=filters,
+        collection_identity="identity",
+        reference_review=[
+            {
+                "qid": target.qid,
+                "expected_article_id": article_id,
+                "expected_reference_validity": "past",
+                "answer_supporting_passage_id": supporting_passage_id,
+            }
+        ],
+    )
+    filtered = audit[audit["filter_name"] == "passage_active"].iloc[0]
+
+    assert filtered["coverage_status"] == "fully_eligible"
+    assert bool(filtered["supporting_passage_retained"]) is False
+    exclusions = build_filter_exclusions(audit)
+    assert exclusions["filter_name"].tolist() == ["passage_active"]
+
+    direct = pd.DataFrame(
+        [
+            {
+                **_direct_row(target.qid, hit=True, mode="hybrid", filter_name=filter_name),
+                "dataset": "no_hint",
+                "metadata_filters": filters[filter_name],
+                "exact": False,
+            }
+            for filter_name in filters
+        ]
+    )
+    impact = build_filter_impact(direct, audit, resamples=10, seed=42)
+    verdict = impact[impact["filter_name"] == "passage_active"].iloc[0]
+    assert verdict["active_slice_safety"] == "unsafe"
+
+
+def test_declared_but_unresolved_support_is_unresolved() -> None:
+    target, availability = _target()
+    article_id = target.expected_article_ids[0]
+    audit = build_filter_reference_audit(
+        targets_by_dataset={"no_hint": [target]},
+        availability=availability,
+        filter_names=["none"],
+        filter_variants={"none": {}},
+        collection_identity="identity",
+        reference_review=[
+            {
+                "qid": target.qid,
+                "expected_article_id": article_id,
+                "expected_reference_validity": "current",
+                "answer_supporting_passage_id": f"{article_id}#p:missing",
+            }
+        ],
+    )
+    assert audit.iloc[0]["supporting_passage_retained"] is None
+
+    direct = pd.DataFrame(
+        [
+            {
+                **_direct_row(target.qid, hit=True, mode="hybrid", filter_name="none"),
+                "dataset": "no_hint",
+                "metadata_filters": {},
+                "exact": False,
+            }
+        ]
+    )
+    impact = build_filter_impact(direct, audit, resamples=10, seed=42)
+    assert impact.iloc[0]["active_slice_safety"] == "unresolved"
 
 
 def test_status_transitions_compare_laws_and_articles(tmp_path) -> None:
