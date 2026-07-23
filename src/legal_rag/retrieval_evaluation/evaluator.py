@@ -272,8 +272,6 @@ def evaluate_candidate_set(
         direct_law_hit=direct.law_hit,
         direct_article_hit=direct.article_hit,
         direct_all_expected_articles_hit=direct.all_expected_articles_hit,
-        direct_article_recall=direct.article_recall,
-        direct_article_average_precision=direct.article_average_precision,
         direct_first_law_rank=direct.first_law_rank,
         direct_first_article_rank=direct.first_article_rank,
         direct_article_mrr=direct.article_mrr,
@@ -282,8 +280,6 @@ def evaluate_candidate_set(
         post_law_hit=post.law_hit,
         post_article_hit=post.article_hit,
         post_all_expected_articles_hit=post.all_expected_articles_hit,
-        post_article_recall=post.article_recall,
-        post_article_average_precision=post.article_average_precision,
         post_first_law_rank=post.first_law_rank,
         post_first_article_rank=post.first_article_rank,
         post_article_mrr=post.article_mrr,
@@ -309,8 +305,6 @@ def candidate_metrics(
     first_law_rank = None
     first_article_rank = None
     seen_articles: set[str] = set()
-    matched_articles: set[str] = set()
-    precision_sum = 0.0
     for index, chunk in enumerate(chunks, start=1):
         law_id = str(chunk.payload.get("law_id") or "")
         article_id = str(chunk.payload.get("article_id") or "")
@@ -320,12 +314,8 @@ def candidate_metrics(
             first_law_rank = index
         if first_article_rank is None and article_id in expected_articles:
             first_article_rank = index
-        if article_id in expected_articles and article_id not in matched_articles:
-            matched_articles.add(article_id)
-            precision_sum += len(matched_articles) / index
     law_hit = first_law_rank is not None
     article_hit = first_article_rank is not None
-    relevant_count = len(expected_articles)
     article_hit_at_k = {
         str(int(k)): first_article_rank is not None and first_article_rank <= int(k)
         for k in k_values
@@ -335,8 +325,6 @@ def candidate_metrics(
         law_hit=law_hit,
         article_hit=article_hit,
         all_expected_articles_hit=bool(expected_articles) and expected_articles.issubset(seen_articles),
-        article_recall=(len(matched_articles) / relevant_count) if relevant_count else 0.0,
-        article_average_precision=(precision_sum / relevant_count) if relevant_count else 0.0,
         first_law_rank=first_law_rank,
         first_article_rank=first_article_rank,
         article_mrr=(1.0 / first_article_rank) if first_article_rank else 0.0,
@@ -427,14 +415,10 @@ def evaluate_with_rerank(
         reranked_law_hit=post_metrics.law_hit,
         reranked_article_hit=post_metrics.article_hit,
         reranked_all_expected_articles_hit=post_metrics.all_expected_articles_hit,
-        reranked_article_recall=post_metrics.article_recall,
-        reranked_article_average_precision=post_metrics.article_average_precision,
         reranked_first_law_rank=post_metrics.first_law_rank,
         reranked_first_article_rank=post_metrics.first_article_rank,
         reranked_article_mrr=post_metrics.article_mrr,
         pre_rerank_article_hit=pre_rerank_metrics.article_hit,
-        pre_rerank_article_recall=pre_rerank_metrics.article_recall,
-        pre_rerank_article_average_precision=pre_rerank_metrics.article_average_precision,
         pre_rerank_first_article_rank=pre_rerank_metrics.first_article_rank,
         rerank_recovered_article=not pre_rerank_metrics.article_hit and post_metrics.article_hit,
         rerank_demoted_article=pre_rerank_metrics.article_hit and not post_metrics.article_hit,
@@ -489,8 +473,6 @@ def evaluate_query_rewrite(
         direct_law_hit=metrics.law_hit,
         direct_article_hit=metrics.article_hit,
         direct_all_expected_articles_hit=metrics.all_expected_articles_hit,
-        direct_article_recall=metrics.article_recall,
-        direct_article_average_precision=metrics.article_average_precision,
         direct_first_law_rank=metrics.first_law_rank,
         direct_first_article_rank=metrics.first_article_rank,
         direct_article_mrr=metrics.article_mrr,
@@ -520,11 +502,8 @@ def summarize_scenario(
             dataset=dataset,
             stage=stage,  # type: ignore[arg-type]
             article_hit_pct=0.0,
-            article_recall_pct=0.0,
-            all_expected_articles_pct=0.0,
             law_hit_pct=0.0,
             article_mrr=0.0,
-            article_map=0.0,
             n_questions=0,
             n_filter_excluded=0,
             config=dict(config),
@@ -532,13 +511,6 @@ def summarize_scenario(
         )
     article_hits = sum(1 for row in rows if bool(row.get(article_hit_key)))
     law_hits = sum(1 for row in rows if bool(row.get(law_hit_key)))
-    metric_prefix = article_mrr_key.removesuffix("article_mrr")
-    article_recall_key = f"{metric_prefix}article_recall"
-    article_average_precision_key = f"{metric_prefix}article_average_precision"
-    all_expected_articles_key = article_hit_key.replace("article_hit", "all_expected_articles_hit")
-    article_recall_sum = sum(float(row.get(article_recall_key) or 0.0) for row in rows)
-    all_expected_articles_hits = sum(1 for row in rows if bool(row.get(all_expected_articles_key)))
-    article_ap_sum = sum(float(row.get(article_average_precision_key) or 0.0) for row in rows)
     mrr_sum = sum(float(row.get(article_mrr_key) or 0.0) for row in rows)
     excluded = sum(1 for row in rows if filter_excluded_key and bool(row.get(filter_excluded_key)))
     article_pct = article_hits / n * 100.0
@@ -548,11 +520,8 @@ def summarize_scenario(
         dataset=dataset,
         stage=stage,  # type: ignore[arg-type]
         article_hit_pct=article_pct,
-        article_recall_pct=article_recall_sum / n * 100.0,
-        all_expected_articles_pct=all_expected_articles_hits / n * 100.0,
         law_hit_pct=law_pct,
         article_mrr=mrr_sum / n,
-        article_map=article_ap_sum / n,
         n_questions=n,
         n_filter_excluded=excluded,
         config=dict(config),

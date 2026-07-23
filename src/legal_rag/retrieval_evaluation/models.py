@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-RETRIEVAL_EVALUATION_SCHEMA_VERSION = "retrieval-evaluation-v5"
+RETRIEVAL_EVALUATION_SCHEMA_VERSION = "retrieval-evaluation-v4"
 
 
 class _Record(BaseModel):
@@ -51,8 +51,6 @@ class CandidateMetrics(_Record):
     law_hit: bool
     article_hit: bool
     all_expected_articles_hit: bool
-    article_recall: float = Field(ge=0.0, le=1.0)
-    article_average_precision: float = Field(ge=0.0, le=1.0)
     first_law_rank: int | None
     first_article_rank: int | None
     article_mrr: float
@@ -87,8 +85,6 @@ class RetrievalEvaluationRow(_Record):
     direct_law_hit: bool
     direct_article_hit: bool
     direct_all_expected_articles_hit: bool
-    direct_article_recall: float = Field(ge=0.0, le=1.0)
-    direct_article_average_precision: float = Field(ge=0.0, le=1.0)
     direct_first_law_rank: int | None
     direct_first_article_rank: int | None
     direct_article_mrr: float
@@ -97,8 +93,6 @@ class RetrievalEvaluationRow(_Record):
     post_law_hit: bool
     post_article_hit: bool
     post_all_expected_articles_hit: bool
-    post_article_recall: float = Field(ge=0.0, le=1.0)
-    post_article_average_precision: float = Field(ge=0.0, le=1.0)
     post_first_law_rank: int | None
     post_first_article_rank: int | None
     post_article_mrr: float
@@ -132,14 +126,10 @@ class RerankEvaluationRow(_Record):
     reranked_law_hit: bool
     reranked_article_hit: bool
     reranked_all_expected_articles_hit: bool
-    reranked_article_recall: float = Field(ge=0.0, le=1.0)
-    reranked_article_average_precision: float = Field(ge=0.0, le=1.0)
     reranked_first_law_rank: int | None
     reranked_first_article_rank: int | None
     reranked_article_mrr: float
     pre_rerank_article_hit: bool
-    pre_rerank_article_recall: float = Field(ge=0.0, le=1.0)
-    pre_rerank_article_average_precision: float = Field(ge=0.0, le=1.0)
     pre_rerank_first_article_rank: int | None
     rerank_recovered_article: bool
     rerank_demoted_article: bool
@@ -173,8 +163,6 @@ class QueryRewriteEvaluationRow(_Record):
     direct_law_hit: bool
     direct_article_hit: bool
     direct_all_expected_articles_hit: bool
-    direct_article_recall: float = Field(ge=0.0, le=1.0)
-    direct_article_average_precision: float = Field(ge=0.0, le=1.0)
     direct_first_law_rank: int | None
     direct_first_article_rank: int | None
     direct_article_mrr: float
@@ -189,11 +177,8 @@ class RetrievalScenarioSummary(_Record):
     dataset: str
     stage: Literal["direct", "graph", "rerank", "query_rewriting"]
     article_hit_pct: float = Field(ge=0.0, le=100.0)
-    article_recall_pct: float = Field(ge=0.0, le=100.0)
-    all_expected_articles_pct: float = Field(ge=0.0, le=100.0)
     law_hit_pct: float = Field(ge=0.0, le=100.0)
     article_mrr: float = Field(ge=0.0, le=1.0)
-    article_map: float = Field(ge=0.0, le=1.0)
     n_questions: int = Field(ge=0)
     n_filter_excluded: int = Field(ge=0)
     config: dict[str, Any]
