@@ -511,12 +511,19 @@ def test_filter_impact_uses_paired_bootstrap_and_separate_verdict_axes() -> None
     direct = pd.DataFrame(
         [
             {
-                **_direct_row("q1", hit=True, filter_name="none"),
+                **_direct_row("q1", hit=True, mode="hybrid", filter_name="none"),
+                "dataset": "no_hint",
                 "metadata_filters": {},
                 "exact": False,
             },
             {
-                **_direct_row("q1", hit=False, filter_name="active"),
+                **_direct_row(
+                    "q1",
+                    hit=False,
+                    mode="hybrid",
+                    filter_name="index_views_current",
+                ),
+                "dataset": "no_hint",
                 "metadata_filters": {"passage_status": ["current", "partial"]},
                 "exact": False,
             },
@@ -526,7 +533,7 @@ def test_filter_impact_uses_paired_bootstrap_and_separate_verdict_axes() -> None
         [
             {
                 "qid": "q1",
-                "datasets": ["mcq"],
+                "datasets": ["no_hint"],
                 "filter_name": filter_name,
                 "coverage_status": "fully_eligible",
                 "active_target_chunks": 1,
@@ -535,17 +542,18 @@ def test_filter_impact_uses_paired_bootstrap_and_separate_verdict_axes() -> None
                 "expected_reference_validity": "current",
                 "supporting_passage_retained": True,
             }
-            for filter_name in ("none", "active")
+            for filter_name in ("none", "index_views_current")
         ]
     )
 
     impact = build_filter_impact(direct, reference_audit, resamples=100, seed=42)
-    active = impact[impact["filter_name"] == "active"].iloc[0]
+    active = impact[impact["filter_name"] == "index_views_current"].iloc[0]
 
     assert active["article_success_delta_pp"] == -100.0
     assert active["losses"] == 1
     assert active["active_slice_safety"] == "safe"
     assert active["retrieval_effect"] == "harmful"
+    assert active["article_success_ci_level"] == 0.975
     assert bool(active["bootstrap_supported"]) is True
 
 

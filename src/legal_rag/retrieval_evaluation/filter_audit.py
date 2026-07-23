@@ -490,13 +490,11 @@ def build_filter_impact(
             active_slice_safety=coverage["active_slice_safety"],
             retrieval_effect=effect,
             bootstrap_supported=_bootstrap_support(
+                is_primary=is_primary,
                 effect=effect,
                 article_delta=article_delta,
                 article_low=article_low,
                 article_high=article_high,
-                mrr_delta=mrr_delta,
-                mrr_low=mrr_low,
-                mrr_high=mrr_high,
             ),
         )
         rows.append(row.to_json_record())
@@ -892,22 +890,18 @@ def _retrieval_effect(article_delta: float, mrr_delta: float) -> str:
 
 def _bootstrap_support(
     *,
+    is_primary: bool,
     effect: str,
     article_delta: float,
     article_low: float,
     article_high: float,
-    mrr_delta: float,
-    mrr_low: float,
-    mrr_high: float,
 ) -> bool:
+    if not is_primary:
+        return False
     if effect == "beneficial":
-        return (article_delta > 0 and article_low > 0) or (
-            mrr_delta > 0 and mrr_low > 0
-        )
+        return article_delta > 0 and article_low > 0
     if effect == "harmful":
-        return (article_delta < 0 and article_high < 0) or (
-            mrr_delta < 0 and mrr_high < 0
-        )
+        return article_delta < 0 and article_high < 0
     return False
 
 
