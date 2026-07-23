@@ -25,7 +25,32 @@ FILTER_VARIANTS: dict[str, dict[str, Any]] = {
     "law_status_current": {"law_status": "current"},
     "index_views_current": {"index_views": "current"},
     "article_status_current": {"article_status": "current"},
+    "law_article_status_current": {
+        "law_status": "current",
+        "article_status": "current",
+    },
+    "law_status_active": {"law_status": ["current", "partial"]},
+    "article_status_active": {"article_status": ["current", "partial"]},
+    "passage_status_active": {"passage_status": ["current", "partial"]},
+    "index_views_not_explicitly_past": {"index_views": "not_explicitly_past"},
 }
+
+FILTER_AUDIT_FILTER_NAMES: tuple[str, ...] = (
+    "none",
+    "law_status_current",
+    "article_status_current",
+    "law_article_status_current",
+    "law_status_active",
+    "article_status_active",
+    "passage_status_active",
+    "index_views_current",
+    "index_views_not_explicitly_past",
+)
+FILTER_AUDIT_EXACT_FILTER_NAMES: tuple[str, ...] = (
+    "none",
+    "index_views_current",
+    "index_views_not_explicitly_past",
+)
 
 # Graph relation type variants — name -> ordered list of relation types.
 RELATION_TYPE_VARIANTS: dict[str, list[str]] = {
@@ -66,6 +91,16 @@ class DiagnosticProfile(BaseModel):
     hybrid_top_k_values: list[int] = Field(default_factory=lambda: [10, 20, 50, 100])
     hybrid_rrf_k_values: list[int] = Field(default_factory=lambda: [30, 60, 90])
     filter_variants: list[str] = Field(default_factory=lambda: ["none", "law_status_current"])
+    hybrid_filters_enabled: bool = False
+
+    # Validity-filter audit
+    exact_control_enabled: bool = False
+    exact_control_top_k_values: list[int] = Field(default_factory=lambda: [10, 50])
+    exact_control_filter_variants: list[str] = Field(
+        default_factory=lambda: list(FILTER_AUDIT_EXACT_FILTER_NAMES)
+    )
+    bootstrap_resamples: int = Field(default=10_000, gt=0)
+    bootstrap_seed: int = 42
 
     # Graph sweeps
     graph_base_configs: list[str] = Field(default_factory=lambda: ["dense@10", "hybrid_best"])
@@ -151,6 +186,22 @@ PROFILES: dict[str, DiagnosticProfile] = {
         query_rewriting_strategies=["none", "rewrite", "hyde", "multi_query"],
         query_rewriting_question_sample=30,
         query_rewriting_full_run=True,
+    ),
+    "filter_audit": DiagnosticProfile(
+        name="filter_audit",
+        description="Deterministic validity-filter coverage and retrieval audit.",
+        datasets=["mcq", "no_hint"],
+        enabled_experiments={"direct", "hybrid"},
+        top_k_values=[5, 10, 20, 50, 100],
+        hybrid_top_k_values=[5, 10, 20, 50, 100],
+        hybrid_rrf_k_values=[30],
+        filter_variants=list(FILTER_AUDIT_FILTER_NAMES),
+        hybrid_filters_enabled=True,
+        exact_control_enabled=True,
+        exact_control_top_k_values=[10, 50],
+        exact_control_filter_variants=list(FILTER_AUDIT_EXACT_FILTER_NAMES),
+        bootstrap_resamples=10_000,
+        bootstrap_seed=42,
     ),
 }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from ._shared import compute_answer_overlap_metrics
 from .direct import (
     DirectExperimentCache,
+    build_collection_identity,
     run_direct_experiment,
     summarize_direct,
     summarize_direct_by_level,
@@ -35,6 +36,7 @@ from .rerank import (
 
 __all__ = [
     "DirectExperimentCache",
+    "build_collection_identity",
     "best_graph_by_dataset",
     "best_hybrid_config",
     "best_hybrid_rrf_k",

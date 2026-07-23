@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -8,7 +9,12 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
 from legal_rag.advanced_graph_rag import RERANK_PROMPT_VERSION
-from legal_rag.advanced_graph_rag.retrieval import GraphIndex, expand_with_graph
+from legal_rag.advanced_graph_rag.retrieval import (
+    GraphIndex,
+    expand_with_graph,
+    search_dense as search_advanced_dense,
+    search_hybrid,
+)
 from legal_rag.oracle_context_evaluation.references import OracleReferenceResolver
 from legal_rag.retrieval_evaluation import (
     PROFILES,
@@ -17,16 +23,23 @@ from legal_rag.retrieval_evaluation import (
     CachedEmbedder,
     ChunkAvailabilityIndex,
     DiagnosticProfile,
+    DirectExperimentCache,
+    FILTER_AUDIT_SCHEMA_VERSION,
     QueryRewriteCache,
     RerankCache,
     align_rerank_scores,
     answer_overlap,
+    build_collection_identity,
+    build_filter_exact_control,
+    build_filter_impact,
+    build_filter_reference_audit,
     build_waterfall,
     evaluate_candidate_set,
     evaluate_query_rewrite,
     evaluate_with_rerank,
     generate_hyde,
     multi_query,
+    paired_bootstrap_interval,
     query_rewrite_cache_path,
     rerank_cache_path,
     resolve_profile,
@@ -57,6 +70,30 @@ class FakeEmbedder:
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         self.calls += 1
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+
+class FakeHybridEmbedder(FakeEmbedder):
+    def embed_sparse_texts(self, texts: list[str]) -> list[dict[str, list[float] | list[int]]]:
+        return [{"indices": [1], "values": [1.0]} for _ in texts]
+
+
+class RecordingQdrantClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def get_collection(self, *, collection_name: str) -> Any:
+        return SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors={"dense": object()},
+                    sparse_vectors={"sparse": object()},
+                )
+            )
+        )
+
+    def query_points(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return SimpleNamespace(points=[])
 
 
 class FakeRerankClient:
@@ -216,6 +253,87 @@ def test_cached_embedder_reuses_dense_query_vectors() -> None:
     assert cached.dense_cache_size == 1
 
 
+def test_dense_exact_search_forwards_qdrant_search_params() -> None:
+    client = RecordingQdrantClient()
+
+    search_advanced_dense(
+        client,  # type: ignore[arg-type]
+        collection_name="collection",
+        embedder=FakeEmbedder(),
+        query_text="question",
+        limit=10,
+        static_filters={},
+        exact=True,
+    )
+
+    assert client.calls[0]["search_params"].exact is True
+
+
+def test_hybrid_search_applies_filter_to_both_prefetches() -> None:
+    client = RecordingQdrantClient()
+
+    search_hybrid(
+        client,  # type: ignore[arg-type]
+        collection_name="collection",
+        embedder=FakeHybridEmbedder(),
+        query_text="question",
+        limit=10,
+        rrf_k=30,
+        static_filters={"passage_status": ["current", "partial"]},
+        index_manifest={"hybrid_enabled": True},
+    )
+
+    prefetches = client.calls[0]["prefetch"]
+    assert len(prefetches) == 2
+    assert all(prefetch.filter is not None for prefetch in prefetches)
+    assert all(
+        prefetch.filter.must[0].match.any == ["current", "partial"]
+        for prefetch in prefetches
+    )
+
+
+def test_direct_cache_key_includes_query_index_filter_and_exact() -> None:
+    identity = build_collection_identity("collection", {"run_id": "run-1"})
+    base = DirectExperimentCache._key(
+        "mcq",
+        "dense",
+        10,
+        None,
+        "active",
+        "q1",
+        collection_identity=identity,
+        query_text="question",
+        filters={"law_status": ["current", "partial"]},
+        exact=False,
+    )
+
+    assert base != DirectExperimentCache._key(
+        "mcq",
+        "dense",
+        10,
+        None,
+        "active",
+        "q1",
+        collection_identity=identity,
+        query_text="different",
+        filters={"law_status": ["current", "partial"]},
+        exact=False,
+    )
+    assert base != DirectExperimentCache._key(
+        "mcq",
+        "dense",
+        10,
+        None,
+        "active",
+        "q1",
+        collection_identity=identity,
+        query_text="question",
+        filters={"law_status": ["current", "partial"]},
+        exact=True,
+    )
+    assert identity != build_collection_identity("collection", {"run_id": "run-2"})
+
+
 def test_resolve_question_targets_supports_mcq_question_stem() -> None:
     chunks = _chunks()
     resolver = OracleReferenceResolver(
@@ -333,6 +451,139 @@ def test_filter_excluded_marks_expected_article_removed_by_metadata_filter() -> 
     assert row.expected_article_chunk_count == 1
     assert row.expected_article_filtered_chunk_count == 0
     assert row.filter_excluded is True
+
+
+def test_filter_reference_audit_distinguishes_partial_from_full_exclusion() -> None:
+    target, _ = _target()
+    article_id = target.expected_article_ids[0]
+    chunks = [
+        {
+            "chunk_id": "current",
+            "law_id": LAW_EXPECTED,
+            "article_id": article_id,
+            "passage_id": f"{article_id}#p:c1",
+            "law_status": "current",
+            "article_status": "partial",
+            "passage_status": "current",
+            "content_availability": "substantive",
+            "index_views": ["historical", "current", "not_explicitly_past"],
+            "status_event_ids": [],
+            "status_rule_ids": ["passage-default-current"],
+        },
+        {
+            "chunk_id": "past",
+            "law_id": LAW_EXPECTED,
+            "article_id": article_id,
+            "passage_id": f"{article_id}#p:c2",
+            "law_status": "current",
+            "article_status": "partial",
+            "passage_status": "past",
+            "content_availability": "substantive",
+            "index_views": ["historical"],
+            "status_event_ids": ["event-1"],
+            "status_rule_ids": ["passage-repeal"],
+        },
+    ]
+    filters = {
+        "none": {},
+        "passage_active": {"passage_status": ["current", "partial"]},
+        "current_view": {"index_views": "current"},
+    }
+
+    audit = build_filter_reference_audit(
+        targets_by_dataset={"mcq": [target], "no_hint": [target]},
+        availability=ChunkAvailabilityIndex(chunks),
+        filter_names=list(filters),
+        filter_variants=filters,
+        collection_identity="identity",
+    )
+
+    assert len(audit) == 3
+    assert audit.loc[audit["filter_name"] == "none", "coverage_status"].item() == "fully_eligible"
+    active = audit[audit["filter_name"] == "passage_active"].iloc[0]
+    assert active["coverage_status"] == "partially_eligible"
+    assert active["active_target_chunks"] == 1
+    assert active["retained_active_target_chunks"] == 1
+    assert active["datasets"] == ["mcq", "no_hint"]
+
+
+def test_filter_impact_uses_paired_bootstrap_and_separate_verdict_axes() -> None:
+    direct = pd.DataFrame(
+        [
+            {
+                **_direct_row("q1", hit=True, filter_name="none"),
+                "metadata_filters": {},
+                "exact": False,
+            },
+            {
+                **_direct_row("q1", hit=False, filter_name="active"),
+                "metadata_filters": {"passage_status": ["current", "partial"]},
+                "exact": False,
+            },
+        ]
+    )
+    reference_audit = pd.DataFrame(
+        [
+            {
+                "qid": "q1",
+                "datasets": ["mcq"],
+                "filter_name": filter_name,
+                "coverage_status": "fully_eligible",
+                "active_target_chunks": 1,
+                "retained_active_target_chunks": 1,
+                "unknown_status_excluded": False,
+                "expected_reference_validity": "current",
+                "supporting_passage_retained": True,
+            }
+            for filter_name in ("none", "active")
+        ]
+    )
+
+    impact = build_filter_impact(direct, reference_audit, resamples=100, seed=42)
+    active = impact[impact["filter_name"] == "active"].iloc[0]
+
+    assert active["article_success_delta_pp"] == -100.0
+    assert active["losses"] == 1
+    assert active["active_slice_safety"] == "safe"
+    assert active["retrieval_effect"] == "harmful"
+    assert bool(active["bootstrap_supported"]) is True
+
+
+def test_paired_bootstrap_is_deterministic() -> None:
+    first = paired_bootstrap_interval(
+        [1, 0, 1, 1],
+        [0, 0, 1, 0],
+        resamples=200,
+        seed=42,
+    )
+    second = paired_bootstrap_interval(
+        [1, 0, 1, 1],
+        [0, 0, 1, 0],
+        resamples=200,
+        seed=42,
+    )
+
+    assert first == second
+    assert first[0] == 0.5
+
+
+def test_exact_control_reports_chunk_overlap_and_metric_delta() -> None:
+    ann = {
+        **_direct_row("q1", hit=False),
+        "exact": False,
+        "retrieved_chunk_ids": ["a", "b"],
+    }
+    exact = {
+        **_direct_row("q1", hit=True),
+        "exact": True,
+        "retrieved_chunk_ids": ["a", "c"],
+    }
+
+    control = build_filter_exact_control(pd.DataFrame([ann, exact]))
+
+    assert len(control) == 1
+    assert control.iloc[0]["mean_chunk_overlap"] == 0.5
+    assert control.iloc[0]["article_success_delta_pp"] == 100.0
 
 
 def test_rerank_cache_round_trip(tmp_path) -> None:
@@ -640,6 +891,10 @@ def test_write_run_artifacts_creates_csvs_and_manifest(tmp_path) -> None:
         sweep_graph=sweep_graph,
         sweep_rerank=sweep_rerank,
         sweep_query_rewriting=sweep_query_rewriting,
+        filter_reference_audit=[{"qid": "eval-0001", "coverage_status": "fully_eligible"}],
+        filter_exclusions=[],
+        filter_impact=[{"filter_name": "none", "article_success_delta_pp": 0.0}],
+        filter_exact_control=[],
         manifest=manifest,
     )
 
@@ -649,12 +904,18 @@ def test_write_run_artifacts_creates_csvs_and_manifest(tmp_path) -> None:
     assert (output_dir / "sweep_graph.csv").exists()
     assert (output_dir / "sweep_rerank.csv").exists()
     assert (output_dir / "sweep_query_rewriting.csv").exists()
+    assert (output_dir / "filter_reference_audit.csv").exists()
+    assert (output_dir / "filter_exclusions.csv").exists()
+    assert (output_dir / "filter_impact.csv").exists()
+    assert (output_dir / "filter_exact_control.csv").exists()
     with (output_dir / "sweep_rerank.csv").open(encoding="utf-8") as handle:
         assert "rerank_model" in next(csv.reader(handle))
     with (output_dir / "sweep_query_rewriting.csv").open(encoding="utf-8") as handle:
         assert "strategy" in next(csv.reader(handle))
     manifest_text = (output_dir / "manifest.json").read_text(encoding="utf-8")
     assert RETRIEVAL_EVALUATION_SCHEMA_VERSION in manifest_text
+    assert FILTER_AUDIT_SCHEMA_VERSION in manifest_text
+    assert "filter_reference_audit.csv" in manifest_text
     assert "created_at" in manifest_text
 
 
@@ -685,14 +946,10 @@ def _direct_row(qid: str, *, hit: bool, top_k: int = 10, mode: str = "dense", fi
         "metadata_filters": {},
         "dataset": "mcq",
         "direct_article_hit": hit,
-        "direct_article_recall": 1.0 if hit else 0.0,
-        "direct_article_average_precision": 1.0 if hit else 0.0,
         "direct_law_hit": hit,
         "direct_article_mrr": 1.0 if hit else 0.0,
         "direct_all_expected_articles_hit": hit,
         "post_article_hit": hit,
-        "post_article_recall": 1.0 if hit else 0.0,
-        "post_article_average_precision": 1.0 if hit else 0.0,
         "post_law_hit": hit,
         "post_article_mrr": 1.0 if hit else 0.0,
         "filter_excluded": False,
@@ -730,11 +987,8 @@ def test_build_waterfall_produces_required_scenario_columns() -> None:
         "dataset",
         "stage",
         "article_hit_pct",
-        "article_recall_pct",
-        "all_expected_articles_pct",
         "law_hit_pct",
         "article_mrr",
-        "article_map",
         "n_questions",
         "n_filter_excluded",
         "config",
@@ -747,9 +1001,6 @@ def test_build_waterfall_produces_required_scenario_columns() -> None:
     baseline = scenarios[scenarios["experiment_name"] == "dense_baseline_top10"].iloc[0]
     assert baseline["status"] == "run"
     assert baseline["article_hit_pct"] == 60.0
-    assert baseline["article_recall_pct"] == 60.0
-    assert baseline["all_expected_articles_pct"] == 60.0
-    assert baseline["article_map"] == 0.6
 
 
 def test_select_best_scenario_returns_highest_hit() -> None:
@@ -858,7 +1109,7 @@ def test_candidate_metrics_article_hit_at_k_is_false_when_no_hit() -> None:
     assert metrics.article_hit_at_k == {"5": False, "10": False}
 
 
-def test_candidate_metrics_reports_recall_and_average_precision_for_multiple_articles() -> None:
+def test_candidate_metrics_reports_first_hit_and_mrr_for_multiple_articles() -> None:
     from legal_rag.retrieval_evaluation import candidate_metrics
 
     expected_articles = [f"{LAW_EXPECTED}#art:2", f"{LAW_EXPECTED}#art:3"]
@@ -895,6 +1146,7 @@ def test_candidate_metrics_reports_recall_and_average_precision_for_multiple_art
         expected_article_ids=expected_articles,
     )
 
-    assert metrics.article_recall == 1.0
-    assert metrics.all_expected_articles_hit is True
-    assert metrics.article_average_precision == 0.5
+    assert metrics.article_hit is True
+    assert metrics.law_hit is True
+    assert metrics.first_article_rank == 2
+    assert metrics.article_mrr == 0.5

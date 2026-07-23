@@ -79,6 +79,7 @@ def search_dense(
     query_text: str,
     limit: int,
     static_filters: dict[str, Any],
+    exact: bool = False,
 ) -> list[RetrievedChunkRecord]:
     """Embed a query and search the dense vector index."""
     vector = embedder.embed_texts([query_text])[0]
@@ -89,6 +90,7 @@ def search_dense(
             query=vector,
             using=vector_name,
             query_filter=build_static_filter(static_filters),
+            search_params=qmodels.SearchParams(exact=True) if exact else None,
             limit=limit,
             with_payload=True,
             with_vectors=False,

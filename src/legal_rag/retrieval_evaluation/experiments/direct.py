@@ -7,7 +7,9 @@ candidate list to avoid double-paying for retrieval.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -24,7 +26,7 @@ from ._shared import compute_answer_overlap_metrics, parallel_map_ordered
 
 
 class DirectExperimentCache:
-    """In-memory candidate cache keyed by (dataset, mode, top_k, rrf_k, filter, qid).
+    """In-memory candidate cache keyed by index, query, retrieval, and filter identity.
 
     Shared across the diagnostic experiments so a single retrieval call serves
     direct, graph, rerank and query_rewriting evaluation passes.
@@ -45,8 +47,30 @@ class DirectExperimentCache:
         rrf_k: int | None,
         filter_name: str,
         qid: str,
+        *,
+        collection_identity: str = "",
+        query_text: str = "",
+        filters: Mapping[str, Any] | None = None,
+        exact: bool = False,
     ) -> tuple:
-        return (dataset, retrieval_mode, top_k, rrf_k, filter_name, qid)
+        filter_identity = json.dumps(
+            _stable_json_value(dict(filters or {})),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return (
+            collection_identity,
+            query_text,
+            retrieval_mode,
+            int(top_k),
+            rrf_k,
+            filter_name,
+            filter_identity,
+            bool(exact),
+            dataset,
+            qid,
+        )
 
     def get_or_retrieve(
         self,
@@ -63,9 +87,23 @@ class DirectExperimentCache:
         filters: dict[str, Any],
         rrf_k_default: int,
         index_manifest: dict[str, Any],
+        exact: bool = False,
     ) -> list[RetrievedChunkRecord]:
         """Return cached candidates, retrieving lazily if missing."""
-        key = self._key(dataset, retrieval_mode, top_k, rrf_k, filter_name, target.qid)
+        effective_rrf_k = int(rrf_k or rrf_k_default) if retrieval_mode == "hybrid" else None
+        identity = build_collection_identity(collection_name, index_manifest)
+        key = self._key(
+            dataset,
+            retrieval_mode,
+            top_k,
+            effective_rrf_k,
+            filter_name,
+            target.qid,
+            collection_identity=identity,
+            query_text=target.question,
+            filters=filters,
+            exact=exact,
+        )
         with self._lock:
             cached = self._store.get(key)
         if cached is not None:
@@ -78,8 +116,9 @@ class DirectExperimentCache:
             limit=top_k,
             retrieval_mode=retrieval_mode,
             static_filters=filters,
-            rrf_k=int(rrf_k or rrf_k_default),
+            rrf_k=int(effective_rrf_k or rrf_k_default),
             index_manifest=index_manifest,
+            exact=exact,
         )
         with self._lock:
             self._store[key] = retrieved
@@ -102,30 +141,39 @@ def run_direct_experiment(
     top_k_values: Sequence[int],
     hybrid_top_k_values: Sequence[int] | None = None,
     hybrid_rrf_k_values: Sequence[int] | None = None,
+    hybrid_filters_enabled: bool = False,
+    exact_values: Sequence[bool] = (False,),
     show_progress: bool = True,
     max_workers: int = 1,
 ) -> pd.DataFrame:
     """Run direct (dense + hybrid) retrieval over the full sweep and return rows."""
     hybrid_top_k_values = list(hybrid_top_k_values or top_k_values)
     hybrid_rrf_k_values = list(hybrid_rrf_k_values or [60])
+    collection_identity = build_collection_identity(collection_name, index_manifest)
 
     plan: list[tuple] = []
     for mode in modes:
         mode_top_k_values = hybrid_top_k_values if mode == "hybrid" else list(top_k_values)
         mode_rrf_k_values = hybrid_rrf_k_values if mode == "hybrid" else [None]
-        mode_filter_names = ["none"] if mode == "hybrid" else list(filter_names)
+        mode_filter_names = (
+            list(filter_names)
+            if mode == "dense" or hybrid_filters_enabled
+            else ["none"]
+        )
+        mode_exact_values = [False] if mode == "hybrid" else [bool(value) for value in exact_values]
         plan.extend(
             itertools.product(
                 [mode],
                 mode_filter_names,
                 mode_top_k_values,
                 mode_rrf_k_values,
+                mode_exact_values,
                 _flatten_targets(targets_by_dataset),
             )
         )
 
     def process(entry: tuple) -> dict[str, Any]:
-        retrieval_mode, filter_name, top_k, rrf_k, (dataset, target) = entry
+        retrieval_mode, filter_name, top_k, rrf_k, exact, (dataset, target) = entry
         filters = filter_variants[filter_name]
         retrieved = cache.get_or_retrieve(
             dataset=dataset,
@@ -140,6 +188,7 @@ def run_direct_experiment(
             filters=filters,
             rrf_k_default=rrf_k_default,
             index_manifest=index_manifest,
+            exact=exact,
         )
         row = evaluate_candidate_set(
             target=target,
@@ -151,6 +200,8 @@ def run_direct_experiment(
             rrf_k=rrf_k if retrieval_mode == "hybrid" else None,
             filter_name=filter_name,
             metadata_filters=filters,
+            exact=exact,
+            collection_identity=collection_identity,
         ).to_json_record()
         row["dataset"] = dataset
         # Flatten article_hit_at_k dicts into top-level boolean columns so the
@@ -176,6 +227,9 @@ def summarize_direct(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate direct/hybrid rows per (dataset, mode, filter, top_k, rrf_k)."""
     if df.empty:
         return df
+    working = df.copy()
+    if "exact" not in working:
+        working["exact"] = False
     agg_kwargs: dict[str, tuple[str, str]] = {
         "questions": ("qid", "nunique"),
         "article_hit": ("direct_article_hit", "mean"),
@@ -186,15 +240,18 @@ def summarize_direct(df: pd.DataFrame) -> pd.DataFrame:
         "filter_excluded_rate": ("filter_excluded", "mean"),
         "avg_best_answer_overlap": ("direct_best_expected_article_answer_overlap", "mean"),
     }
-    for column in df.columns:
+    for column in working.columns:
         if column.startswith("direct_article_hit_at_"):
             suffix = column[len("direct_article_hit_at_") :]
             agg_kwargs[f"article_hit_at_{suffix}"] = (column, "mean")
     return (
-        df.groupby(["dataset", "retrieval_mode", "filter_name", "top_k", "rrf_k"], dropna=False)
+        working.groupby(
+            ["dataset", "retrieval_mode", "filter_name", "top_k", "rrf_k", "exact"],
+            dropna=False,
+        )
         .agg(**agg_kwargs)
         .reset_index()
-        .sort_values(["dataset", "retrieval_mode", "filter_name", "top_k", "rrf_k"])
+        .sort_values(["dataset", "retrieval_mode", "filter_name", "top_k", "rrf_k", "exact"])
     )
 
 
@@ -202,9 +259,20 @@ def summarize_direct_by_level(df: pd.DataFrame) -> pd.DataFrame:
     """Same as `summarize_direct`, broken down by question difficulty level."""
     if df.empty:
         return df
+    working = df.copy()
+    if "exact" not in working:
+        working["exact"] = False
     return (
-        df.groupby(
-            ["dataset", "level", "retrieval_mode", "filter_name", "top_k", "rrf_k"],
+        working.groupby(
+            [
+                "dataset",
+                "level",
+                "retrieval_mode",
+                "filter_name",
+                "top_k",
+                "rrf_k",
+                "exact",
+            ],
             dropna=False,
         )
         .agg(
@@ -222,3 +290,28 @@ def _flatten_targets(
     targets_by_dataset: Mapping[str, Sequence[QuestionTarget]],
 ) -> list[tuple[str, QuestionTarget]]:
     return [(dataset, target) for dataset, targets in targets_by_dataset.items() for target in targets]
+
+
+def build_collection_identity(
+    collection_name: str,
+    index_manifest: Mapping[str, Any],
+) -> str:
+    """Build a stable identity for the collection and manifest under evaluation."""
+    payload = {
+        "collection_name": str(collection_name),
+        "index_manifest": _stable_json_value(dict(index_manifest)),
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _stable_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _stable_json_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_stable_json_value(item) for item in value]
+    if isinstance(value, set):
+        return sorted((_stable_json_value(item) for item in value), key=str)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)

@@ -12,14 +12,12 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 
-from legal_rag.advanced_graph_rag.models import RerankOutput
-from legal_rag.advanced_graph_rag.prompts import RERANK_PROMPT_VERSION, build_rerank_prompt
-from legal_rag.advanced_graph_rag.retrieval import search_dense, search_hybrid
 from legal_rag.indexing.embeddings import SupportsEmbedding
 from legal_rag.oracle_context_evaluation.io import (
     now_utc,
     prepare_tmp_output_dir,
     replace_output_dir,
+    sha256_file,
     sha256_text,
     write_json,
 )
@@ -35,6 +33,11 @@ from .models import (
     QuestionTarget,
     ReferenceTarget,
     RerankEvaluationRow,
+    FilterExactControlRow,
+    FilterImpactRow,
+    FilterReferenceAuditRow,
+    FILTER_AUDIT_PROMPT_VERSION,
+    FILTER_AUDIT_SCHEMA_VERSION,
     RetrievalEvaluationRow,
     RetrievalScenarioSummary,
 )
@@ -97,21 +100,53 @@ class ChunkAvailabilityIndex:
     def __init__(self, chunks: Sequence[dict[str, Any]]) -> None:
         self._chunks_by_article: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._chunks_by_law: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._chunks_by_passage: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for chunk in chunks:
             article_id = str(chunk.get("article_id") or "")
             law_id = str(chunk.get("law_id") or "")
+            passage_id = str(chunk.get("passage_id") or "")
             if article_id:
                 self._chunks_by_article[article_id].append(dict(chunk))
             if law_id:
                 self._chunks_by_law[law_id].append(dict(chunk))
+            if passage_id:
+                self._chunks_by_passage[passage_id].append(dict(chunk))
 
     def article_chunk_count(self, article_ids: Sequence[str], *, filters: dict[str, Any] | None = None) -> int:
         """Count chunks for the selected articles, optionally after metadata filters."""
         return self._count(self._chunks_by_article, article_ids, filters=filters)
 
+    def article_chunks(
+        self,
+        article_ids: Sequence[str],
+        *,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return copied chunks for selected articles, optionally filtered."""
+        selected: list[dict[str, Any]] = []
+        for article_id in _unique(article_ids):
+            selected.extend(dict(chunk) for chunk in self._chunks_by_article.get(article_id, []))
+        if not filters:
+            return selected
+        return [chunk for chunk in selected if payload_matches_filters(chunk, filters)]
+
     def law_chunk_count(self, law_ids: Sequence[str], *, filters: dict[str, Any] | None = None) -> int:
         """Count chunks for the selected laws, optionally after metadata filters."""
         return self._count(self._chunks_by_law, law_ids, filters=filters)
+
+    def passage_chunks(
+        self,
+        passage_ids: Sequence[str],
+        *,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return copied chunks for selected passages, optionally filtered."""
+        selected: list[dict[str, Any]] = []
+        for passage_id in _unique(passage_ids):
+            selected.extend(dict(chunk) for chunk in self._chunks_by_passage.get(passage_id, []))
+        if not filters:
+            return selected
+        return [chunk for chunk in selected if payload_matches_filters(chunk, filters)]
 
     def _count(
         self,
@@ -178,9 +213,14 @@ def retrieve_direct(
     static_filters: dict[str, Any],
     rrf_k: int,
     index_manifest: dict[str, Any],
+    exact: bool = False,
 ) -> list[RetrievedChunkRecord]:
     """Run dense or hybrid retrieval using the advanced RAG helpers."""
+    from legal_rag.advanced_graph_rag.retrieval import search_dense, search_hybrid
+
     if retrieval_mode == "hybrid":
+        if exact:
+            raise ValueError("Exact-search control is supported only for dense retrieval")
         return search_hybrid(
             client,
             collection_name=collection_name,
@@ -199,6 +239,7 @@ def retrieve_direct(
             query_text=query_text,
             limit=limit,
             static_filters=static_filters,
+            exact=exact,
         )
     raise ValueError(f"Unsupported retrieval_mode: {retrieval_mode!r}")
 
@@ -214,6 +255,8 @@ def evaluate_candidate_set(
     rrf_k: int | None = None,
     filter_name: str,
     metadata_filters: dict[str, Any],
+    exact: bool = False,
+    collection_identity: str = "",
     graph_expansion_enabled: bool = False,
     graph_expansion_seed_k: int | None = None,
     max_chunks_per_expanded_law: int | None = None,
@@ -256,6 +299,8 @@ def evaluate_candidate_set(
         rrf_k=rrf_k,
         filter_name=filter_name,
         metadata_filters=dict(metadata_filters),
+        exact=exact,
+        collection_identity=collection_identity,
         graph_expansion_enabled=graph_expansion_enabled,
         graph_expansion_seed_k=graph_expansion_seed_k,
         max_chunks_per_expanded_law=max_chunks_per_expanded_law,
@@ -616,9 +661,16 @@ def score_rerank_candidates(
     model: str,
     timeout_seconds: int,
     cache: RerankCache,
-    prompt_version: str = RERANK_PROMPT_VERSION,
+    prompt_version: str | None = None,
 ) -> tuple[list[int], bool]:
     """Get LLM rerank scores for candidates, reusing a versioned JSONL cache."""
+    from legal_rag.advanced_graph_rag.models import RerankOutput
+    from legal_rag.advanced_graph_rag.prompts import (
+        RERANK_PROMPT_VERSION,
+        build_rerank_prompt,
+    )
+
+    prompt_version = prompt_version or RERANK_PROMPT_VERSION
     candidate_list = list(candidates)
     candidate_chunk_ids = [chunk.chunk_id for chunk in candidate_list]
     key = RerankCache.make_key(
@@ -672,6 +724,10 @@ def write_run_artifacts(
     sweep_graph: Sequence[Mapping[str, Any]],
     sweep_rerank: Sequence[Mapping[str, Any]],
     sweep_query_rewriting: Sequence[Mapping[str, Any]] = (),
+    filter_reference_audit: Sequence[Mapping[str, Any]] = (),
+    filter_exclusions: Sequence[Mapping[str, Any]] = (),
+    filter_impact: Sequence[Mapping[str, Any]] = (),
+    filter_exact_control: Sequence[Mapping[str, Any]] = (),
     manifest: Mapping[str, Any],
 ) -> Path:
     """Persist scenarios, sweep tables and manifest under output_dir atomically."""
@@ -691,7 +747,40 @@ def write_run_artifacts(
             sweep_query_rewriting,
             default_fields=["dataset", *QueryRewriteEvaluationRow.model_fields],
         )
-        write_json(tmp_dir / "manifest.json", _augment_manifest(manifest))
+        has_filter_audit = any(
+            (filter_reference_audit, filter_exclusions, filter_impact, filter_exact_control)
+        )
+        if has_filter_audit:
+            _write_csv(
+                tmp_dir / "filter_reference_audit.csv",
+                filter_reference_audit,
+                default_fields=FilterReferenceAuditRow.model_fields,
+            )
+            _write_csv(
+                tmp_dir / "filter_exclusions.csv",
+                filter_exclusions,
+                default_fields=FilterReferenceAuditRow.model_fields,
+            )
+            _write_csv(
+                tmp_dir / "filter_impact.csv",
+                filter_impact,
+                default_fields=FilterImpactRow.model_fields,
+            )
+            _write_csv(
+                tmp_dir / "filter_exact_control.csv",
+                filter_exact_control,
+                default_fields=FilterExactControlRow.model_fields,
+            )
+        augmented_manifest = _augment_manifest(manifest)
+        if has_filter_audit:
+            augmented_manifest.setdefault("filter_audit_schema_version", FILTER_AUDIT_SCHEMA_VERSION)
+            augmented_manifest.setdefault("filter_audit_prompt_version", FILTER_AUDIT_PROMPT_VERSION)
+            output_hashes = dict(augmented_manifest.get("output_hashes") or {})
+            for path in sorted(tmp_dir.iterdir()):
+                if path.is_file():
+                    output_hashes[path.name] = sha256_file(path)
+            augmented_manifest["output_hashes"] = output_hashes
+        write_json(tmp_dir / "manifest.json", augmented_manifest)
         replace_output_dir(tmp_dir, target)
     except Exception:
         if tmp_dir.exists():

@@ -6,7 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-RETRIEVAL_EVALUATION_SCHEMA_VERSION = "retrieval-evaluation-v4"
+RETRIEVAL_EVALUATION_SCHEMA_VERSION = "retrieval-evaluation-v5"
+FILTER_AUDIT_SCHEMA_VERSION = "filter-audit-v1"
+FILTER_AUDIT_PROMPT_VERSION = "none-v1"
 
 
 class _Record(BaseModel):
@@ -69,6 +71,8 @@ class RetrievalEvaluationRow(_Record):
     rrf_k: int | None = Field(default=None, gt=0)
     filter_name: str
     metadata_filters: dict[str, Any]
+    exact: bool = False
+    collection_identity: str = ""
     graph_expansion_enabled: bool
     graph_expansion_seed_k: int | None
     max_chunks_per_expanded_law: int | None
@@ -183,3 +187,102 @@ class RetrievalScenarioSummary(_Record):
     n_filter_excluded: int = Field(ge=0)
     config: dict[str, Any]
     delta_vs_baseline: float | None
+
+
+class FilterReferenceAuditRow(_Record):
+    """Static coverage of one expected article under one metadata filter."""
+
+    schema_version: Literal["filter-audit-v1"] = FILTER_AUDIT_SCHEMA_VERSION
+    qid: str
+    datasets: list[str]
+    level: str
+    reference_text: str
+    law_id: str
+    article_id: str
+    filter_name: str
+    metadata_filters: dict[str, Any]
+    exact: bool = False
+    collection_identity: str
+    total_target_chunks: int = Field(ge=0)
+    retained_target_chunks: int = Field(ge=0)
+    coverage_ratio: float = Field(ge=0.0, le=1.0)
+    coverage_status: Literal["fully_eligible", "partially_eligible", "fully_excluded"]
+    active_target_chunks: int = Field(ge=0)
+    retained_active_target_chunks: int = Field(ge=0)
+    active_slice: bool
+    unknown_status_present: bool
+    unknown_status_excluded: bool
+    law_statuses: list[str]
+    article_statuses: list[str]
+    passage_statuses: list[str]
+    content_availability: list[str]
+    status_event_ids: list[str]
+    status_rule_ids: list[str]
+    expected_reference_validity: str | None = None
+    answer_support_relation: str | None = None
+    answer_supporting_law_id: str | None = None
+    answer_supporting_article_id: str | None = None
+    answer_supporting_passage_id: str | None = None
+    supporting_passage_retained: bool | None = None
+    temporal_scope_flag: str | None = None
+    review_rationale: str | None = None
+
+
+class FilterImpactRow(_Record):
+    """Paired retrieval impact and independent filter decision axes."""
+
+    schema_version: Literal["filter-audit-v1"] = FILTER_AUDIT_SCHEMA_VERSION
+    dataset: str
+    retrieval_mode: Literal["dense", "hybrid"]
+    top_k: int = Field(gt=0)
+    rrf_k: int | None = Field(default=None, gt=0)
+    filter_name: str
+    metadata_filters: dict[str, Any]
+    exact: bool = False
+    n_questions: int = Field(ge=0)
+    article_success_pct: float = Field(ge=0.0, le=100.0)
+    baseline_article_success_pct: float = Field(ge=0.0, le=100.0)
+    article_success_delta_pp: float
+    article_success_ci_low_pp: float
+    article_success_ci_high_pp: float
+    article_success_ci_level: float = Field(gt=0.0, lt=1.0)
+    law_success_pct: float = Field(ge=0.0, le=100.0)
+    baseline_law_success_pct: float = Field(ge=0.0, le=100.0)
+    law_success_delta_pp: float
+    article_mrr: float = Field(ge=0.0, le=1.0)
+    baseline_article_mrr: float = Field(ge=0.0, le=1.0)
+    article_mrr_delta: float
+    article_mrr_ci_low: float
+    article_mrr_ci_high: float
+    gains: int = Field(ge=0)
+    losses: int = Field(ge=0)
+    ties: int = Field(ge=0)
+    total_reference_targets: int = Field(ge=0)
+    fully_eligible_targets: int = Field(ge=0)
+    partially_eligible_targets: int = Field(ge=0)
+    fully_excluded_targets: int = Field(ge=0)
+    benchmark_full_coverage: bool
+    active_slice_safety: Literal["safe", "unsafe", "unresolved"]
+    retrieval_effect: Literal["beneficial", "harmful", "inconclusive"]
+    bootstrap_supported: bool
+
+
+class FilterExactControlRow(_Record):
+    """Aggregate ANN-versus-exact dense-search control."""
+
+    schema_version: Literal["filter-audit-v1"] = FILTER_AUDIT_SCHEMA_VERSION
+    dataset: str
+    top_k: int = Field(gt=0)
+    filter_name: str
+    metadata_filters: dict[str, Any]
+    n_questions: int = Field(ge=0)
+    mean_chunk_overlap: float = Field(ge=0.0, le=1.0)
+    ann_article_success_pct: float = Field(ge=0.0, le=100.0)
+    exact_article_success_pct: float = Field(ge=0.0, le=100.0)
+    article_success_delta_pp: float
+    ann_law_success_pct: float = Field(ge=0.0, le=100.0)
+    exact_law_success_pct: float = Field(ge=0.0, le=100.0)
+    law_success_delta_pp: float
+    ann_article_mrr: float = Field(ge=0.0, le=1.0)
+    exact_article_mrr: float = Field(ge=0.0, le=1.0)
+    article_mrr_delta: float
