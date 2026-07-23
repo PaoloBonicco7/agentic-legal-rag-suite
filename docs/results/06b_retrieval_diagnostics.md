@@ -1,16 +1,19 @@
-# 06b — Retrieval diagnostics (risultati)
+# 06b — Retrieval diagnostics e audit dei filtri (risultati)
 
-Esperimenti retrieval-only usati per scegliere la configurazione da promuovere in Advanced RAG. Lo
-step isola la qualità del retrieval dalla generazione: misura se i riferimenti legali attesi
-compaiono tra i candidati, in quale posizione, e quali leve meritano una run end-to-end. Una leva è
-**promossa** solo se migliora `article_hit_pct` di almeno +1pp su 100 domande, con configurazione
-riproducibile dal manifest.
+Il documento separa due lineage:
 
-Run di riferimento: `data/retrieval_eval_runs/diagnostic_full_utopia_throttled__20260525T091921Z/`
-(profilo `full`, schema `retrieval-evaluation-v4`). Indice `legal_chunks_bge_m3` (76.467 chunk,
-BGE-M3 dense 1024 + sparse nativo). Metriche: `article_hit_pct` (primaria), `law_hit_pct`,
-`article_mrr`. Definizioni nella [spec 06b](../specs/06b_retrieval_diagnostics.md); metodo in
+- il baseline storico v1, usato per scegliere hybrid e multi-query nella run Advanced RAG;
+- l'audit di vigenza v2, che rivaluta esclusivamente i filtri senza promuoverli automaticamente.
+
+Definizioni nella [spec 06b](../specs/06b_retrieval_diagnostics.md); metodo in
 [note/06b](../notes/06b_retrieval_diagnostics_methodology.md).
+
+## Baseline storico v1
+
+Run: `data/retrieval_eval_runs/diagnostic_full_utopia_throttled__20260525T091921Z/`
+(`retrieval-evaluation-v4`). Indice `legal_chunks_bge_m3`, 76.467 chunk, BGE-M3 dense 1024 +
+sparse. Le tabelle di questa sezione sono evidenza storica e non descrivono il nuovo artefatto
+status-v2.
 
 I due dataset (`mcq`, `no_hint`) condividono lo stesso stem nelle chiamate retrieval, quindi le
 metriche coincidono row-per-row: le tabelle sotto valgono per entrambi salvo dove indicato.
@@ -48,11 +51,28 @@ Alzare `top_k` migliora il recall in modo monotono (+15pp da 10 a 100) ma l'MRR 
 problema non è solo recall, è **ranking**. `dense@10` è la baseline dei delta, `dense@100` il recall
 ceiling senza riformulazioni.
 
-### B — Filtri metadata · scartato
+### B — Filtri metadata v1 · non promossi
 
-`law_status=current` esclude 4 domande i cui riferimenti puntano a leggi abrogate e non alza il hit
-(−2pp `article_hit`). Il corpus Valle d'Aosta è già dominato da leggi correnti: il filtro toglie
-segnale invece di aggiungerlo (`promote_filter=false`).
+Il confronto Dense@10 storico su 100 domande era:
+
+| filtro | Article Success |
+|---|---:|
+| none | 73 |
+| `law_status=current` | 71 |
+| `article_status=current` | 69 |
+| vista corrente legge+articolo | 67 |
+
+Il peggioramento era reale, ma la precedente spiegazione causale era errata. Il corpus v2 non è
+dominato da leggi correnti: soltanto 836 su 3.145 sono `current`. Le esclusioni mescolavano quattro
+fenomeni distinti:
+
+- sovraclassificazione `past` di articoli con soli commi o lettere cessati;
+- riferimenti realmente storici (`eval-0013`–`eval-0016`);
+- due qrel non allineati al passaggio che supporta la risposta (`eval-0013`, `eval-0076`);
+- perdita del retriever e, potenzialmente, approssimazione ANN.
+
+Per questo `metadata_filters_enabled=false` resta la scelta storica conservativa, ma il risultato v1
+non dimostra che ogni filtro v2 sia inutilizzabile.
 
 ### C — Graph expansion · scartato
 
@@ -99,7 +119,7 @@ Pilot di 30 domande/dataset, `failure_rate=0%`. Strategie confrontate sopra l'hy
 100% sul pilot. La diversità delle riformulazioni copre meglio il vocabolario normativo della stessa
 intent. `rewrite` resta un fallback più economico (una sola query).
 
-## Waterfall
+## Waterfall storico
 
 | stage | scenario | article_hit | δ vs dense@10 | esito |
 |---|---|---:|---:|---|
@@ -114,7 +134,7 @@ intent. `rewrite` resta un fallback più economico (una sola query).
 La fase promuove **due** leve: hybrid (F) come retrieval di base e multi-query (H) come
 trasformazione della richiesta.
 
-## Configurazione raccomandata
+## Configurazione storicamente raccomandata
 
 ```json
 {
@@ -145,9 +165,72 @@ graph e rerank restano nel config come default disattivati, riattivabili con un 
   ritengono rilevanti.
 - **Multi-query aggiunge un guadagno indipendente** (+4.3pp sopra l'hybrid), al costo di una
   chiamata LLM per domanda con cache versionata.
-- **Le leve scartate hanno costi senza beneficio retrieval-only**: rerank perde recall, graph
-  aggiunge ~99.7% di rumore, i filtri droppano domande valide. Promuovere solo le due leve con
-  guadagno netto è coerente col principio _simplicity first_ del progetto.
+- **Le leve scartate hanno costi senza beneficio retrieval-only nel run v1**: rerank perde recall,
+  graph aggiunge ~99.7% di rumore e i filtri v1 riducono l'Article Success. La natura delle
+  esclusioni dei filtri è riesaminata separatamente nell'audit v2.
+
+## Audit di vigenza v2
+
+L'audit usa `retrieval-evaluation-v5`, `filter-audit-v1` e prompt
+`none-v1`. Non esegue LLM, reranking, graph expansion o query rewriting. L'indice isolato è
+`legal_chunks_bge_m3_status_v2`, costruito in Qdrant locale da 76.499 chunk con
+`laws-preprocessing-v2` e `legal-status-rules-v1`.
+
+La provenienza clean verificata è:
+
+- corpus SHA-256:
+  `aa46ea3758c1de5596a8902b95e90cdfc6d08fbc2956086495a020680be22459`;
+- clean manifest SHA-256:
+  `65eb3cdca461a2a8d894959be9df3a34f3e03cc975d6df08c40505111da51b23`;
+- chunk SHA-256:
+  `dacbb03fd3debfd272031226ad539100cc228141acca94fba304fa28c663cb95`;
+- eventi SHA-256:
+  `ee740ae7b403a2bf6f4b666e59e6b243f493963ea047436bcead322fd4973917`.
+
+Il preflight e il postflight ricalcolano gli hash reali, richiedono una collection full da 76.499
+point e verificano che l'identità del dataset sia uniforme in tutti i payload. Una collection
+sample viene rifiutata.
+
+### Disegno dell'esperimento
+
+- Dataset: MCQ e no-hint.
+- Retrieval: Dense e Hybrid RRF (`rrf_k=30`).
+- Cutoff: 5, 10, 20, 50, 100.
+- Filtri: `none`, i tre legacy, status `current|partial` separati a livello legge/articolo/passaggio,
+  vista `current` e vista `not_explicitly_past`.
+- Metriche: Article Success, Law Success e MRR.
+- Delta: sempre appaiato a `none` sullo stesso indice e sugli stessi QID.
+- Inferenza primaria: no-hint Hybrid@10 sulle due viste, bootstrap appaiato con 10.000 repliche,
+  seed 42 e CI Bonferroni 97,5% per Article Success.
+- Controllo: Dense ANN-vs-exact a k=10/50 per `none` e per le due viste.
+
+I verdetti sono separati in `benchmark_full_coverage`, `active_slice_safety`,
+`retrieval_effect` e `bootstrap_supported`. Nessuno di essi modifica automaticamente le
+configurazioni RAG.
+
+### Dieci riferimenti revisionati
+
+| QID | riferimento atteso v2 | relazione risposta | supporto corpus-only | stato supporto | viste supporto |
+|---|---|---|---|---|---|
+| eval-0002 | LR 5/2000 art. 2 `partial` | expected | art. 2 c. 2 | `current` | historical, not_explicitly_past |
+| eval-0003 | LR 5/2000 art. 16 `unknown` | expected | art. 16 c. 2 | `current` | historical, not_explicitly_past |
+| eval-0013 | LR 44/1991 art. 2 `past` | elsewhere | art. 3 c. 3 | `past` | historical |
+| eval-0014 | LR 44/1991 art. 2 `past` | expected | art. 2 | `past` | historical |
+| eval-0015 | LR 44/1991 art. 3 `past` | expected | art. 3 c. 2 | `past` | historical |
+| eval-0016 | LR 44/1991 art. 3 `past` | expected | art. 3 c. 1 lett. d | `past` | historical |
+| eval-0073 | LR 56/1983 art. 1 `partial` | expected | art. 1 c. 1 | `current` | historical, not_explicitly_past |
+| eval-0075 | LR 56/1983 art. 1 `partial` | expected | art. 1 c. 3 | `current` | historical, not_explicitly_past |
+| eval-0076 | LR 56/1983 art. 5 `past` | elsewhere | art. 3 c. 5 | `current` | historical, not_explicitly_past |
+| eval-0100 | LR 5/2020 art. 5 `partial` | expected | art. 5 c. 1 | `current` | historical, current, not_explicitly_past |
+
+`eval-0003` non è mai interamente `past`: il comma 2 è attivo, mentre una parentesi quadra nel
+comma 3 resta evidenza editoriale ambigua. Per `eval-0100`, l'applicabilità temporale nel 2020 non
+è risolvibile attraverso la sola vigenza del corpus.
+
+### Risultati retrieval
+
+Questa sezione viene popolata esclusivamente dal run full terminale; nessuna metrica è derivata
+dalla collection sample.
 
 ## Riferimenti
 

@@ -1,6 +1,6 @@
 # Inventario degli output in `data`
 
-Data revisione: 2026-06-14.
+Data revisione: 2026-07-23.
 
 Questa nota fotografa lo stato locale della cartella `data/`, separando sorgenti, output
 riproducibili, run di riferimento e candidati di pulizia. La revisione è basata su:
@@ -12,11 +12,12 @@ riproducibili, run di riferimento e candidati di pulizia. La revisione è basata
 
 ## Sintesi
 
-`data/` pesa circa **8.3 GB**. Il peso è quasi tutto in:
+`data/` pesa circa **6.4 GB** al momento della revisione. Il peso è quasi tutto in:
 
-- `data/indexes/`: **4.2 GB**, indici Qdrant locali/server;
+- `data/indexes/`: **2.0 GB** più la full run status-v2 in costruzione, indici Qdrant locali/server;
 - `data/retrieval_eval_runs/`: **3.7 GB**, diagnostics retrieval-only e storico di sweep;
-- `data/laws_dataset_clean/`: **289 MB**, dataset pulito generato dai sorgenti HTML.
+- `data/laws_dataset_clean/`: **289 MB**, baseline clean v1;
+- `data/laws_dataset_clean_status_v2/`: **321 MB**, clean v2 dell'audit.
 
 Le run end-to-end finali sono leggere (`data/rag_runs/` pesa circa **10 MB**) e vanno tenute:
 costano poco e documentano direttamente il confronto no-RAG / simple RAG / advanced RAG.
@@ -48,7 +49,7 @@ La run diagnostics di riferimento è:
 | Path | Dimensione | Stato | Motivo |
 |---|---:|---|---|
 | `data/laws_html/` | 40 MB | tenere | Corpus HTML sorgente. Il manifest del preprocessing registra 3.145 leggi valide; nella directory ci sono anche file non sorgente come `.DS_Store`. |
-| `data/evaluation/` | 68 KB | tenere | CSV sorgente versionati (`questions.csv`, `questions_no_hint.csv`). Sono l'autorita del benchmark. |
+| `data/evaluation/` | 68 KB | tenere | CSV sorgente versionati e review di vigenza. Le domande/qrel sono l'autorità del benchmark, non verità giuridica. |
 
 Nota: `data/laws_html/` è ignorata da `.gitignore`, ma il progetto la tratta come sorgente locale
 di prima classe. Non cancellarla se si vuole poter rigenerare il dataset pulito.
@@ -58,12 +59,16 @@ di prima classe. Non cancellarla se si vuole poter rigenerare il dataset pulito.
 | Path | Dimensione | Stato | Contenuto |
 |---|---:|---|---|
 | `data/laws_dataset_clean/` | 289 MB | tenere | Output step 01: `laws`, `articles`, `passages`, `chunks`, `edges`, `notes`, manifest e quality report. |
+| `data/laws_dataset_clean_status_v2/` | 321 MB | tenere | Output v2 dell'audit: aggiunge status per passaggio, eventi deterministici, regole e viste. |
 | `data/evaluation_clean/` | 124 KB | tenere | Output step 02: 100 MCQ + 100 no-hint normalizzate, manifest e quality report. |
 
 Manifest principali:
 
 - `data/laws_dataset_clean/manifest.json`: `ready_for_indexing=true`, 76.467 chunk, 35.159 edge, 17.774 articoli.
+- `data/laws_dataset_clean_status_v2/manifest.json`: `ready_for_indexing=true`, 76.499 chunk,
+  3.310 eventi, contratti `laws-preprocessing-v2` / `legal-status-rules-v1`.
 - `data/evaluation_clean/evaluation_manifest.json`: `ready_for_evaluation=true`, 100 MCQ e 100 no-hint allineate.
+- `data/evaluation/vigency_reference_review.csv`: review corpus-only di 10 QID; non modifica qrel o scoring.
 
 ### Run usate nel confronto di tesi
 
@@ -77,15 +82,15 @@ Manifest principali:
 Queste run sono referenziate da `docs/results/00_overview.md`, `docs/results/04_no_rag.md`,
 `docs/results/05_simple_rag.md` e `docs/results/06_advanced_rag.md`.
 
-### Indice attivo
+### Indice storico delle run di tesi
 
 | Path | Dimensione | Stato | Motivo |
 |---|---:|---|---|
 | `data/indexing_runs/bge_m3_full_20260523_095655/` | 23 KB | tenere | Manifest della full run BGE-M3 usata dalle run recenti. |
 | `data/indexing_runs/bge_m3_full_20260523_095655_progress.jsonl` | 390 KB | tenere o archiviare | Log progressivo della stessa full run; utile per audit, non richiesto a runtime. |
-| `data/indexes/qdrant_server/` | 2.1 GB | tenere | Storage Qdrant server della collection `legal_chunks_bge_m3`, 76.467 point, dense 1024 + sparse. |
+| `data/indexes/qdrant_server/` | 615 MB | tenere | Storage Qdrant server della collection `legal_chunks_bge_m3`, 76.467 point, dense 1024 + sparse. |
 
-Il manifest attivo registra:
+Il manifest storico registra:
 
 - embedding `BAAI/bge-m3`;
 - hybrid abilitato;
@@ -93,6 +98,17 @@ Il manifest attivo registra:
 - `selected=indexed=collection_points=76467`;
 - `failure_count=0`;
 - `ready_for_retrieval=true`.
+
+### Lineage isolato dell'audit di vigenza
+
+| Path | Stato | Motivo |
+|---|---|---|
+| `data/indexing_runs/status_v2_sample/` | tenere | Smoke da 16 point del contratto `indexing-contract-v2`; non è evidenza retrieval. |
+| `data/indexing_runs/status_v2_full_20260723/` | tenere quando terminale | Manifest full dell'audit, da preservare con hash e profilo payload. |
+| `data/indexes/qdrant_status_v2/` | tenere | Collection locale isolata `legal_chunks_bge_m3_status_v2`, 76.499 point attesi. |
+
+Il notebook 06b rifiuta esplicitamente l'indice sample: corpus, clean manifest, file reali,
+manifest indice e identità live della collection devono riconciliarsi prima e dopo lo sweep.
 
 ## Miglioramenti documentati
 
@@ -138,7 +154,8 @@ Hybrid dense + sparse via RRF è promosso perché porta `article_hit` da `73.0%`
 
 Le run diagnostics documentano anche cosa non promuovere:
 
-- `metadata_filters_enabled`: scartato perché `law_status=current` esclude domande valide;
+- `metadata_filters_enabled`: non promosso nel baseline v1; l'audit v2 distingue riferimenti
+  storici, qrel errati, status sovraclassificati e perdita del retriever;
 - `graph_expansion_enabled`: scartato per rumore elevato (`expansion_noise_ratio` circa 99.7%);
 - `rerank_enabled`: scartato perché declassa articoli corretti e perde recall.
 
@@ -238,7 +255,7 @@ Per recuperare spazio senza perdere la traccia scientifica, la strategia miglior
 
 ### Indici Qdrant locali
 
-`data/indexes/qdrant/` pesa circa **2.1 GB** e contiene:
+`data/indexes/qdrant/` pesa circa **1.4 GB** e contiene:
 
 - `collection/legal_chunks_bge_m3/` (~991 MB);
 - `collection/legal_chunks_bge_m3_sample/` (~15 MB);
@@ -259,7 +276,7 @@ Quindi `data/indexes/qdrant/` è un buon candidato di archiviazione, ma non va c
 Non cancellerei le run principali né i dataset puliti. Per mettere ordine senza rischiare la
 riproducibilita:
 
-1. rimuovere subito `.DS_Store` e directory `.tmp`;
+1. rimuovere subito `.DS_Store` e soltanto le directory `.tmp` non associate a processi attivi;
 2. rimuovere o archiviare le run senza manifest e le cartelle `*_smoke` / `_debug_*`;
 3. archiviare esternamente i vecchi `default__20260511*` pesanti, lasciando nel repo solo i manifest
    e la sintesi in `docs/results/06b_retrieval_diagnostics.md`;
@@ -271,8 +288,12 @@ riproducibilita:
 Dopo una pulizia conservativa, dovrebbero restare almeno:
 
 - sorgenti: `data/laws_html/`, `data/evaluation/`;
-- dataset puliti: `data/laws_dataset_clean/`, `data/evaluation_clean/`;
-- indice attivo: `data/indexes/qdrant_server/`, `data/indexing_runs/bge_m3_full_20260523_095655/`;
+- dataset puliti: `data/laws_dataset_clean/`, `data/laws_dataset_clean_status_v2/`,
+  `data/evaluation_clean/`;
+- indice storico: `data/indexes/qdrant_server/`,
+  `data/indexing_runs/bge_m3_full_20260523_095655/`;
+- indice audit: `data/indexes/qdrant_status_v2/`,
+  `data/indexing_runs/status_v2_full_20260723/`;
 - confronto finale: `data/baseline_runs/no_rag/`, `data/rag_runs/simple/`,
   `data/rag_runs/advanced/full_100__answer_slurm_gpt_oss_120b__judge_slurm_gpt_oss_120b__a4_combined_best_v2/`,
   `data/evaluation_runs/oracle_context/`;
