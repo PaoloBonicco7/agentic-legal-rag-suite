@@ -33,6 +33,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qdrant-restore-indexing-threshold-kb", type=int, default=20_000)
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--non-strict", action="store_true")
+    parser.add_argument("--require-clean-worktree", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
         "qdrant_restore_indexing_threshold_kb": args.qdrant_restore_indexing_threshold_kb,
         "env_file": args.env_file,
         "strict": not args.non_strict,
+        "require_clean_worktree": args.require_clean_worktree,
     }
     if args.qdrant_url:
         data["qdrant_url"] = args.qdrant_url

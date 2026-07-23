@@ -9,11 +9,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-INDEXING_SCHEMA_VERSION = "indexing-contract-v1"
+INDEXING_SCHEMA_VERSION = "indexing-contract-v2"
 LOCAL_DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 UTOPIA_DEFAULT_EMBEDDING_MODEL = "SLURM.nomic-embed-text:latest"
 
-REQUIRED_PAYLOAD_FIELDS = {
+SOURCE_CHUNK_REQUIRED_FIELDS = {
     "chunk_id",
     "passage_id",
     "article_id",
@@ -24,6 +24,10 @@ REQUIRED_PAYLOAD_FIELDS = {
     "law_title",
     "law_status",
     "article_status",
+    "passage_status",
+    "content_availability",
+    "status_event_ids",
+    "status_rule_ids",
     "article_label_norm",
     "passage_label",
     "structure_path",
@@ -33,12 +37,23 @@ REQUIRED_PAYLOAD_FIELDS = {
     "inbound_law_ids",
     "outbound_law_ids",
     "relation_types",
-    "content_hash",
+    "text_for_embedding",
 }
+GENERATED_PAYLOAD_FIELDS = {
+    "content_hash",
+    "payload_hash",
+    "dataset_source_hash",
+    "dataset_manifest_hash",
+    "dataset_chunks_hash",
+    "preprocessing_schema_version",
+    "status_rules_version",
+}
+REQUIRED_PAYLOAD_FIELDS = (SOURCE_CHUNK_REQUIRED_FIELDS - {"text_for_embedding"}) | GENERATED_PAYLOAD_FIELDS
 
-SOURCE_CHUNK_REQUIRED_FIELDS = REQUIRED_PAYLOAD_FIELDS - {"content_hash"} | {"text_for_embedding"}
 LIST_PAYLOAD_FIELDS = {
     "index_views",
+    "status_event_ids",
+    "status_rule_ids",
     "related_law_ids",
     "inbound_law_ids",
     "outbound_law_ids",
@@ -51,9 +66,29 @@ FILTERABLE_FIELDS = (
     "index_views",
     "article_id",
     "article_status",
+    "passage_status",
+    "content_availability",
     "relation_types",
     "law_date",
     "law_number",
+)
+IDENTITY_PAYLOAD_FIELDS = (
+    "dataset_source_hash",
+    "dataset_manifest_hash",
+    "dataset_chunks_hash",
+    "preprocessing_schema_version",
+    "status_rules_version",
+)
+PROFILE_DISTRIBUTION_FIELDS = (
+    "law_id",
+    "law_status",
+    "article_id",
+    "article_status",
+    "passage_status",
+    "content_availability",
+    "index_views",
+    "relation_types",
+    *IDENTITY_PAYLOAD_FIELDS,
 )
 
 EmbeddingBackend = Literal["local", "utopia"]
@@ -80,6 +115,7 @@ class IndexingConfig(BaseModel):
     chunk_selection_mode: ChunkSelectionMode = "full"
     sample_size: int | None = Field(default=None, gt=0)
     strict: bool = True
+    require_clean_worktree: bool = False
     run_id: str | None = None
     env_file: str | None = ".env"
 

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
-from .models import FILTERABLE_FIELDS, IndexingConfig
+from .hashing import canonical_dumps
+from .models import FILTERABLE_FIELDS, PROFILE_DISTRIBUTION_FIELDS, IndexingConfig
 
 DENSE_VECTOR_NAME = "dense"
 SPARSE_VECTOR_NAME = "sparse"
@@ -25,6 +27,7 @@ class PreparedPoint:
     embedding_text: str
     payload: dict[str, Any]
     content_hash: str
+    payload_hash: str = ""
 
 
 def safe_collection_component(value: str, *, max_len: int = 48) -> str:
@@ -151,6 +154,8 @@ def create_payload_indexes(client: QdrantClient, *, collection_name: str) -> dic
         "index_views": qmodels.PayloadSchemaType.KEYWORD,
         "article_id": qmodels.PayloadSchemaType.KEYWORD,
         "article_status": qmodels.PayloadSchemaType.KEYWORD,
+        "passage_status": qmodels.PayloadSchemaType.KEYWORD,
+        "content_availability": qmodels.PayloadSchemaType.KEYWORD,
         "relation_types": qmodels.PayloadSchemaType.KEYWORD,
         "law_date": qmodels.PayloadSchemaType.KEYWORD,
         "law_number": qmodels.PayloadSchemaType.INTEGER,
@@ -171,16 +176,72 @@ def create_payload_indexes(client: QdrantClient, *, collection_name: str) -> dic
     return statuses
 
 
-def fetch_existing_content_hashes(client: QdrantClient, *, collection_name: str, point_ids: Sequence[str]) -> dict[str, str]:
-    """Return existing content hashes for a set of deterministic point ids."""
-    out: dict[str, str] = {}
+def fetch_existing_hashes(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    point_ids: Sequence[str],
+) -> dict[str, dict[str, str]]:
+    """Return existing content and payload hashes for deterministic point ids."""
+    out: dict[str, dict[str, str]] = {}
     for batch in _chunks(list(point_ids), 256):
-        records = client.retrieve(collection_name=collection_name, ids=list(batch), with_payload=["content_hash"], with_vectors=False)
+        records = client.retrieve(
+            collection_name=collection_name,
+            ids=list(batch),
+            with_payload=["content_hash", "payload_hash"],
+            with_vectors=False,
+        )
         for record in records:
-            value = (record.payload or {}).get("content_hash")
-            if isinstance(value, str) and value:
-                out[str(record.id)] = value
+            payload = record.payload or {}
+            out[str(record.id)] = {
+                "content_hash": str(payload.get("content_hash") or ""),
+                "payload_hash": str(payload.get("payload_hash") or ""),
+            }
     return out
+
+
+def fetch_existing_content_hashes(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    point_ids: Sequence[str],
+) -> dict[str, str]:
+    """Return existing content hashes for compatibility with v1 callers."""
+    return {
+        point_id: hashes["content_hash"]
+        for point_id, hashes in fetch_existing_hashes(
+            client,
+            collection_name=collection_name,
+            point_ids=point_ids,
+        ).items()
+        if hashes["content_hash"]
+    }
+
+
+def set_point_payload(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    point: PreparedPoint,
+    max_retries: int,
+) -> None:
+    """Update one point payload without recomputing or replacing its vectors."""
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(max_retries))):
+        try:
+            client.set_payload(
+                collection_name=collection_name,
+                payload=point.payload,
+                points=[point.point_id],
+                wait=True,
+            )
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < max_retries:
+                time.sleep(min(2**attempt, 5))
+    assert last_error is not None
+    raise last_error
 
 
 def upload_point_batch(
@@ -259,6 +320,73 @@ def validate_no_duplicate_chunk_ids(client: QdrantClient, *, collection_name: st
             break
         offset = next_offset
     return {"ok": not duplicates, "total_points_scanned": scanned, "duplicate_chunk_ids": sorted(duplicates), "duplicate_count": len(duplicates)}
+
+
+def profile_collection_payload(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    required_fields: Sequence[str],
+    distribution_limit: int = 100,
+) -> dict[str, Any]:
+    """Profile required-field coverage and bounded metadata distributions."""
+    fields = tuple(dict.fromkeys((*required_fields, *PROFILE_DISTRIBUTION_FIELDS)))
+    present = Counter[str]()
+    values: dict[str, Counter[str]] = {field: Counter() for field in PROFILE_DISTRIBUTION_FIELDS}
+    decoded_values: dict[str, dict[str, Any]] = {field: {} for field in PROFILE_DISTRIBUTION_FIELDS}
+    total = 0
+    offset: Any = None
+    while True:
+        records, next_offset = client.scroll(
+            collection_name=collection_name,
+            limit=512,
+            offset=offset,
+            with_payload=list(fields),
+            with_vectors=False,
+        )
+        for record in records:
+            total += 1
+            payload = record.payload or {}
+            for field in required_fields:
+                if field in payload and payload[field] is not None:
+                    present[field] += 1
+            for field in PROFILE_DISTRIBUTION_FIELDS:
+                value = payload.get(field)
+                items = value if isinstance(value, list) else [value]
+                for item in items:
+                    if item is None:
+                        continue
+                    key = canonical_dumps(item)
+                    values[field][key] += 1
+                    decoded_values[field][key] = item
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    distributions: dict[str, dict[str, Any]] = {}
+    for field in PROFILE_DISTRIBUTION_FIELDS:
+        ranked = sorted(values[field].items(), key=lambda item: (-item[1], item[0]))
+        bounded = ranked[:distribution_limit]
+        distributions[field] = {
+            "distinct_count": len(ranked),
+            "values": [
+                {"value": decoded_values[field][key], "count": count}
+                for key, count in bounded
+            ],
+            "truncated": len(ranked) > len(bounded),
+        }
+    return {
+        "total_points_profiled": total,
+        "required_field_coverage": {
+            field: {
+                "present": present[field],
+                "missing": total - present[field],
+                "present_coverage": (present[field] / total) if total else 0.0,
+            }
+            for field in sorted(required_fields)
+        },
+        "distributions": distributions,
+    }
 
 
 def payload_index_fields() -> tuple[str, ...]:

@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 
 from legal_rag.indexing import (
     IndexingConfig,
+    REQUIRED_PAYLOAD_FIELDS,
     content_hash_for_text,
     point_id_from_chunk_id,
     run_indexing_pipeline,
@@ -20,6 +21,8 @@ from legal_rag.indexing.qdrant_store import (
     restore_collection_indexing_threshold,
     upload_point_batch,
 )
+from legal_rag.indexing.io import sha256_file
+from legal_rag.laws_preprocessing.inventory import build_corpus_registry, compute_source_hash
 
 
 class FakeEmbedder:
@@ -63,6 +66,10 @@ def _chunk(chunk_id: str, *, text: str, law_id: str = "vda:lr:2000-01-01:1") -> 
         "law_title": "Legge regionale 1 gennaio 2000, n. 1 - Test",
         "law_status": "current",
         "article_status": "current",
+        "passage_status": "current",
+        "content_availability": "substantive",
+        "status_event_ids": [],
+        "status_rule_ids": ["default-current"],
         "article_label_norm": "1",
         "passage_label": "c1",
         "structure_path": "",
@@ -81,13 +88,33 @@ def _write_dataset(root: Path, chunks: list[dict[str, object]], *, ready: bool =
     _write_jsonl(root / "articles.jsonl", [{"article_id": "vda:lr:2000-01-01:1#art:1"}])
     _write_jsonl(root / "edges.jsonl", [{"edge_id": "e1"}])
     _write_jsonl(root / "chunks.jsonl", chunks)
+    source_dir = root.parent / "laws_html"
+    source_dir.mkdir(exist_ok=True)
+    (source_dir / "0001_LR-1-gennaio-2000-n1.html").write_text(
+        "<html><body>Test law</body></html>\n",
+        encoding="utf-8",
+    )
+    registry, _ = build_corpus_registry(source_dir)
+    outputs = {
+        "laws": "laws.jsonl",
+        "articles": "articles.jsonl",
+        "edges": "edges.jsonl",
+        "chunks": "chunks.jsonl",
+    }
     _write_json(
         root / "manifest.json",
         {
+            "schema_version": "laws-preprocessing-v2",
+            "status_rules_version": "legal-status-rules-v1",
             "ready_for_indexing": ready,
-            "source_hash": "source-hash",
+            "source_dir": str(source_dir),
+            "source_hash": compute_source_hash(list(registry.by_law_id.values())),
             "counts": {"laws": 1, "articles": 1, "edges": 1, "chunks": len(chunks)},
-            "output_hashes": {"chunks": "chunks-hash"},
+            "outputs": outputs,
+            "output_hashes": {
+                name: sha256_file(root / filename)
+                for name, filename in outputs.items()
+            },
         },
     )
 
@@ -110,6 +137,17 @@ def test_validate_clean_dataset_rejects_duplicate_chunk_ids(tmp_path: Path) -> N
 
     assert result.ok is False
     assert result.duplicate_chunk_ids == ("c1",)
+
+
+def test_validate_clean_dataset_rejects_stale_declared_hash(tmp_path: Path) -> None:
+    dataset = tmp_path / "laws_dataset_clean"
+    _write_dataset(dataset, [_chunk("c1", text="Uno.")])
+    (dataset / "chunks.jsonl").write_text("", encoding="utf-8")
+
+    result = validate_clean_dataset(dataset)
+
+    assert result.ok is False
+    assert any("chunks.jsonl hash mismatch" in error for error in result.errors)
 
 
 def test_hashing_helpers_are_stable() -> None:
@@ -151,8 +189,26 @@ def test_run_indexing_pipeline_creates_qdrant_contract_artifacts(tmp_path: Path)
     assert (run_dir / "index_quality_report.md").exists()
     assert (run_dir / "sample_retrieval_report.json").exists()
     stored = json.loads((run_dir / "index_manifest.json").read_text(encoding="utf-8"))
-    assert stored["source_hash"] == "source-hash"
+    assert stored["schema_version"] == "indexing-contract-v2"
+    assert stored["preprocessing_schema_version"] == "laws-preprocessing-v2"
+    assert stored["status_rules_version"] == "legal-status-rules-v1"
+    assert stored["dataset_manifest_hash"] == sha256_file(dataset / "manifest.json")
+    assert stored["chunks_hash"] == sha256_file(dataset / "chunks.jsonl")
+    assert stored["qdrant"]["mode"] == "local"
+    assert stored["inserted_count"] == 2
+    assert stored["payload_updated_count"] == 0
+    assert all(stored["identity_validation"].values())
+    assert all(stored["distribution_reconciliation"].values())
     assert "law_id" in stored["payload_indexes"]
+    assert "passage_status" in stored["payload_indexes"]
+    assert "content_availability" in stored["payload_indexes"]
+    record = client.retrieve(
+        collection_name="test_collection",
+        ids=[point_id_from_chunk_id("c1")],
+        with_payload=True,
+        with_vectors=False,
+    )[0]
+    assert REQUIRED_PAYLOAD_FIELDS <= set(record.payload or {})
     assert [event["event"] for event in progress_events] == [
         "dataset_ready",
         "embedder_ready",
@@ -188,6 +244,76 @@ def test_run_indexing_pipeline_reuse_skips_unchanged_points(tmp_path: Path) -> N
     assert manifest["indexed_count"] == 1
     assert manifest["skipped_count"] == 1
     assert manifest["upserted_count"] == 0
+
+
+def test_run_indexing_pipeline_updates_metadata_without_reembedding(tmp_path: Path) -> None:
+    dataset = tmp_path / "laws_dataset_clean"
+    chunks = [_chunk("c1", text="Contributi regionali.")]
+    _write_dataset(dataset, chunks)
+    client = QdrantClient(":memory:")
+    base_config = {
+        "clean_dataset_dir": str(dataset),
+        "runs_dir": str(tmp_path / "runs"),
+        "collection_name": "metadata_collection",
+        "embedding_backend": "local",
+        "embedding_model": "fake-embedding",
+        "diagnostic_queries": ["contributi"],
+    }
+    run_indexing_pipeline(
+        IndexingConfig(**base_config, run_id="run1"),
+        embedder=FakeEmbedder(),
+        client=client,
+    )
+
+    chunks[0]["article_status"] = "partial"
+    chunks[0]["index_views"] = ["current", "historical", "not_explicitly_past"]
+    _write_jsonl(dataset / "chunks.jsonl", chunks)
+    manifest_path = dataset / "manifest.json"
+    source_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_manifest["output_hashes"]["chunks"] = sha256_file(dataset / "chunks.jsonl")
+    _write_json(manifest_path, source_manifest)
+
+    manifest = run_indexing_pipeline(
+        IndexingConfig(**base_config, run_id="run2"),
+        embedder=FakeEmbedder(),
+        client=client,
+    )
+
+    assert manifest["embedded_count"] == 0
+    assert manifest["inserted_count"] == 0
+    assert manifest["vector_updated_count"] == 0
+    assert manifest["payload_updated_count"] == 1
+    assert manifest["skipped_count"] == 0
+    point_id = point_id_from_chunk_id("c1")
+    record = client.retrieve(
+        collection_name="metadata_collection",
+        ids=[point_id],
+        with_payload=True,
+        with_vectors=False,
+    )[0]
+    assert record.payload["article_status"] == "partial"
+    assert record.payload["dataset_chunks_hash"] == sha256_file(dataset / "chunks.jsonl")
+
+
+def test_run_indexing_pipeline_rejects_changed_source_corpus(tmp_path: Path) -> None:
+    dataset = tmp_path / "laws_dataset_clean"
+    _write_dataset(dataset, [_chunk("c1", text="Contributi regionali.")])
+    source_file = tmp_path / "laws_html" / "0001_LR-1-gennaio-2000-n1.html"
+    source_file.write_text("<html><body>Changed source</body></html>\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Source corpus hash mismatch"):
+        run_indexing_pipeline(
+            IndexingConfig(
+                clean_dataset_dir=str(dataset),
+                runs_dir=str(tmp_path / "runs"),
+                collection_name="changed_source",
+                run_id="run1",
+                embedding_backend="local",
+                embedding_model="fake-embedding",
+            ),
+            embedder=FakeEmbedder(),
+            client=QdrantClient(":memory:"),
+        )
 
 
 def test_ensure_collection_applies_qdrant_server_tuning() -> None:
@@ -231,6 +357,8 @@ def test_ensure_collection_applies_qdrant_server_tuning() -> None:
     assert created is True
     assert removed_count == 0
     assert statuses["law_id"] == "created"
+    assert statuses["passage_status"] == "created"
+    assert statuses["content_availability"] == "created"
     assert client.created["shard_number"] == 4
     assert client.created["optimizers_config"].indexing_threshold == 10_000_000  # type: ignore[union-attr]
     assert restored is True

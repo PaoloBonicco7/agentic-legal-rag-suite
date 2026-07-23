@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .io import iter_jsonl, read_json
+from .io import iter_jsonl, read_json, sha256_file
 from .models import LIST_PAYLOAD_FIELDS, SOURCE_CHUNK_REQUIRED_FIELDS
 
 REQUIRED_DATASET_FILES = ("manifest.json", "chunks.jsonl", "laws.jsonl", "articles.jsonl", "edges.jsonl")
@@ -21,6 +21,8 @@ class DatasetValidationResult:
     counts: dict[str, int]
     missing_chunk_fields: dict[str, int]
     duplicate_chunk_ids: tuple[str, ...]
+    manifest_hash: str | None
+    actual_output_hashes: dict[str, str]
     errors: tuple[str, ...]
     warnings: tuple[str, ...]
 
@@ -37,6 +39,8 @@ class DatasetValidationResult:
             "counts": self.counts,
             "missing_chunk_fields": self.missing_chunk_fields,
             "duplicate_chunk_ids": list(self.duplicate_chunk_ids),
+            "manifest_hash": self.manifest_hash,
+            "actual_output_hashes": self.actual_output_hashes,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
             "ok": self.ok,
@@ -71,14 +75,54 @@ def validate_clean_dataset(dataset_dir: str | Path, *, strict: bool = True) -> D
             errors.append(f"Missing required dataset file: {name}")
 
     manifest: dict[str, Any] = {}
+    manifest_hash: str | None = None
+    actual_output_hashes: dict[str, str] = {}
     if required_files["manifest.json"]:
         manifest = read_manifest(root)
+        manifest_hash = sha256_file(root / "manifest.json")
         if manifest.get("ready_for_indexing") is not True:
             message = "manifest.json does not expose ready_for_indexing=true"
             if strict:
                 errors.append(message)
             else:
                 warnings.append(message)
+        if manifest.get("schema_version") != "laws-preprocessing-v2":
+            errors.append(
+                "manifest.json schema_version mismatch: "
+                f"expected='laws-preprocessing-v2', actual={manifest.get('schema_version')!r}"
+            )
+        if manifest.get("status_rules_version") != "legal-status-rules-v1":
+            errors.append(
+                "manifest.json status_rules_version mismatch: "
+                f"expected='legal-status-rules-v1', actual={manifest.get('status_rules_version')!r}"
+            )
+
+        outputs = manifest.get("outputs")
+        declared_hashes = manifest.get("output_hashes")
+        if not isinstance(outputs, dict):
+            errors.append("manifest.json outputs must be an object")
+            outputs = {}
+        if not isinstance(declared_hashes, dict):
+            errors.append("manifest.json output_hashes must be an object")
+            declared_hashes = {}
+        for output_name in ("laws", "articles", "edges", "chunks"):
+            if output_name not in declared_hashes:
+                errors.append(f"manifest.json output_hashes is missing {output_name!r}")
+        for output_name, expected_hash in declared_hashes.items():
+            relative_path = outputs.get(output_name)
+            if not isinstance(relative_path, str) or not relative_path.strip():
+                errors.append(f"manifest.json outputs is missing a path for {output_name!r}")
+                continue
+            output_path = root / relative_path
+            if not output_path.is_file():
+                errors.append(f"Manifest output does not exist: {relative_path}")
+                continue
+            actual_hash = sha256_file(output_path)
+            actual_output_hashes[str(output_name)] = actual_hash
+            if not isinstance(expected_hash, str) or expected_hash != actual_hash:
+                errors.append(
+                    f"{relative_path} hash mismatch: manifest={expected_hash!r}, actual={actual_hash!r}"
+                )
 
     counts = {
         "laws": _count_jsonl(root / "laws.jsonl"),
@@ -132,6 +176,8 @@ def validate_clean_dataset(dataset_dir: str | Path, *, strict: bool = True) -> D
         counts=counts,
         missing_chunk_fields=missing_chunk_fields,
         duplicate_chunk_ids=tuple(sorted(set(duplicate_chunk_ids))),
+        manifest_hash=manifest_hash,
+        actual_output_hashes=actual_output_hashes,
         errors=tuple(errors),
         warnings=tuple(warnings),
     )

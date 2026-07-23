@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -13,17 +14,27 @@ from qdrant_client import QdrantClient
 from .dataset import load_chunks, read_manifest, validate_clean_dataset
 from .embeddings import SupportsEmbedding, supports_hybrid_embedding, supports_sparse_embedding
 from .embeddings import build_embedder
-from .hashing import content_hash_for_text, payload_hash, point_id_from_chunk_id
+from .hashing import canonical_dumps, content_hash_for_text, payload_hash, point_id_from_chunk_id, sha256_text
 from .io import finalize_run_dir, now_utc, prepare_run_dir, sha256_file, write_json, write_jsonl
-from .models import FILTERABLE_FIELDS, INDEXING_SCHEMA_VERSION, REQUIRED_PAYLOAD_FIELDS, IndexingConfig
+from .models import (
+    FILTERABLE_FIELDS,
+    IDENTITY_PAYLOAD_FIELDS,
+    INDEXING_SCHEMA_VERSION,
+    PROFILE_DISTRIBUTION_FIELDS,
+    REQUIRED_PAYLOAD_FIELDS,
+    SOURCE_CHUNK_REQUIRED_FIELDS,
+    IndexingConfig,
+)
 from .qdrant_store import (
     PreparedPoint,
     build_collection_name,
     collection_point_count,
     connect_qdrant,
     ensure_collection,
-    fetch_existing_content_hashes,
+    fetch_existing_hashes,
+    profile_collection_payload,
     restore_collection_indexing_threshold,
+    set_point_payload,
     upload_point_batch,
     validate_no_duplicate_chunk_ids,
 )
@@ -37,31 +48,67 @@ class SyncStats:
     selected: int
     embedded: int
     skipped: int
-    upserted: int
+    inserted: int
+    vector_updated: int
+    payload_updated: int
     failures: tuple[dict[str, str], ...]
 
     @property
     def failure_count(self) -> int:
         return len(self.failures)
 
+    @property
+    def upserted(self) -> int:
+        return self.inserted + self.vector_updated
+
+    @property
+    def indexed(self) -> int:
+        return self.inserted + self.vector_updated + self.payload_updated + self.skipped
+
 
 def _select_chunks(chunks: list[dict[str, Any]], limit: int | None) -> list[dict[str, Any]]:
     return chunks if limit is None else chunks[:limit]
 
 
-def _payload_from_chunk(chunk: dict[str, Any], *, dataset_hash: str, embedding_model: str) -> dict[str, Any]:
+def _payload_from_chunk(
+    chunk: dict[str, Any],
+    *,
+    dataset_source_hash: str,
+    dataset_manifest_hash: str,
+    dataset_chunks_hash: str,
+    preprocessing_schema_version: str,
+    status_rules_version: str,
+    embedding_model: str,
+) -> dict[str, Any]:
     embedding_text = str(chunk.get("text_for_embedding") or "")
     content_hash = content_hash_for_text(embedding_text)
-    payload = {field: chunk.get(field) for field in sorted(REQUIRED_PAYLOAD_FIELDS) if field != "content_hash"}
+    payload = {
+        field: chunk.get(field)
+        for field in sorted(SOURCE_CHUNK_REQUIRED_FIELDS)
+        if field != "text_for_embedding"
+    }
     payload["content_hash"] = content_hash
     payload["text_for_embedding"] = embedding_text
-    payload["dataset_source_hash"] = dataset_hash
+    payload["dataset_source_hash"] = dataset_source_hash
+    payload["dataset_manifest_hash"] = dataset_manifest_hash
+    payload["dataset_chunks_hash"] = dataset_chunks_hash
+    payload["preprocessing_schema_version"] = preprocessing_schema_version
+    payload["status_rules_version"] = status_rules_version
     payload["embedding_model"] = embedding_model
     payload["payload_hash"] = payload_hash(payload)
     return payload
 
 
-def _prepare_points(chunks: Sequence[dict[str, Any]], *, dataset_hash: str, embedding_model: str) -> list[PreparedPoint]:
+def _prepare_points(
+    chunks: Sequence[dict[str, Any]],
+    *,
+    dataset_source_hash: str,
+    dataset_manifest_hash: str,
+    dataset_chunks_hash: str,
+    preprocessing_schema_version: str,
+    status_rules_version: str,
+    embedding_model: str,
+) -> list[PreparedPoint]:
     seen: set[str] = set()
     points: list[PreparedPoint] = []
     for chunk in chunks:
@@ -74,7 +121,15 @@ def _prepare_points(chunks: Sequence[dict[str, Any]], *, dataset_hash: str, embe
         embedding_text = str(chunk.get("text_for_embedding") or "").strip()
         if not embedding_text:
             raise ValueError(f"{chunk_id}: text_for_embedding is empty")
-        payload = _payload_from_chunk(chunk, dataset_hash=dataset_hash, embedding_model=embedding_model)
+        payload = _payload_from_chunk(
+            chunk,
+            dataset_source_hash=dataset_source_hash,
+            dataset_manifest_hash=dataset_manifest_hash,
+            dataset_chunks_hash=dataset_chunks_hash,
+            preprocessing_schema_version=preprocessing_schema_version,
+            status_rules_version=status_rules_version,
+            embedding_model=embedding_model,
+        )
         points.append(
             PreparedPoint(
                 chunk_id=chunk_id,
@@ -82,6 +137,7 @@ def _prepare_points(chunks: Sequence[dict[str, Any]], *, dataset_hash: str, embe
                 embedding_text=embedding_text,
                 payload=payload,
                 content_hash=str(payload["content_hash"]),
+                payload_hash=str(payload["payload_hash"]),
             )
         )
     return points
@@ -90,6 +146,12 @@ def _prepare_points(chunks: Sequence[dict[str, Any]], *, dataset_hash: str, embe
 def _payload_profile(points: Sequence[PreparedPoint]) -> dict[str, Any]:
     total = len(points)
     field_summary: dict[str, dict[str, Any]] = {}
+    distribution_counts: dict[str, dict[str, int]] = {
+        field: {} for field in PROFILE_DISTRIBUTION_FIELDS
+    }
+    distribution_values: dict[str, dict[str, Any]] = {
+        field: {} for field in PROFILE_DISTRIBUTION_FIELDS
+    }
     for field in sorted(REQUIRED_PAYLOAD_FIELDS):
         present = 0
         non_empty = 0
@@ -114,12 +176,113 @@ def _payload_profile(points: Sequence[PreparedPoint]) -> dict[str, Any]:
             "non_empty_coverage": (non_empty / total) if total else 0.0,
             "types": sorted(types),
         }
+    for point in points:
+        for field in PROFILE_DISTRIBUTION_FIELDS:
+            value = point.payload.get(field)
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if item is None:
+                    continue
+                key = canonical_dumps(item)
+                distribution_counts[field][key] = distribution_counts[field].get(key, 0) + 1
+                distribution_values[field][key] = item
+    distributions: dict[str, dict[str, Any]] = {}
+    for field in PROFILE_DISTRIBUTION_FIELDS:
+        ranked = sorted(distribution_counts[field].items(), key=lambda item: (-item[1], item[0]))
+        bounded = ranked[:100]
+        distributions[field] = {
+            "distinct_count": len(ranked),
+            "values": [
+                {"value": distribution_values[field][key], "count": count}
+                for key, count in bounded
+            ],
+            "truncated": len(ranked) > len(bounded),
+        }
     return {
         "total_points_profiled": total,
         "required_fields": sorted(REQUIRED_PAYLOAD_FIELDS),
         "filterable_fields": list(FILTERABLE_FIELDS),
         "fields": field_summary,
+        "distributions": distributions,
     }
+
+
+def _distribution_signature(profile: dict[str, Any], field: str) -> dict[str, int]:
+    distribution = (profile.get("distributions") or {}).get(field) or {}
+    return {
+        canonical_dumps(row.get("value")): int(row.get("count") or 0)
+        for row in distribution.get("values") or []
+    }
+
+
+def _pipeline_identity() -> dict[str, Any]:
+    source_root = Path(__file__).resolve().parent
+    source_hashes = {
+        path.name: sha256_file(path)
+        for path in sorted(source_root.glob("*.py"), key=lambda item: item.name)
+    }
+    identity: dict[str, Any] = {
+        "source_dir": str(source_root),
+        "source_files": source_hashes,
+        "source_files_hash": sha256_text(canonical_dumps(source_hashes)),
+        "git_commit": None,
+        "git_dirty": None,
+    }
+    try:
+        repository_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=source_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        identity["repository_root"] = repository_root
+        identity["git_commit"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        identity["git_dirty"] = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repository_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return identity
+
+
+def _resolve_source_dir(manifest: dict[str, Any], dataset_dir: Path) -> Path:
+    candidates: list[Path] = []
+    source_dir = manifest.get("source_dir")
+    if isinstance(source_dir, str) and source_dir.strip():
+        candidates.append(Path(source_dir))
+    config_source_dir = (manifest.get("config") or {}).get("source_dir")
+    if isinstance(config_source_dir, str) and config_source_dir.strip():
+        candidates.append(Path(config_source_dir))
+    candidates.append(dataset_dir.parent / "laws_html")
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved.is_dir():
+            return resolved
+    raise RuntimeError(
+        "Cannot recompute dataset source hash: source HTML directory was not found "
+        f"(checked {[str(path) for path in candidates]})"
+    )
+
+
+def _recompute_source_hash(manifest: dict[str, Any], dataset_dir: Path) -> tuple[str, Path]:
+    from legal_rag.laws_preprocessing.inventory import build_corpus_registry, compute_source_hash
+
+    source_dir = _resolve_source_dir(manifest, dataset_dir)
+    registry, _ = build_corpus_registry(source_dir)
+    return compute_source_hash(list(registry.by_law_id.values())), source_dir
 
 
 def _vectors_from_record(record: Any) -> list[float] | None:
@@ -185,39 +348,73 @@ def _sync_points(
     config: IndexingConfig,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> SyncStats:
-    existing_hashes: dict[str, str] = {}
+    existing_hashes: dict[str, dict[str, str]] = {}
     if not config.force_rebuild:
-        existing_hashes = fetch_existing_content_hashes(client, collection_name=collection_name, point_ids=[point.point_id for point in points])
+        existing_hashes = fetch_existing_hashes(
+            client,
+            collection_name=collection_name,
+            point_ids=[point.point_id for point in points],
+        )
 
-    to_process: list[PreparedPoint] = []
+    to_embed: list[PreparedPoint] = []
+    payload_only: list[PreparedPoint] = []
     skipped = 0
     for point in points:
-        if existing_hashes.get(point.point_id) == point.content_hash:
+        existing = existing_hashes.get(point.point_id)
+        if (
+            existing
+            and existing["content_hash"] == point.content_hash
+            and existing["payload_hash"] == point.payload_hash
+        ):
             skipped += 1
+        elif existing and existing["content_hash"] == point.content_hash:
+            payload_only.append(point)
         else:
-            to_process.append(point)
+            to_embed.append(point)
 
     failures: list[dict[str, str]] = []
     embedded = 0
-    upserted = 0
+    inserted = 0
+    vector_updated = 0
+    payload_updated = 0
     started = perf_counter()
-    total_to_process = len(to_process)
+    total_to_embed = len(to_embed)
     if progress_callback:
         progress_callback(
             {
                 "event": "sync_started",
                 "selected": len(points),
                 "skipped": skipped,
-                "to_process": total_to_process,
+                "to_embed": total_to_embed,
+                "payload_only": len(payload_only),
                 "batch_size": config.batch_size,
             }
         )
+
+    for point in payload_only:
+        try:
+            set_point_payload(
+                client,
+                collection_name=collection_name,
+                point=point,
+                max_retries=config.upload_max_retries,
+            )
+            payload_updated += 1
+        except Exception as exc:
+            failures.append({"chunk_id": point.chunk_id, "stage": "payload_update", "error": str(exc)})
+
+    def record_vector_write(point: PreparedPoint) -> None:
+        nonlocal inserted, vector_updated
+        if point.point_id in existing_hashes:
+            vector_updated += 1
+        else:
+            inserted += 1
 
     def emit_batch_progress(*, batch_number: int, batch_total: int, batch_size: int, batch_started: float) -> None:
         if not progress_callback:
             return
         elapsed = max(perf_counter() - started, 0.001)
-        processed = embedded + skipped
+        processed = inserted + vector_updated + payload_updated + skipped + len(failures)
         rate = embedded / elapsed if embedded else 0.0
         remaining = max(len(points) - processed, 0)
         progress_callback(
@@ -227,7 +424,10 @@ def _sync_points(
                 "batch_total": batch_total,
                 "batch_size": batch_size,
                 "embedded": embedded,
-                "upserted": upserted,
+                "inserted": inserted,
+                "vector_updated": vector_updated,
+                "payload_updated": payload_updated,
+                "upserted": inserted + vector_updated,
                 "skipped": skipped,
                 "failures": len(failures),
                 "processed": processed,
@@ -239,11 +439,11 @@ def _sync_points(
             }
         )
 
-    for start in range(0, len(to_process), config.batch_size):
-        batch = to_process[start : start + config.batch_size]
+    for start in range(0, len(to_embed), config.batch_size):
+        batch = to_embed[start : start + config.batch_size]
         batch_started = perf_counter()
         batch_number = (start // config.batch_size) + 1
-        batch_total = ((total_to_process + config.batch_size - 1) // config.batch_size) if total_to_process else 0
+        batch_total = ((total_to_embed + config.batch_size - 1) // config.batch_size) if total_to_embed else 0
         try:
             batch_texts = [point.embedding_text for point in batch]
             sparse_vectors = None
@@ -293,7 +493,7 @@ def _sync_points(
                         upload_parallel=config.qdrant_upload_parallel,
                     )
                     embedded += 1
-                    upserted += 1
+                    record_vector_write(point)
                 except Exception as inner_exc:
                     failures.append({"chunk_id": point.chunk_id, "stage": "embedding_or_upsert", "error": str(inner_exc)})
             emit_batch_progress(
@@ -320,7 +520,8 @@ def _sync_points(
                     upload_batch_size=config.upload_batch_size,
                     upload_parallel=config.qdrant_upload_parallel,
                 )
-                upserted += len(point_batch)
+                for point in point_batch:
+                    record_vector_write(point)
             except Exception as exc:
                 if len(point_batch) == 1:
                     failures.append({"chunk_id": point_batch[0].chunk_id, "stage": "upsert", "error": str(exc)})
@@ -338,7 +539,7 @@ def _sync_points(
                             upload_batch_size=config.upload_batch_size,
                             upload_parallel=config.qdrant_upload_parallel,
                         )
-                        upserted += 1
+                        record_vector_write(point)
                     except Exception as inner_exc:
                         failures.append({"chunk_id": point.chunk_id, "stage": "upsert", "error": str(inner_exc)})
 
@@ -349,7 +550,15 @@ def _sync_points(
             batch_started=batch_started,
         )
 
-    return SyncStats(selected=len(points), embedded=embedded, skipped=skipped, upserted=upserted, failures=tuple(failures))
+    return SyncStats(
+        selected=len(points),
+        embedded=embedded,
+        skipped=skipped,
+        inserted=inserted,
+        vector_updated=vector_updated,
+        payload_updated=payload_updated,
+        failures=tuple(failures),
+    )
 
 
 def _write_quality_report(path: Path, *, manifest: dict[str, Any]) -> None:
@@ -360,6 +569,9 @@ def _write_quality_report(path: Path, *, manifest: dict[str, Any]) -> None:
         f"- Ready for retrieval: **{manifest['ready_for_retrieval']}**",
         f"- Collection: `{manifest['collection_name']}`",
         f"- Indexed count: {manifest['indexed_count']}",
+        f"- Inserted: {manifest['inserted_count']}",
+        f"- Vector updated: {manifest['vector_updated_count']}",
+        f"- Payload updated: {manifest['payload_updated_count']}",
         f"- Skipped unchanged: {manifest['skipped_count']}",
         f"- Failures: {manifest['failure_count']}",
         "",
@@ -397,16 +609,32 @@ def run_indexing_pipeline(
     try:
         validation = validate_clean_dataset(cfg.resolved_dataset_dir, strict=cfg.strict)
         write_json(tmp_dir / "dataset_validation.json", validation.to_dict())
-        if cfg.strict and not validation.ok:
+        if not validation.ok:
             raise RuntimeError("Dataset validation failed: " + "; ".join(validation.errors))
 
         manifest = read_manifest(cfg.resolved_dataset_dir)
         chunks = _select_chunks(load_chunks(cfg.resolved_dataset_dir), cfg.selection_limit)
-        source_hash = str(manifest.get("source_hash") or "")
-        chunks_hash = str((manifest.get("output_hashes") or {}).get("chunks") or sha256_file(cfg.resolved_dataset_dir / "chunks.jsonl"))
-        if not source_hash:
-            source_hash = chunks_hash
-        points = _prepare_points(chunks, dataset_hash=source_hash, embedding_model=cfg.resolved_embedding_model)
+        declared_source_hash = str(manifest.get("source_hash") or "")
+        source_hash, source_dir = _recompute_source_hash(manifest, cfg.resolved_dataset_dir)
+        if not declared_source_hash or source_hash != declared_source_hash:
+            raise RuntimeError(
+                "Source corpus hash mismatch: "
+                f"manifest={declared_source_hash!r}, actual={source_hash!r}"
+            )
+        chunks_hash = str(validation.actual_output_hashes["chunks"])
+        manifest_hash = str(validation.manifest_hash or "")
+        preprocessing_schema_version = str(manifest.get("schema_version") or "")
+        status_rules_version = str(manifest.get("status_rules_version") or "")
+        pipeline_identity = _pipeline_identity()
+        points = _prepare_points(
+            chunks,
+            dataset_source_hash=source_hash,
+            dataset_manifest_hash=manifest_hash,
+            dataset_chunks_hash=chunks_hash,
+            preprocessing_schema_version=preprocessing_schema_version,
+            status_rules_version=status_rules_version,
+            embedding_model=cfg.resolved_embedding_model,
+        )
         if not points:
             raise RuntimeError("No chunks selected for indexing")
         if progress_callback:
@@ -486,6 +714,49 @@ def run_indexing_pipeline(
         sample = next((point for point in points if "current" in (point.payload.get("index_views") or [])), points[0])
         filter_validation = _validate_filtered_query(client, collection_name=collection_name, sample=sample)
         payload_profile = _payload_profile(points)
+        collection_payload_profile = profile_collection_payload(
+            client,
+            collection_name=collection_name,
+            required_fields=sorted(REQUIRED_PAYLOAD_FIELDS),
+        )
+        payload_profile["collection"] = collection_payload_profile
+
+        expected_identity = {
+            "dataset_source_hash": source_hash,
+            "dataset_manifest_hash": manifest_hash,
+            "dataset_chunks_hash": chunks_hash,
+            "preprocessing_schema_version": preprocessing_schema_version,
+            "status_rules_version": status_rules_version,
+        }
+        identity_validation: dict[str, bool] = {}
+        for field in IDENTITY_PAYLOAD_FIELDS:
+            distribution = collection_payload_profile["distributions"][field]
+            values = distribution["values"]
+            identity_validation[field] = (
+                distribution["distinct_count"] == 1
+                and len(values) == 1
+                and values[0]["value"] == expected_identity[field]
+                and values[0]["count"] == point_count
+            )
+        reconciliation_fields = (
+            "law_status",
+            "article_status",
+            "passage_status",
+            "content_availability",
+            "index_views",
+            "relation_types",
+        )
+        distribution_reconciliation = {
+            field: (
+                not payload_profile["distributions"][field]["truncated"]
+                and not collection_payload_profile["distributions"][field]["truncated"]
+                and _distribution_signature(payload_profile, field)
+                == _distribution_signature(collection_payload_profile, field)
+            )
+            for field in reconciliation_fields
+        }
+        payload_profile["identity_validation"] = identity_validation
+        payload_profile["distribution_reconciliation"] = distribution_reconciliation
 
         retrieval_rows: list[dict[str, Any]] = []
         for query in cfg.diagnostic_queries:
@@ -518,10 +789,12 @@ def run_indexing_pipeline(
             except Exception as exc:
                 retrieval_rows.append({"query": query, "error": str(exc), "hits": []})
 
-        indexed_count = sync_stats.upserted + sync_stats.skipped
-        count_gate = point_count == len(points) if cfg.force_rebuild else point_count >= len(points)
+        indexed_count = sync_stats.indexed
+        count_gate = point_count == len(points)
         gates = {
             "dataset_ready_for_indexing": validation.ok,
+            "dataset_hashes_verified": bool(validation.actual_output_hashes),
+            "source_corpus_hash_verified": source_hash == declared_source_hash,
             "selected_chunks_non_empty": len(points) > 0,
             "embedding_model_recorded": bool(cfg.embedding_model),
             "vector_size_detected": vector_size > 0,
@@ -531,7 +804,14 @@ def run_indexing_pipeline(
             "filter_validation_queryable": bool(filter_validation.get("ok")),
             "payload_indexes_requested": all(not str(status).startswith("error:") for status in payload_index_statuses.values()),
             "required_payload_fields_present": all(
-                field["missing"] == 0 for field in payload_profile["fields"].values()
+                field["missing"] == 0
+                for field in collection_payload_profile["required_field_coverage"].values()
+            ),
+            "collection_identity_single_valued": all(identity_validation.values()),
+            "status_distributions_reconciled": all(distribution_reconciliation.values()),
+            "diagnostic_queries_return_hits": any(row.get("hits") for row in retrieval_rows),
+            "worktree_clean_when_required": (
+                not cfg.require_clean_worktree or pipeline_identity.get("git_dirty") is False
             ),
         }
         restore_indexing_threshold_kb = (
@@ -545,13 +825,31 @@ def run_indexing_pipeline(
             "run_id": run_id,
             "config": cfg.public_dict(),
             "source_dataset_dir": str(cfg.resolved_dataset_dir),
+            "source_corpus_dir": str(source_dir),
             "source_hash": source_hash,
-            "source_output_hashes": manifest.get("output_hashes", {}),
+            "source_output_hashes": validation.actual_output_hashes,
+            "declared_source_output_hashes": manifest.get("output_hashes", {}),
             "chunks_hash": chunks_hash,
+            "dataset_manifest_hash": manifest_hash,
+            "preprocessing_schema_version": preprocessing_schema_version,
+            "status_rules_version": status_rules_version,
+            "source_identity": {
+                "dataset_source_hash": source_hash,
+                "dataset_manifest_hash": manifest_hash,
+                "dataset_chunks_hash": chunks_hash,
+                "preprocessing_schema_version": preprocessing_schema_version,
+                "status_rules_version": status_rules_version,
+                "actual_output_hashes": validation.actual_output_hashes,
+            },
+            "pipeline_identity": pipeline_identity,
             "collection_name": collection_name,
+            "collection_identity": {
+                "collection_name": collection_name,
+                **expected_identity,
+            },
             "collection_created": created_collection,
             "qdrant": {
-                "mode": "server" if cfg.qdrant_url else "local_path",
+                "mode": "server" if cfg.qdrant_url else "local",
                 "url": cfg.qdrant_url,
                 "path": str(cfg.resolved_index_dir),
                 "dense_vector_name": "dense",
@@ -580,12 +878,18 @@ def run_indexing_pipeline(
             "embedded_count": sync_stats.embedded,
             "skipped_count": sync_stats.skipped,
             "upserted_count": sync_stats.upserted,
+            "inserted_count": sync_stats.inserted,
+            "vector_updated_count": sync_stats.vector_updated,
+            "payload_updated_count": sync_stats.payload_updated,
             "removed_count": removed_count,
             "failure_count": sync_stats.failure_count,
             "collection_points_count": point_count,
             "payload_indexes": list(FILTERABLE_FIELDS),
             "payload_index_statuses": payload_index_statuses,
             "payload_field_summary": payload_profile["fields"],
+            "payload_distributions": collection_payload_profile["distributions"],
+            "identity_validation": identity_validation,
+            "distribution_reconciliation": distribution_reconciliation,
             "duplicate_validation": duplicate_check,
             "filter_validation": filter_validation,
             "quality_gates": gates,
