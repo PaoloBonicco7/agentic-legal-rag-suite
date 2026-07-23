@@ -37,10 +37,8 @@ Questa separazione permette al modello embedding di vedere il contesto giuridico
 
 ## Qdrant
 
-Qdrant puo essere usato in due modalita:
-
-- file locale persistente tramite `qdrant-client`, con default `data/indexes/qdrant`;
-- server locale Docker, passando `qdrant_url="http://127.0.0.1:6333"` e usando storage dedicato `data/indexes/qdrant_server`.
+La pipeline di tesi usa Qdrant in modalità file locale persistente tramite `qdrant-client`. Ogni
+esperimento definitivo che cambia contratto usa un path e una collection separati.
 
 La collection contiene:
 
@@ -49,17 +47,19 @@ La collection contiene:
 - payload on disk;
 - indici payload sui campi filtrabili richiesti dalla spec.
 
-La modalita locale riduce le dipendenze operative dello step. La modalita Docker e preferibile per una full run quando si vogliono payload indexes effettivi, meno limiti del client embedded sopra 20.000 punti e un comportamento piu vicino a un deployment server.
+Gli indici keyword vengono dichiarati prima dell'upload per stati, viste, disponibilità e identità
+legali. Il client embedded può segnalare che non hanno lo stesso effetto prestazionale di un server;
+il contratto payload resta comunque verificato e riproducibile.
 
-In modalita embedded locale, `qdrant-client` accetta la richiesta di payload index ma segnala che gli indici non hanno effetto prestazionale come in un server Qdrant. La pipeline registra comunque i campi richiesti e mantiene lo stesso contratto, cosi il passaggio a server Qdrant non richiede cambiare payload o retrieval.
-
-Per le full run Docker la pipeline puo usare upload parallelo, un numero di shard esplicito e una soglia temporanea di indexing alta. Questo differisce la costruzione HNSW durante il bulk upload; la soglia normale viene ripristinata a fine ingest.
-
-Comando operativo:
+Comando operativo per l'audit:
 
 ```bash
-docker compose -f docker-compose.qdrant.yml up -d qdrant
-PYTHONPATH=src .venv/bin/python -m legal_rag.indexing --qdrant-url http://127.0.0.1:6333 --index-dir data/indexes/qdrant_server --collection-name legal_chunks_bge_m3 --force-rebuild --embedding-backend local --embedding-model BAAI/bge-m3 --embedding-dim 1024 --qdrant-upload-parallel 4 --qdrant-shard-number 4 --qdrant-bulk-indexing-threshold-kb 10000000
+PYTHONPATH=src .venv/bin/python -m legal_rag.indexing \
+  --clean-dataset-dir data/laws_dataset_clean_status_v2 \
+  --index-dir data/indexes/qdrant_status_v2 \
+  --collection-name legal_chunks_bge_m3_status_v2 \
+  --force-rebuild --embedding-backend local \
+  --embedding-model BAAI/bge-m3 --embedding-dim 1024
 ```
 
 ## Embedding
@@ -78,7 +78,7 @@ La collection storica `legal_chunks` puo rimanere disponibile come baseline dens
 
 ```text
 collection_name = legal_chunks_bge_m3
-qdrant_url = http://127.0.0.1:6333
+index_dir = data/indexes/qdrant
 embedding_backend = local
 embedding_model = BAAI/bge-m3
 hybrid_enabled = True
@@ -96,15 +96,19 @@ Ogni punto Qdrant usa un ID stabile:
 point_id = uuid5(NAMESPACE_URL, chunk_id)
 ```
 
-Ogni payload registra:
+Ogni payload registra due identità distinte:
 
 ```text
 content_hash = sha256(text_for_embedding.strip())
+payload_hash = sha256(canonical_payload_without_payload_hash)
 ```
 
-Quando la collection viene riutilizzata, i chunk invariati vengono saltati se il `content_hash` gia presente coincide. Se il contenuto cambia, il punto viene upsertato con nuovi vettori e nuovo payload.
+Quando entrambi coincidono il punto viene saltato. Se cambia soltanto il payload, la pipeline usa
+`set_payload` e conserva i vettori; se cambia il contenuto, rigenera embedding e punto.
 
-Questo rende le rerun economiche e impedisce duplicati.
+Prima dell'embedding vengono inoltre ricalcolati gli hash reali di manifest e chunks. L'indice
+registra tali hash, le versioni preprocessing/status e la code identity in manifest e payload:
+una collection non può quindi essere accettata soltanto perché nome e conteggio sembrano corretti.
 
 ## Artifact di Run
 

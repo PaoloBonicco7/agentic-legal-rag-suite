@@ -23,6 +23,34 @@ La baseline retroattiva è `default__20260511T180530Z`. Le fasi successive usera
 
 Gli esiti delle run, le leve promosse e quelle scartate sono in [results/06b](../results/06b_retrieval_diagnostics.md).
 
+## Audit dei filtri di vigenza
+
+Il profilo `filter_audit` separa due domande che il vecchio esperimento aggregava:
+
+1. il filtro conserva i target e i passaggi di supporto compatibili con il diritto corrente?
+2. sui medesimi QID e sul medesimo indice migliora effettivamente il retrieval rispetto a `none`?
+
+La copertura statica usa il target unico `(qid, article_id)` e distingue target completamente,
+parzialmente o per nulla eleggibili. MCQ e no-hint condividono questa analisi; le due forme vengono
+separate soltanto nelle metriche retrieval perché il testo della query può differire.
+
+La matrice confronta filtri legacy, stati `current|partial` ai tre livelli e le viste `current` e
+`not_explicitly_past`. Dense e Hybrid usano `k={5,10,20,50,100}` e `rrf_k=30`; lo stesso filtro è
+passato ai prefetch dense e sparse. Il profilo non usa LLM, reranking, grafo o query rewriting.
+
+Le metriche restano Article Success, Law Success e MRR. Ogni delta è appaiato alla riga `none` della
+stessa domanda e collection. Il confronto primario è no-hint Hybrid@10 per le due viste nuove:
+10.000 bootstrap appaiati, seed 42 e intervallo 97,5% per Article Success; MRR e confronti secondari
+usano intervalli descrittivi 95%.
+
+La conclusione non usa una singola etichetta: riporta separatamente copertura completa del
+benchmark, sicurezza sulla slice attiva, effetto retrieval e supporto bootstrap. I riferimenti
+storici restano nel benchmark completo, mentre i due qrel mismatch confermati sono annotati nel
+companion review senza correggere lo scoring.
+
+Un controllo Dense con `SearchParams(exact=True)` misura l'overlap ANN/exact. In modalità Qdrant
+locale è un controllo di sanità e non dimostra il comportamento HNSW di un deployment server.
+
 ## Hybrid retrieval
 
 La Fase 2 usa il nuovo indice BGE-M3 `legal_chunks_bge_m3`, che espone un vettore dense e uno sparse. Il notebook 06b è configurato per eseguire lo sweep F con:

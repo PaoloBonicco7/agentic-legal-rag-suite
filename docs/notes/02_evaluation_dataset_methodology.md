@@ -49,6 +49,11 @@ Gli output generati sono:
 - `evaluation_profile.json`;
 - `quality_report.md`.
 
+Il file versionato `data/evaluation/vigency_reference_review.csv` è un companion separato. Registra
+la revisione corpus-only dei dieci riferimenti esclusi dai filtri del baseline, inclusi gli articoli
+di supporto alternativi e i limiti temporali. Non modifica gli artifact normalizzati e non viene
+usato per calcolare le metriche.
+
 Il manifest registra configurazione, hash dei sorgenti, conteggi, distribuzione livelli, quality gates e hash degli output generati. Il manifest non contiene l'hash di se stesso, perche un file non puo includere un hash stabile del proprio contenuto.
 
 ## Esito osservato
@@ -63,6 +68,8 @@ Sul dataset versionato il processo produce:
 
 ## Limiti
 
-I riferimenti normativi vengono mantenuti come stringhe leggibili, una per riga non vuota. Non vengono ancora trasformati in identificatori strutturati di legge o articolo.
+I riferimenti normativi vengono mantenuti come stringhe leggibili, una per riga non vuota. Sono
+qrel per il retrieval, non affermazioni di vigenza. Il companion di audit può risolvere alcuni
+riferimenti in ID strutturati, ma rimane diagnostico e non corregge silenziosamente il benchmark.
 
 La validazione e stretta sul testo normalizzato. Se in futuro i CSV contengono varianti equivalenti ma non identiche, sara necessario decidere esplicitamente se introdurre una mappatura controllata, invece di allentare silenziosamente i controlli.

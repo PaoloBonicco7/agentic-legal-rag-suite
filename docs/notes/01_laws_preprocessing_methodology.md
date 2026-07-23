@@ -133,6 +133,16 @@ Le note vengono estratte separatamente perche possono contenere informazioni sul
 
 Servono per preservare evidenze che sarebbero facili da perdere se il testo venisse solo concatenato.
 
+### `status_events.jsonl`
+
+Rappresenta esclusivamente gli eventi di cessazione che possono cambiare l'idoneità di un testo alla
+vista corrente. Ogni evento conserva la clausola decisiva, il relativo ordine nel documento, lo
+scope risolto, la legge modificatrice e la regola applicata.
+
+La pipeline non assegna una confidence numerica: un evento è `resolved`, `ambiguous` o `unapplied`.
+Modifiche, inserimenti e sostituzioni restano nelle note e negli edge, ma non rendono
+automaticamente passato il testo consolidato.
+
 ### `edges.jsonl`
 
 Rappresenta il grafo delle relazioni esplicite.
@@ -151,22 +161,30 @@ I chunk includono metadati denormalizzati: status, provenienza, viste di indiciz
 
 ## Status legale e viste di indicizzazione
 
-Il dataset distingue tra materiale storico e materiale adatto alla vista corrente.
+La vigenza è rappresentata a livello di legge, articolo e passaggio con `current`, `partial`, `past`
+e `unknown`. È separata dalla disponibilità del contenuto (`substantive`, `unstructured`,
+`metadata_only`, `empty`), così una legge priva di articoli strutturati non viene confusa con una
+legge abrogata.
 
-Ogni chunk include sempre la vista `historical`, perche anche una legge passata puo essere utile per ricostruire evoluzione normativa o relazioni. La vista `current` viene aggiunta solo quando la legge e l'articolo risultano adatti al recupero come diritto corrente.
+Una cessazione totale risolta si propaga ai discendenti. Una cessazione limitata a comma o lettera
+modifica solo il passaggio risolto e rende il genitore `partial`; scope incompatibili o riferimenti
+non univoci producono `unknown`, mai `past`. Il parser valuta la singola clausola redazionale, non
+l'intero blocco nota, per evitare che riferimenti o citazioni storiche contaminino l'evento.
 
-Gli status ammessi per le leggi sono:
+Ogni chunk include sempre `historical`, che significa vista inclusiva e non ricostruzione del testo
+vigente in una data storica. `current` richiede un lineage composto solo da `current|partial` e
+contenuto sostanziale; `not_explicitly_past` conserva anche gli `unknown` purché nessun livello sia
+esplicitamente `past`.
 
-- `current`;
-- `past`;
-- `unknown`;
-- `index_or_empty`.
-
-Lo status non pretende di sostituire una valutazione giuridica completa. E una classificazione operativa e documentata, utile per filtri e retrieval, basata su segnali espliciti osservabili nel corpus.
+Questi stati descrivono esclusivamente l'evidenza del corpus snapshot. `current` significa assenza di
+una cessazione esplicita riconosciuta e non sostituisce una valutazione giuridica esterna.
 
 ## Validazione e tracciabilita
 
-La pipeline produce un `manifest.json` che registra configurazione, conteggi, hash del corpus sorgente, hash degli output e quality gates.
+La pipeline produce un `manifest.json` che registra configurazione, conteggi, hash del corpus
+sorgente, hash degli output, versione delle regole, hash del codice della pipeline, revisione Git e
+quality gates. In questo modo un artifact non è considerato fresco soltanto perché il corpus non è
+cambiato.
 
 La validazione controlla che:
 
@@ -174,6 +192,9 @@ La validazione controlla che:
 - gli ID siano non vuoti e senza duplicati;
 - i chunk contengano tutti i campi richiesti;
 - i metadati lista siano liste reali e non stringhe serializzate;
+- gli eventi richiamati da entità e chunk esistano;
+- anchor duplicate, marker senza anchor, backlink mancanti o multipli e mismatch di scope siano
+  conteggiati;
 - il grafo pulito non contenga self-loop;
 - i tipi relazione e gli status appartengano ai valori ammessi;
 - gli output dichiarati esistano e abbiano hash;
