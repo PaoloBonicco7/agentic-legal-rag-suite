@@ -12,9 +12,9 @@ riproducibili, run di riferimento e candidati di pulizia. La revisione è basata
 
 ## Sintesi
 
-`data/` pesa circa **6.4 GB** al momento della revisione. Il peso è quasi tutto in:
+`data/` pesa circa **7.4 GB** al momento della revisione. Il peso è quasi tutto in:
 
-- `data/indexes/`: **2.0 GB** più la full run status-v2 in costruzione, indici Qdrant locali/server;
+- `data/indexes/`: **3.0 GB**, inclusa la full run status-v2 locale terminale;
 - `data/retrieval_eval_runs/`: **3.7 GB**, diagnostics retrieval-only e storico di sweep;
 - `data/laws_dataset_clean/`: **289 MB**, baseline clean v1;
 - `data/laws_dataset_clean_status_v2/`: **321 MB**, clean v2 dell'audit.
@@ -104,11 +104,21 @@ Il manifest storico registra:
 | Path | Stato | Motivo |
 |---|---|---|
 | `data/indexing_runs/status_v2_sample/` | tenere | Smoke da 16 point del contratto `indexing-contract-v2`; non è evidenza retrieval. |
-| `data/indexing_runs/status_v2_full_20260723/` | tenere quando terminale | Manifest full dell'audit, da preservare con hash e profilo payload. |
-| `data/indexes/qdrant_status_v2/` | tenere | Collection locale isolata `legal_chunks_bge_m3_status_v2`, 76.499 point attesi. |
+| `data/indexing_runs/status_v2_full_20260723/` | tenere | Manifest full terminale dell'audit, con hash e profilo payload. |
+| `data/indexes/qdrant_status_v2/` | 1.0 GB, tenere | Collection locale isolata `legal_chunks_bge_m3_status_v2`, 76.499 point verificati. |
 
 Il notebook 06b rifiuta esplicitamente l'indice sample: corpus, clean manifest, file reali,
 manifest indice e identità live della collection devono riconciliarsi prima e dopo lo sweep.
+
+La full run usa `qdrant.mode=local` e `url=null`: non richiede Docker. Ha riusato 76.407 vettori
+verificati dalla collection locale storica `data/indexes/qdrant/::legal_chunks_bge_m3` e ha
+ricalcolato 92 contenuti nuovi o modificati. Il manifest terminale ha SHA-256
+`8620733009fea277b1f457dc60268f1fe761b0a8d70d72371df02bf106cc69a7`.
+
+La run retrieval `filter_audit` non è ancora terminale. Quando verrà eseguita separatamente, la
+directory `data/retrieval_eval_runs/validity_filter_audit__<timestamp>/` dovrà contenere manifest,
+sweep, copertura, esclusioni, impatto, controllo exact e transizioni v1→v2 prima di essere citata
+come risultato.
 
 ## Miglioramenti documentati
 
@@ -262,14 +272,15 @@ Per recuperare spazio senza perdere la traccia scientifica, la strategia miglior
 - `collections/legal_chunks/` (~690 MB);
 - `collections/legal_chunks_sample/` (~404 MB).
 
-L'indice documentato per la pipeline recente è `data/indexes/qdrant_server/collections/legal_chunks_bge_m3/`.
-Tuttavia alcuni config di run/notebook hanno ancora default o path locali verso `data/indexes/qdrant`.
-Quindi `data/indexes/qdrant/` è un buon candidato di archiviazione, ma non va cancellato prima di:
+L'indice documentato per la pipeline Advanced RAG resta
+`data/indexes/qdrant_server/collections/legal_chunks_bge_m3/`. La collection locale
+`data/indexes/qdrant/::legal_chunks_bge_m3` è inoltre la sorgente verificata dei 76.407 vettori
+riusati dalla full status-v2. Non è quindi un candidato di pulizia immediata. Prima di archiviarla
+occorre:
 
-1. verificare che i notebook 03, 05, 06 e 06b puntino esplicitamente a `qdrant_server` o possano
-   rigenerare l'indice;
-2. decidere se mantenere il vecchio indice `legal_chunks` come audit locale;
-3. salvare i manifest delle run che lo usano.
+1. conservare `data/indexing_runs/20260512_212818/index_manifest.json` e il manifest status-v2;
+2. accettare che una futura rebuild senza questa sorgente ricalcoli tutti i vettori;
+3. verificare che i notebook storici che la usano siano riproducibili con un altro indice.
 
 ## Raccomandazione pratica
 
@@ -280,8 +291,8 @@ riproducibilita:
 2. rimuovere o archiviare le run senza manifest e le cartelle `*_smoke` / `_debug_*`;
 3. archiviare esternamente i vecchi `default__20260511*` pesanti, lasciando nel repo solo i manifest
    e la sintesi in `docs/results/06b_retrieval_diagnostics.md`;
-4. valutare la rimozione di `data/indexes/qdrant/` solo dopo un rerun controllato della pipeline
-   recente contro `data/indexes/qdrant_server/`.
+4. mantenere `data/indexes/qdrant/` almeno finché il lineage di riuso status-v2 resta parte
+   dell'evidenza documentata.
 
 ## Stato atteso dopo pulizia conservativa
 

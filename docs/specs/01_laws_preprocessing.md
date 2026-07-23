@@ -25,11 +25,12 @@ Default generated output directory: `data/laws_dataset_clean/`.
 - `status_events.jsonl`: resolved and unresolved cessation events used by the validity rules.
 - `edges.jsonl`: explicit graph relations between laws or articles.
 - `chunks.jsonl`: RAG-ready chunks with denormalized metadata.
-- `status_transitions.jsonl`: optional comparison with a configured previous clean dataset.
 - `quality_report.md`: human-readable validation report.
 - `dataset_profile.json`: exploration summary for notebooks.
 
 Generated files are reproducible artifacts and are not committed by default.
+The v1-to-v2 comparison is a retrieval-audit output named
+`status_transitions_v1_to_v2.csv`; it is not part of the preprocessing contract.
 
 ## Pipeline
 

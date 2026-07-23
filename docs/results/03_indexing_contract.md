@@ -39,6 +39,38 @@ performance retrieval:
 - chunk SHA-256
   `dacbb03fd3debfd272031226ad539100cc228141acca94fba304fa28c663cb95`.
 
+## Full run status-v2
+
+La run terminale `status_v2_full_20260723` ha costruito la collection isolata
+`legal_chunks_bge_m3_status_v2` in `data/indexes/qdrant_status_v2/`:
+
+- modalità Qdrant `local`, quindi `QdrantClient(path=...)` senza Docker o server;
+- `selected=indexed=collection_points=76.499`, zero failure;
+- BGE-M3 dense 1024 + sparse, batch embedding 256 e upload batch 64;
+- `inserted=76.499`, `vector_updated=0`, `payload_updated=0`, `skipped=0`;
+- `embedded=92` e `vector_reused=76.407`;
+- `ready_for_retrieval=true` e tutti i quality gate verdi.
+
+I 76.407 vettori invariati provengono dalla run locale `20260512_212818`, collection
+`data/indexes/qdrant/::legal_chunks_bge_m3`. Prima del riuso sono stati verificati manifest,
+chunks hash, modello, dimensione, topologia dense+sparse e `content_hash` di ogni punto. I 92
+contenuti nuovi o modificati sono stati ricalcolati. Il target è stato comunque ricreato e tutti i
+payload sono v2: non si tratta di una copia bit-a-bit del vecchio indice.
+
+La run registra:
+
+- manifest SHA-256
+  `8620733009fea277b1f457dc60268f1fe761b0a8d70d72371df02bf106cc69a7`;
+- payload profile SHA-256
+  `b444a320a2efa80032578efa4599506b1c2c77631e93602081938929c350cb63`;
+- manifest sorgente riuso SHA-256
+  `60c35d07065c75d2707308d792d3ea5114017257ea4d5022e106a28663cfee04`;
+- Git `4fcb8bb15792c36c29b3af002f63f708be1e6ef6`, worktree pulito.
+
+`removed=384` descrive point presenti in tentativi parziali della stessa collection prima del
+`force_rebuild`; non sono chunk eliminati dal corpus. La collection terminale riconcilia
+esattamente tutti i 76.499 chunk clean.
+
 ## Indice storico v1
 
 Gli step 05, 06 e il baseline storico 06b consumavano `legal_chunks_bge_m3`, run
@@ -62,22 +94,31 @@ distribuzioni payload e quality gate.
 
 ## Riproduzione della full run status-v2
 
+Il target sotto usa nomi nuovi per non sovrascrivere la run documentata:
+
 ```bash
-PYTHONPATH=src python -m legal_rag.indexing \
+STATUS_V2_RUN_ID=status_v2_full_20260723_rerun01
+
+PYTHONPATH=src .venv/bin/python -m legal_rag.indexing \
   --clean-dataset-dir data/laws_dataset_clean_status_v2 \
-  --index-dir data/indexes/qdrant_status_v2 \
+  --index-dir data/indexes/qdrant_status_v2_rerun01 \
   --runs-dir data/indexing_runs \
-  --collection-name legal_chunks_bge_m3_status_v2 \
-  --run-id status_v2_full_20260723 \
+  --collection-name legal_chunks_bge_m3_status_v2_rerun01 \
+  --run-id "$STATUS_V2_RUN_ID" \
   --embedding-backend local \
   --embedding-model BAAI/bge-m3 \
   --embedding-dim 1024 \
-  --batch-size 64 \
+  --batch-size 256 \
   --upload-batch-size 64 \
   --chunk-selection-mode full \
   --force-rebuild \
-  --require-clean-worktree
+  --require-clean-worktree \
+  --reuse-vectors-index-dir data/indexes/qdrant \
+  --reuse-vectors-collection legal_chunks_bge_m3 \
+  --reuse-vectors-manifest-path data/indexing_runs/20260512_212818/index_manifest.json
 ```
 
-La sezione verrà completata con conteggi e hash del manifest terminale della full run. Notebook:
+Il riuso è opzionale: omettendo insieme i tre flag `--reuse-vectors-*` la pipeline ricalcola tutti
+i vettori. Contratto e configurazione sperimentale restano gli stessi, ma i nuovi artifact numerici
+devono essere validati e non si assume che vettori o ranking siano identici. Notebook:
 `notebooks/03_indexing_contract.ipynb`.

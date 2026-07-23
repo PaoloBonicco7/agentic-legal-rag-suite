@@ -29,14 +29,19 @@ This step isolates retrieval quality from answer generation. It measures whether
 Default generated output directory: `data/retrieval_eval_runs/<run_name>__<YYYYMMDDTHHMMSSZ>/`.
 
 - `manifest.json`: input references, configuration, index identity, schema and prompt versions where applicable.
-- `scenarios.csv`: aggregate retrieval metrics for every scenario.
+- `scenarios.csv`: aggregate retrieval metrics for the historical general-purpose profiles. The
+  deterministic `filter_audit` profile writes the schema with zero rows because its paired
+  baseline and comparisons live in `sweep_direct.csv` and `filter_impact.csv`.
 - `sweep_rerank.csv`: row-level rerank diagnostics when Experiment G runs.
 - `sweep_query_rewriting.csv`: row-level query rewriting diagnostics when Experiment H runs.
 - Row-level diagnostic files: per-question candidates, expected references, hit flags, ranking positions, and skipped/error status.
 - `filter_reference_audit.csv`: one row per unique question/article target and filter, with status evidence and retained chunk coverage.
-- `filter_exclusions.csv`: partially and fully excluded targets.
+- `filter_exclusions.csv`: partially/fully excluded targets plus fully eligible qrels whose
+  reviewed answer-support passage is excluded.
 - `filter_impact.csv`: paired retrieval deltas, coverage decisions, and bootstrap intervals.
 - `filter_exact_control.csv`: dense ANN/exact overlap and metric deltas when enabled.
+- `status_transitions_v1_to_v2.csv`: law/article status comparison between the configured clean
+  baseline and v2 dataset.
 - Historical comparison tables and plots when a previous dense-only run is configured.
 - Optional cache files under `data/cache/` for expensive rerank or query rewriting calls.
 - A human-readable results report in `docs/results/06b_retrieval_diagnostics.md`.
@@ -78,9 +83,30 @@ Each scenario summary must include:
 
 Skipped scenarios must keep a row in `scenarios.csv` with `status="skipped"` and a non-empty `skip_reason`.
 
+The scenario-summary contract applies when a general-purpose diagnostic profile produces scenario
+rows. The `filter_audit` profile preserves an empty `scenarios.csv` schema and records all
+question-level retrieval rows in `sweep_direct.csv`.
+
 Row-level diagnostics must preserve the question id, expected references, retrieved chunk ids, retrieved law/article ids, hit flags, retrieval mode, `top_k`, `rrf_k` when applicable, and rank of the first matching article when present.
 
 Filter-audit rows must additionally preserve filter id/configuration, `exact`, collection identity, total and retained target chunks, `fully_eligible|partially_eligible|fully_excluded`, applicable status events/rules, and whether the row belongs to the active slice.
+
+Filter-impact verdicts have independent meanings:
+
+- `benchmark_full_coverage=true` only when every benchmark target is `fully_eligible`;
+- `active_slice_safety=unsafe` when a current/partial target or a resolved reviewed support
+  passage is fully lost, `unresolved` when an excluded `unknown` or unresolved declared support
+  remains, and `safe` otherwise;
+- `retrieval_effect=harmful` when either Article Success or MRR decreases, `beneficial` when at
+  least one increases and neither decreases, and `inconclusive` when neither changes;
+- `bootstrap_supported=true` only for a primary comparison whose Article Success interval excludes
+  zero in the same direction as the observed effect. Its expected value is `false` for every
+  secondary comparison.
+
+A filter is a candidate only when `active_slice_safety="safe"` and
+`retrieval_effect!="harmful"`. `benchmark_full_coverage` remains informative because genuine
+historical qrels may make it false, while `bootstrap_supported` reports inferential support rather
+than acting as an independent promotion gate.
 
 `RETRIEVAL_EVALUATION_SCHEMA_VERSION` is `retrieval-evaluation-v5`.
 `FILTER_AUDIT_SCHEMA_VERSION` is `filter-audit-v1`.
@@ -96,7 +122,9 @@ Query rewriting row-level diagnostics must additionally preserve `strategy`, `qu
 
 - Diagnostic runs never overwrite previous runs.
 - Scenario metrics are derived from row-level diagnostics, not hand-edited.
-- The baseline dense scenario is always present for each evaluated dataset.
+- General-purpose profiles always include the baseline dense scenario for each evaluated dataset.
+  The `filter_audit` profile instead requires one `filter_name="none"` row for every evaluated
+  dataset, retrieval mode, cutoff, exact mode, and paired QID set in `sweep_direct.csv`.
 - Skipped experiments are explicit and explain why they could not run.
 - Hybrid scenarios run only when the tested index exposes sparse vectors and the embedder can produce sparse embeddings.
 - Experiment F evaluates BGE-M3 dense against BGE-M3 hybrid over `top_k in {10, 20, 50, 100}` and `rrf_k in {30, 60, 90}`.
@@ -124,12 +152,13 @@ Query rewriting row-level diagnostics must additionally preserve `strategy`, `qu
 
 `notebooks/06b_retrieval_diagnostics.ipynb` should:
 
-- load a diagnostic run and display `scenarios.csv`;
-- compare dense, filtered, graph, hybrid, rerank, and query rewriting experiments when available;
-- compare the current BGE-M3 hybrid-ready index with a configured historical dense-only run;
-- inspect representative failures where the correct article is missing from top-k candidates;
-- render the filter-audit artifacts and the corpus-only review of affected references;
-- identify the best configuration to promote into `notebooks/06_advanced_graph_rag.ipynb`;
+- configure and invoke the reusable `filter_audit` profile;
+- fail preflight on any clean-file, manifest, collection-count, point-payload, or identity mismatch;
+- render the status transitions, filter coverage, paired impact, exclusions, exact control, and
+  corpus-only review;
+- write the complete audit artifact set only after a successful postflight;
+- keep the historical F/G/H experiment evidence in the result documentation rather than rerunning
+  those experiments;
 - avoid redefining reusable retrieval logic already implemented under `src/legal_rag/`.
 
 ## Acceptance Criteria

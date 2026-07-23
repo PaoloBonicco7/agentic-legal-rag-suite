@@ -173,8 +173,8 @@ l'intero blocco nota, per evitare che riferimenti o citazioni storiche contamini
 
 Ogni chunk include sempre `historical`, che significa vista inclusiva e non ricostruzione del testo
 vigente in una data storica. `current` richiede un lineage composto solo da `current|partial` e
-contenuto sostanziale; `not_explicitly_past` conserva anche gli `unknown` purché nessun livello sia
-esplicitamente `past`.
+contenuto `substantive|unstructured`; `not_explicitly_past` conserva anche gli `unknown` purché
+nessun livello sia esplicitamente `past`.
 
 Questi stati descrivono esclusivamente l'evidenza del corpus snapshot. `current` significa assenza di
 una cessazione esplicita riconosciuta e non sostituisce una valutazione giuridica esterna.

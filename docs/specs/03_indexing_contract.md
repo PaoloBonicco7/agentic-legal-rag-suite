@@ -19,6 +19,9 @@ The vector store, embedding backend, and retrieval strategy are fixed at the pro
   - `collection_name: str` (default `legal_chunks`).
   - `qdrant_url: str | None` (default `None`; the thesis workflow uses local persistent mode).
   - `qdrant_api_key: str` (default empty; retained only for compatibility with explicit remote experiments).
+  - `reuse_vectors_index_dir: str | None` (optional local source index for verified vector reuse).
+  - `reuse_vectors_collection: str | None` (source collection paired with the reuse index).
+  - `reuse_vectors_manifest_path: str | None` (source manifest used to verify embedding and collection identity).
   - `embedding_backend: Literal["local","utopia"]` (default `local`).
   - `embedding_model: str` (default `BAAI/bge-m3`).
   - `embedding_dim: int | None` (optional override; otherwise derived from the model).
@@ -42,7 +45,8 @@ The vector store, embedding backend, and retrieval strategy are fixed at the pro
 - **Sparse vector**: only stored when `hybrid_enabled=True`.
   - For `BAAI/bge-m3` (local): use the model's native sparse output.
   - For other local models without native sparse output: use `qdrant-client[fastembed]` BM25 sparse encoder client-side.
-  - For `utopia` backend: hybrid is supported only if the configured remote model exposes sparse weights; otherwise indexing fails with a clear error and the user must either disable hybrid or switch backend.
+  - For the current `utopia` backend implementation: only dense output is supported, so
+    `hybrid_enabled` must be disabled. Hybrid runs use the local BGE-M3 backend.
 - **Embedding input text**: every chunk is embedded using its `text_for_embedding` field from step 01 (not the raw `text`), to preserve legal context like article label and structure path.
 - **Payload indexes**: at index creation, keyword indexes are created before upload for `law_id`, `law_status`, `article_id`, `article_status`, `passage_status`, `content_availability`, `index_views`, and `relation_types`.
 
@@ -57,6 +61,14 @@ The vector store, embedding backend, and retrieval strategy are fixed at the pro
 - On re-run with `force_rebuild=True`, the collection is dropped and recreated from scratch.
   This operation is scoped to the configured `collection_name`; other collections in the same Qdrant local path or server storage are not removed.
 - The manifest records counts for `inserted`, `vector_updated`, `payload_updated`, `skipped`, and `removed` (the last only when rebuild is requested).
+
+An optional full rebuild may reuse vectors from an isolated local source collection. All three
+`reuse_vectors_*` fields must be configured together, the target must be a different local path,
+and `force_rebuild=True` is required. Before reading source vectors, the pipeline verifies the
+source manifest, collection topology, embedding model, vector size, hybrid mode, chunks hash, and
+ready state. A vector is reused only when the source point has the same `chunk_id` and
+`content_hash`; otherwise the chunk is embedded normally. The manifest records the source
+provenance and the separate `vector_reused_count` and `embedded_count`.
 
 ## Outputs
 
@@ -82,8 +94,10 @@ Required artifacts:
    Why: collection topology must match the chosen backend; mismatches must be caught up front.
 4. Select chunks for indexing (`full` or `sample`).
    Why: the PoC supports both full runs and small notebook runs while preserving the same contract.
-5. Build embedding input from `text_for_embedding` and produce dense (and optionally sparse) vectors in batches.
-   Why: batching keeps memory and HTTP behavior predictable.
+5. Build embedding input from `text_for_embedding`, reuse only verified unchanged vectors when
+   configured, and produce the remaining dense (and optionally sparse) vectors in batches.
+   Why: batching keeps memory and HTTP behavior predictable while reuse avoids recomputing
+   representations already produced for byte-identical input with the same model configuration.
 6. Upsert points with stable ids, applying the idempotency policy.
    Why: repeated runs should not duplicate unchanged chunks.
 7. Validate the index.
@@ -143,6 +157,8 @@ The index manifest must record actual SHA-256 values for the clean manifest and 
 - Source clean dataset has `ready_for_indexing=True`.
 - Actual required-file hashes match the preprocessing manifest.
 - Embedding backend and model are recorded in the manifest, together with the resolved dimensionality.
+- When vector reuse is configured, source manifest identity and topology are compatible, every
+  reused point has a matching content hash, and reused plus embedded counts equal selected count.
 - The Qdrant collection topology matches the configured dense (and sparse, when enabled) schema.
 - Payload indexes exist for every required filterable field.
 - Every indexed point carries the full payload contract.
@@ -169,7 +185,8 @@ The notebook should explain the payload fields because they are the bridge betwe
 
 ## Acceptance Criteria
 
-- The clean dataset can be indexed reproducibly under both `local` and `utopia` embedding backends, with hybrid enabled when the chosen backend supports sparse vectors.
+- The clean dataset can be indexed reproducibly with the local BGE-M3 backend for dense+hybrid
+  retrieval and with the current Utopia backend for dense-only retrieval.
 - Full BGE-M3 indexing runs in an isolated Qdrant local persistent path and records `qdrant.mode="local"` in the manifest.
 - The collection topology and payload contract are sufficient for simple RAG (step 05) and advanced graph RAG (step 06) without further indexing changes.
 - The index can be traced back to the exact clean dataset hash and embedding model identity recorded in the manifest.

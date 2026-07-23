@@ -27,18 +27,24 @@ L'unita indicizzata e il chunk prodotto dallo step 01. Il testo passato al model
 Il payload Qdrant mantiene invece il testo originale in `text`, insieme ai metadati necessari per retrieval e spiegabilita:
 
 - identificatori di chunk, passaggio, articolo e legge;
-- stato di legge e articolo;
+- stato di legge, articolo e passaggio;
+- disponibilità del contenuto, eventi e regole di stato;
 - titolo, data e numero della legge;
 - file sorgente;
 - viste di indicizzazione;
 - relazioni entranti, uscenti e tipi relazione.
+- hash di contenuto/payload e identità del dataset clean.
 
 Questa separazione permette al modello embedding di vedere il contesto giuridico, ma consente al retrieval di restituire una fonte leggibile e filtrabile.
 
 ## Qdrant
 
-La pipeline di tesi usa Qdrant in modalità file locale persistente tramite `qdrant-client`. Ogni
-esperimento definitivo che cambia contratto usa un path e una collection separati.
+La pipeline di tesi usa Qdrant in modalità file locale persistente tramite
+`QdrantClient(path=...)`. Non richiede Docker, un demone Qdrant o una porta locale: il processo
+Python legge e scrive direttamente il path configurato. Docker o un server sono necessari soltanto
+impostando esplicitamente `qdrant_url`.
+
+Ogni esperimento definitivo che cambia contratto usa un path e una collection separati.
 
 La collection contiene:
 
@@ -51,15 +57,28 @@ Gli indici keyword vengono dichiarati prima dell'upload per stati, viste, dispon
 legali. Il client embedded può segnalare che non hanno lo stesso effetto prestazionale di un server;
 il contratto payload resta comunque verificato e riproducibile.
 
-Comando operativo per l'audit:
+Comando di riproduzione con target isolato (la run documentata non viene sovrascritta):
 
 ```bash
+STATUS_V2_RUN_ID=status_v2_full_20260723_rerun01
+
 PYTHONPATH=src .venv/bin/python -m legal_rag.indexing \
   --clean-dataset-dir data/laws_dataset_clean_status_v2 \
-  --index-dir data/indexes/qdrant_status_v2 \
-  --collection-name legal_chunks_bge_m3_status_v2 \
-  --force-rebuild --embedding-backend local \
-  --embedding-model BAAI/bge-m3 --embedding-dim 1024
+  --index-dir data/indexes/qdrant_status_v2_rerun01 \
+  --runs-dir data/indexing_runs \
+  --collection-name legal_chunks_bge_m3_status_v2_rerun01 \
+  --run-id "$STATUS_V2_RUN_ID" \
+  --embedding-backend local \
+  --embedding-model BAAI/bge-m3 \
+  --embedding-dim 1024 \
+  --batch-size 256 \
+  --upload-batch-size 64 \
+  --chunk-selection-mode full \
+  --force-rebuild \
+  --require-clean-worktree \
+  --reuse-vectors-index-dir data/indexes/qdrant \
+  --reuse-vectors-collection legal_chunks_bge_m3 \
+  --reuse-vectors-manifest-path data/indexing_runs/20260512_212818/index_manifest.json
 ```
 
 ## Embedding
@@ -110,6 +129,21 @@ Prima dell'embedding vengono inoltre ricalcolati gli hash reali di manifest e ch
 registra tali hash, le versioni preprocessing/status e la code identity in manifest e payload:
 una collection non può quindi essere accettata soltanto perché nome e conteggio sembrano corretti.
 
+## Riuso verificato dei vettori
+
+Una full rebuild isolata può riusare i vettori di una collection locale precedente senza fidarsi
+del solo nome. La pipeline richiede insieme path, collection e manifest sorgente, quindi verifica:
+
+- run e manifest sorgente pronti per retrieval;
+- stesso modello, dimensione dense, presenza sparse e topologia;
+- hash del vecchio `chunks.jsonl`;
+- corrispondenza puntuale di `chunk_id` e `content_hash`.
+
+Soltanto i contenuti invariati riusano dense e sparse; ogni contenuto nuovo o modificato viene
+ricalcolato con BGE-M3. Il target resta ricreato con `force_rebuild` e riceve sempre il payload v2.
+Il manifest distingue `vector_reused_count` da `embedded_count` e conserva hash e identità della
+sorgente, così il risparmio computazionale non indebolisce la tracciabilità.
+
 ## Artifact di Run
 
 Ogni esecuzione produce una cartella in `data/indexing_runs/<run_id>/`.
@@ -144,6 +178,8 @@ La run e considerata pronta solo se:
 - almeno un chunk viene selezionato;
 - la dimensione embedding e rilevata e coerente con `embedding_dim`, se configurata;
 - tutti i punti selezionati sono indicizzati o saltati come invariati;
+- gli eventuali vettori riusati provengono da una collection compatibile e hanno content hash
+  identico;
 - non esistono `chunk_id` duplicati;
 - i campi payload obbligatori sono presenti;
 - i filtri principali sono queryable;

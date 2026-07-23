@@ -53,7 +53,11 @@ locale è un controllo di sanità e non dimostra il comportamento HNSW di un dep
 
 ## Hybrid retrieval
 
-La Fase 2 usa il nuovo indice BGE-M3 `legal_chunks_bge_m3`, che espone un vettore dense e uno sparse. Il notebook 06b è configurato per eseguire lo sweep F con:
+Questa sezione descrive la metodologia storica v1 che ha prodotto i risultati F, G e H. Il
+notebook 06b corrente non riesegue questi esperimenti: è limitato al profilo deterministico
+`filter_audit`.
+
+La Fase 2 storica usa il nuovo indice BGE-M3 `legal_chunks_bge_m3`, che espone un vettore dense e uno sparse. Il notebook v1 era configurato per eseguire lo sweep F con:
 
 - dense BGE-M3 su `top_k={10,20,50,100}`;
 - hybrid BGE-M3 con RRF su `top_k={10,20,50,100}` e `rrf_k={30,60,90}`;
@@ -69,7 +73,7 @@ Il confronto con il vecchio indice non riesegue il dense-only storico: legge `da
 
 La Fase 3 misura il reranking LLM sopra il miglior assetto hybrid emerso dallo sweep F. Il reranker non sostituisce il retrieval: riceve i candidati gia recuperati, assegna a ogni chunk uno score discreto `0`, `1` o `2`, e l'evaluator applica solo dopo l'ordinamento score-descendente con tie-break sul ranking originale.
 
-Il notebook 06b mantiene `RUN_RERANK=False` di default per evitare chiamate Utopia accidentali. Quando viene attivato:
+Nel notebook v1 `RUN_RERANK=False` evitava chiamate Utopia accidentali. Quando veniva attivato:
 
 - usa `RERANK_PROMPT_VERSION` nella chiave cache;
 - scrive la cache in `data/cache/rerank/<sanitized_model>.jsonl`;
@@ -88,6 +92,62 @@ La Fase 4 prepara tre trasformazioni della domanda prima del retrieval:
 - `hyde`: genera un breve passaggio normativo ipotetico, senza inventare citazioni;
 - `multi_query`: produce esattamente tre formulazioni alternative della stessa esigenza informativa.
 
-Il notebook 06b mantiene `RUN_QUERY_REWRITING=False` di default. Quando viene attivato, il pilot usa il miglior assetto hybrid disponibile, campiona 30 domande per dataset con seed fisso e confronta le strategie contro `none`. Le trasformazioni sono prodotte con output strutturato Pydantic, cache versionata e prompt `QUERY_REWRITING_PROMPT_VERSION`.
+Nel notebook v1 `RUN_QUERY_REWRITING=False` disattivava il pilot per default. Quando veniva
+attivato, il pilot usava il miglior assetto hybrid disponibile, campionava 30 domande per dataset
+con seed fisso e confrontava le strategie contro `none`. Le trasformazioni erano prodotte con
+output strutturato Pydantic, cache versionata e prompt `QUERY_REWRITING_PROMPT_VERSION`.
 
 La cache vive in `data/cache/query_rewriting/` e separa strategia, modello e versione prompt nel nome file. La chiave include domanda, strategia, modello e versione prompt; quindi cambiare prompt invalida la cache senza cancellare artifact precedenti.
+
+## Verdetti dell'audit v2
+
+I quattro campi conclusivi non sono sinonimi:
+
+- `benchmark_full_coverage` richiede che tutti i target qrel siano interamente eleggibili;
+- `active_slice_safety=unsafe` se il filtro perde un target `current|partial` o un passaggio di
+  supporto revisionato e risolto; è `unresolved` se esclude uno stato `unknown` o se un supporto
+  dichiarato non può essere risolto;
+- `retrieval_effect` è `harmful` se peggiora Article Success o MRR, `beneficial` se almeno una
+  metrica migliora senza peggiorare l'altra, altrimenti `inconclusive`;
+- `bootstrap_supported` può essere `true` soltanto per le due inferenze primarie e soltanto quando
+  il CI di Article Success esclude zero nella direzione dell'effetto.
+
+Un filtro è candidabile soltanto con `active_slice_safety=safe` e
+`retrieval_effect!=harmful`. `benchmark_full_coverage` resta informativo perché riferimenti
+realmente storici possono renderlo falso; `bootstrap_supported` indica il supporto inferenziale.
+Il notebook non modifica configurazioni Simple o Advanced RAG.
+
+## Esecuzione operativa dell'audit v2
+
+Il notebook usa la collection locale persistente
+`data/indexes/qdrant_status_v2/::legal_chunks_bge_m3_status_v2`; Docker non deve essere avviato.
+Prima del run, nessun altro processo deve tenere aperto lo stesso path Qdrant.
+
+Per lavorare interattivamente:
+
+```bash
+PYTHONPATH=src .venv/bin/jupyter lab notebooks/06b_retrieval_diagnostics.ipynb
+```
+
+Il primo blocco esegue il preflight completo. Il blocco `run_filter_audit(...)` è il job lungo; va
+lanciato solo quando si vuole completare lo sweep. Gli artefatti vengono pubblicati atomicamente
+dall'ultima cella, quindi un'interruzione precedente non produce una run valida.
+
+Per un'esecuzione headless completa e monitorabile:
+
+```bash
+PYTHONPATH=src PYTHONUNBUFFERED=1 \
+RETRIEVAL_DIAGNOSTICS_MAX_WORKERS=1 \
+RETRIEVAL_DIAGNOSTICS_RUN_NAME=validity_filter_audit \
+.venv/bin/jupyter nbconvert \
+  --to notebook \
+  --execute notebooks/06b_retrieval_diagnostics.ipynb \
+  --output 06b_retrieval_diagnostics_executed.ipynb \
+  --output-dir data/retrieval_eval_runs \
+  --ExecutePreprocessor.timeout=-1
+```
+
+Il notebook eseguito viene scritto in `data/retrieval_eval_runs/`; gli artifact analitici finiscono
+in una directory univoca `validity_filter_audit__<timestamp>/`. Il run locale full può richiedere
+diverse ore, soprattutto per il controllo Dense exact: il tempo non va interpretato come un
+benchmark di Qdrant server/HNSW.

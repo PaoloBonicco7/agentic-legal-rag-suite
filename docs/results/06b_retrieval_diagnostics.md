@@ -60,7 +60,7 @@ Il confronto Dense@10 storico su 100 domande era:
 | none | 73 |
 | `law_status=current` | 71 |
 | `article_status=current` | 69 |
-| vista corrente legge+articolo | 67 |
+| `law_status=current AND article_status=current` | 67 |
 
 Il peggioramento era reale, ma la precedente spiegazione causale era errata. Il corpus v2 non è
 dominato da leggi correnti: soltanto 836 su 3.145 sono `current`. Le esclusioni mescolavano quattro
@@ -227,16 +227,40 @@ configurazioni RAG.
 comma 3 resta evidenza editoriale ambigua. Per `eval-0100`, l'applicabilità temporale nel 2020 non
 è risolvibile attraverso la sola vigenza del corpus.
 
+Nei casi `eval-0002`, `eval-0003`, `eval-0073`, `eval-0075` ed `eval-0076` il passaggio di
+supporto è attivo ma la legge ha stato `unknown`: il supporto entra quindi in
+`not_explicitly_past`, non nella vista più restrittiva `current`. Questo distingue lo stato del
+passaggio dal requisito sull'intero lineage.
+
 ### Risultati retrieval
 
-Questa sezione viene popolata esclusivamente dal run full terminale; nessuna metrica è derivata
-dalla collection sample.
+Al 23 luglio 2026 non è registrato un run audit v2 terminale. L'esecuzione full del notebook è
+demandata come job separato: nessuna metrica viene inferita da tentativi interrotti o dalla
+collection sample, e nessun filtro è promosso.
+
+Quando il run sarà completo, questa sezione dovrà registrare il run ID, hash del manifest,
+distribuzioni, righe artefatto, copertura statica, tabella completa QID/target, i due confronti
+primari no-hint Hybrid@10, controllo ANN/exact e candidabilità. I file da revisionare sono:
+
+- `sweep_direct.csv`;
+- `filter_reference_audit.csv`;
+- `filter_exclusions.csv`;
+- `filter_impact.csv`;
+- `filter_exact_control.csv`;
+- `status_transitions_v1_to_v2.csv`;
+- `manifest.json`.
+
+Il comando operativo e le precondizioni sono documentati in
+[note/06b](../notes/06b_retrieval_diagnostics_methodology.md#esecuzione-operativa-dellaudit-v2).
 
 ## Riferimenti
 
 - Run dir: `data/retrieval_eval_runs/diagnostic_full_utopia_throttled__20260525T091921Z/`
   (`scenarios.csv`, `sweep_direct.csv`, `sweep_rerank.csv`, `sweep_query_rewriting.csv`,
   `manifest.json`, `recommended_advanced_config.json`).
+- Indice audit pronto: `data/indexing_runs/status_v2_full_20260723/index_manifest.json`,
+  collection locale `data/indexes/qdrant_status_v2/::legal_chunks_bge_m3_status_v2`.
+- Run audit retrieval v2: in attesa di esecuzione separata.
 - Spec: [docs/specs/06b_retrieval_diagnostics.md](../specs/06b_retrieval_diagnostics.md) · Metodo:
   [docs/notes/06b_retrieval_diagnostics_methodology.md](../notes/06b_retrieval_diagnostics_methodology.md).
 - Notebook: `notebooks/06b_retrieval_diagnostics.ipynb`.
