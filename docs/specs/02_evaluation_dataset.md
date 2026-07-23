@@ -10,6 +10,7 @@ This step proves that the benchmark data is clean, aligned, and explainable befo
 
 - Source MCQ file: `data/evaluation/questions.csv`.
 - Source no-hint file: `data/evaluation/questions_no_hint.csv`.
+- Optional corpus-only reference review: `data/evaluation/vigency_reference_review.csv`.
 
 The source files are part of the application and should not be overwritten by generated normalized outputs.
 
@@ -22,6 +23,8 @@ Default generated output directory: `data/evaluation_clean/`.
 - `evaluation_manifest.json`: source hashes, counts, level distribution, and validation status.
 - `evaluation_profile.json`: notebook-friendly summary of records, levels, references, and examples.
 - `quality_report.md`: human-readable validation report.
+
+`vigency_reference_review.csv` is a versioned, supplemental review of references exposed by the validity-filter audit. It does not replace question rows, expected references, correct answers, or evaluation scoring.
 
 ## Pipeline
 
@@ -65,6 +68,18 @@ Each no-hint record must include:
 
 `qid` values must be stable across runs. Levels must preserve the source benchmark levels. Expected references must remain human-readable and should not be silently dropped.
 
+Expected references are retrieval relevance annotations, not assertions that the cited law or article is currently in force.
+
+When present, the supplemental review uses schema `vigency-reference-review-v1` and contains:
+
+- `qid`, expected law/article ids, and the reviewed reference validity;
+- `answer_support_relation`;
+- optional supporting law, article, and passage ids;
+- `temporal_scope_flag`;
+- a concise corpus-only rationale.
+
+The review is explicitly excluded from metric computation. It may only enrich diagnostics and human-readable results.
+
 ## Quality Gates
 
 - Source files exist and are readable.
@@ -75,6 +90,8 @@ Each no-hint record must include:
 - No required fields are empty.
 - Level distribution is reported.
 - Source hashes are recorded in the manifest.
+- Every supplemental review row references an existing question and expected reference.
+- Supporting entity ids, when present, resolve against the configured clean legal dataset.
 
 ## Notebook Role
 
@@ -88,4 +105,4 @@ The notebook should explain why the no-hint dataset is needed and how it support
 - Records are aligned and traceable to source positions.
 - The dataset is ready for all later evaluation steps.
 - Quality gates make benchmark data issues visible before model evaluation.
-
+- Historical references, uncertain temporal applicability, and suspected qrel mismatches can be reported without mutating the benchmark.
