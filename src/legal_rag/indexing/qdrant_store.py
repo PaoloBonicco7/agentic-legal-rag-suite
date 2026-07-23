@@ -30,6 +30,14 @@ class PreparedPoint:
     payload_hash: str = ""
 
 
+@dataclass(frozen=True)
+class ReusablePointVectors:
+    """Dense and optional sparse vectors copied from a compatible source point."""
+
+    dense: list[float]
+    sparse: tuple[list[int], list[float]] | None
+
+
 def safe_collection_component(value: str, *, max_len: int = 48) -> str:
     """Return a Qdrant-safe collection name component."""
     text = re.sub(r"[^a-zA-Z0-9_-]", "_", (value or "").strip())
@@ -216,6 +224,96 @@ def fetch_existing_content_hashes(
         ).items()
         if hashes["content_hash"]
     }
+
+
+def validate_vector_reuse_collection(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    vector_size: int,
+    hybrid_enabled: bool,
+) -> dict[str, Any]:
+    """Validate the source collection topology required for vector reuse."""
+    if not client.collection_exists(collection_name=collection_name):
+        raise RuntimeError(f"Vector reuse collection does not exist: {collection_name!r}")
+    info = client.get_collection(collection_name=collection_name)
+    params = getattr(getattr(info, "config", None), "params", None)
+    vectors = getattr(params, "vectors", None)
+    dense_params = vectors.get(DENSE_VECTOR_NAME) if isinstance(vectors, dict) else None
+    dense_size = getattr(dense_params, "size", None)
+    if dense_size is None or int(dense_size) != int(vector_size):
+        raise RuntimeError(
+            "Vector reuse dense size mismatch: "
+            f"collection={collection_name!r}, source={dense_size!r}, target={vector_size}"
+        )
+    sparse_vectors = getattr(params, "sparse_vectors", None)
+    sparse_present = isinstance(sparse_vectors, dict) and SPARSE_VECTOR_NAME in sparse_vectors
+    if hybrid_enabled and not sparse_present:
+        raise RuntimeError(
+            f"Vector reuse collection {collection_name!r} does not contain sparse vector {SPARSE_VECTOR_NAME!r}"
+        )
+    return {
+        "collection_points_count": collection_point_count(
+            client,
+            collection_name=collection_name,
+        ),
+        "dense_vector_name": DENSE_VECTOR_NAME,
+        "dense_vector_size": int(dense_size),
+        "sparse_vector_name": SPARSE_VECTOR_NAME if sparse_present else None,
+    }
+
+
+def fetch_reusable_vectors(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    points: Sequence[PreparedPoint],
+    embedding_model: str,
+    vector_size: int,
+    hybrid_enabled: bool,
+) -> dict[str, ReusablePointVectors]:
+    """Return vectors for points whose content and embedding identity still match."""
+    expected = {point.point_id: point for point in points}
+    reusable: dict[str, ReusablePointVectors] = {}
+    vector_names = [DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME] if hybrid_enabled else [DENSE_VECTOR_NAME]
+    for batch in _chunks(list(expected), 256):
+        records = client.retrieve(
+            collection_name=collection_name,
+            ids=list(batch),
+            with_payload=["content_hash", "embedding_model"],
+            with_vectors=vector_names,
+        )
+        for record in records:
+            point_id = str(record.id)
+            point = expected.get(point_id)
+            payload = record.payload or {}
+            vectors = record.vector
+            if (
+                point is None
+                or payload.get("content_hash") != point.content_hash
+                or payload.get("embedding_model") != embedding_model
+                or not isinstance(vectors, dict)
+            ):
+                continue
+            dense = vectors.get(DENSE_VECTOR_NAME)
+            if not isinstance(dense, list) or len(dense) != vector_size:
+                continue
+            sparse: tuple[list[int], list[float]] | None = None
+            if hybrid_enabled:
+                sparse_vector = vectors.get(SPARSE_VECTOR_NAME)
+                indices = getattr(sparse_vector, "indices", None)
+                values = getattr(sparse_vector, "values", None)
+                if not isinstance(indices, list) or not isinstance(values, list) or len(indices) != len(values):
+                    continue
+                sparse = (
+                    [int(value) for value in indices],
+                    [float(value) for value in values],
+                )
+            reusable[point_id] = ReusablePointVectors(
+                dense=[float(value) for value in dense],
+                sparse=sparse,
+            )
+    return reusable
 
 
 def set_point_payload(

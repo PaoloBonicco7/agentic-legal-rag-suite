@@ -17,6 +17,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qdrant-url", default=None)
     parser.add_argument("--qdrant-api-key", default="")
     parser.add_argument("--collection-name", default="legal_chunks")
+    parser.add_argument("--reuse-vectors-index-dir", default=None)
+    parser.add_argument("--reuse-vectors-collection", default=None)
+    parser.add_argument("--reuse-vectors-manifest-path", default=None)
     parser.add_argument("--force-rebuild", action="store_true")
     parser.add_argument("--chunk-selection-mode", default="full", choices=("full", "sample"))
     parser.add_argument("--sample-size", type=int, default=None)
@@ -45,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
         "index_dir": args.index_dir,
         "runs_dir": args.runs_dir,
         "collection_name": args.collection_name,
+        "reuse_vectors_index_dir": args.reuse_vectors_index_dir,
+        "reuse_vectors_collection": args.reuse_vectors_collection,
+        "reuse_vectors_manifest_path": args.reuse_vectors_manifest_path,
         "force_rebuild": args.force_rebuild,
         "chunk_selection_mode": args.chunk_selection_mode,
         "sample_size": args.sample_size,

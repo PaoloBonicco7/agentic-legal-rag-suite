@@ -15,7 +15,7 @@ from .dataset import load_chunks, read_manifest, validate_clean_dataset
 from .embeddings import SupportsEmbedding, supports_hybrid_embedding, supports_sparse_embedding
 from .embeddings import build_embedder
 from .hashing import canonical_dumps, content_hash_for_text, payload_hash, point_id_from_chunk_id, sha256_text
-from .io import finalize_run_dir, now_utc, prepare_run_dir, sha256_file, write_json, write_jsonl
+from .io import finalize_run_dir, now_utc, prepare_run_dir, read_json, sha256_file, write_json, write_jsonl
 from .models import (
     FILTERABLE_FIELDS,
     IDENTITY_PAYLOAD_FIELDS,
@@ -32,11 +32,13 @@ from .qdrant_store import (
     connect_qdrant,
     ensure_collection,
     fetch_existing_hashes,
+    fetch_reusable_vectors,
     profile_collection_payload,
     restore_collection_indexing_threshold,
     set_point_payload,
     upload_point_batch,
     validate_no_duplicate_chunk_ids,
+    validate_vector_reuse_collection,
 )
 from .retrieval import search_index
 
@@ -51,6 +53,7 @@ class SyncStats:
     inserted: int
     vector_updated: int
     payload_updated: int
+    vector_reused: int
     failures: tuple[dict[str, str], ...]
 
     @property
@@ -285,6 +288,59 @@ def _recompute_source_hash(manifest: dict[str, Any], dataset_dir: Path) -> tuple
     return compute_source_hash(list(registry.by_law_id.values())), source_dir
 
 
+def _validate_vector_reuse_manifest(
+    config: IndexingConfig,
+    *,
+    vector_size: int,
+) -> dict[str, Any]:
+    manifest_path = config.resolved_reuse_vectors_manifest_path
+    source_index_dir = config.resolved_reuse_vectors_index_dir
+    collection_name = config.reuse_vectors_collection
+    if manifest_path is None or source_index_dir is None or collection_name is None:
+        return {"enabled": False}
+    if not manifest_path.is_file():
+        raise RuntimeError(f"Vector reuse manifest does not exist: {manifest_path}")
+    source_manifest = read_json(manifest_path)
+    embedding = source_manifest.get("embedding") or {}
+    qdrant = source_manifest.get("qdrant") or {}
+    expected_model = config.resolved_embedding_model
+    checks = {
+        "ready_for_retrieval": source_manifest.get("ready_for_retrieval") is True,
+        "collection_name": source_manifest.get("collection_name") == collection_name,
+        "embedding_model": embedding.get("model") == expected_model,
+        "resolved_embedding_model": embedding.get("resolved_model") == expected_model,
+        "vector_size": embedding.get("vector_size") == vector_size,
+        "hybrid_enabled": embedding.get("hybrid_enabled") is config.hybrid_enabled,
+        "local_mode": qdrant.get("mode") in {"local", "local_path"} and not qdrant.get("url"),
+        "index_path": (
+            isinstance(qdrant.get("path"), str)
+            and Path(qdrant["path"]).resolve() == source_index_dir
+        ),
+        "run_id": bool(source_manifest.get("run_id")),
+        "chunks_hash": bool(source_manifest.get("chunks_hash")),
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        raise RuntimeError(
+            "Vector reuse manifest is incompatible with the target run: "
+            + ", ".join(failed)
+        )
+    return {
+        "enabled": True,
+        "mode": "local",
+        "index_dir": str(source_index_dir),
+        "collection_name": collection_name,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": sha256_file(manifest_path),
+        "run_id": source_manifest["run_id"],
+        "chunks_hash": source_manifest["chunks_hash"],
+        "embedding_model": expected_model,
+        "vector_size": vector_size,
+        "hybrid_enabled": config.hybrid_enabled,
+        "manifest_checks": checks,
+    }
+
+
 def _vectors_from_record(record: Any) -> list[float] | None:
     vector_obj = getattr(record, "vector", None)
     if isinstance(vector_obj, list) and vector_obj:
@@ -346,6 +402,9 @@ def _sync_points(
     points: list[PreparedPoint],
     embedder: SupportsEmbedding,
     config: IndexingConfig,
+    reuse_client: QdrantClient | None = None,
+    reuse_collection: str | None = None,
+    vector_size: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> SyncStats:
     existing_hashes: dict[str, dict[str, str]] = {}
@@ -377,6 +436,7 @@ def _sync_points(
     inserted = 0
     vector_updated = 0
     payload_updated = 0
+    vector_reused = 0
     started = perf_counter()
     total_to_embed = len(to_embed)
     if progress_callback:
@@ -387,6 +447,7 @@ def _sync_points(
                 "skipped": skipped,
                 "to_embed": total_to_embed,
                 "payload_only": len(payload_only),
+                "vector_reuse_enabled": reuse_client is not None,
                 "batch_size": config.batch_size,
             }
         )
@@ -415,7 +476,8 @@ def _sync_points(
             return
         elapsed = max(perf_counter() - started, 0.001)
         processed = inserted + vector_updated + payload_updated + skipped + len(failures)
-        rate = embedded / elapsed if embedded else 0.0
+        completed_vectors = embedded + vector_reused
+        rate = completed_vectors / elapsed if completed_vectors else 0.0
         remaining = max(len(points) - processed, 0)
         progress_callback(
             {
@@ -427,6 +489,7 @@ def _sync_points(
                 "inserted": inserted,
                 "vector_updated": vector_updated,
                 "payload_updated": payload_updated,
+                "vector_reused": vector_reused,
                 "upserted": inserted + vector_updated,
                 "skipped": skipped,
                 "failures": len(failures),
@@ -444,6 +507,79 @@ def _sync_points(
         batch_started = perf_counter()
         batch_number = (start // config.batch_size) + 1
         batch_total = ((total_to_embed + config.batch_size - 1) // config.batch_size) if total_to_embed else 0
+        if reuse_client is not None:
+            if not reuse_collection or vector_size is None:
+                raise RuntimeError("Vector reuse source is missing collection or vector size")
+            reusable = fetch_reusable_vectors(
+                reuse_client,
+                collection_name=reuse_collection,
+                points=batch,
+                embedding_model=config.resolved_embedding_model,
+                vector_size=vector_size,
+                hybrid_enabled=config.hybrid_enabled,
+            )
+            reusable_points = [point for point in batch if point.point_id in reusable]
+            if reusable_points:
+                dense_vectors = [reusable[point.point_id].dense for point in reusable_points]
+                sparse_vectors: list[tuple[list[int], list[float]]] | None = None
+                if config.hybrid_enabled:
+                    sparse_vectors = []
+                    for point in reusable_points:
+                        sparse = reusable[point.point_id].sparse
+                        if sparse is None:
+                            raise RuntimeError(f"Reusable point is missing sparse vector: {point.chunk_id}")
+                        sparse_vectors.append(sparse)
+                try:
+                    upload_point_batch(
+                        client,
+                        collection_name=collection_name,
+                        points=reusable_points,
+                        vectors=dense_vectors,
+                        sparse_vectors=sparse_vectors,
+                        max_retries=config.upload_max_retries,
+                        upload_batch_size=config.upload_batch_size,
+                        upload_parallel=config.qdrant_upload_parallel,
+                    )
+                    for point in reusable_points:
+                        record_vector_write(point)
+                    vector_reused += len(reusable_points)
+                except Exception:
+                    for index, point in enumerate(reusable_points):
+                        try:
+                            sparse_vector = (
+                                [sparse_vectors[index]]
+                                if sparse_vectors is not None
+                                else None
+                            )
+                            upload_point_batch(
+                                client,
+                                collection_name=collection_name,
+                                points=[point],
+                                vectors=[dense_vectors[index]],
+                                sparse_vectors=sparse_vector,
+                                max_retries=config.upload_max_retries,
+                                upload_batch_size=config.upload_batch_size,
+                                upload_parallel=config.qdrant_upload_parallel,
+                            )
+                            record_vector_write(point)
+                            vector_reused += 1
+                        except Exception as exc:
+                            failures.append(
+                                {
+                                    "chunk_id": point.chunk_id,
+                                    "stage": "vector_reuse_upsert",
+                                    "error": str(exc),
+                                }
+                            )
+                batch = [point for point in batch if point.point_id not in reusable]
+        if not batch:
+            emit_batch_progress(
+                batch_number=batch_number,
+                batch_total=batch_total,
+                batch_size=0,
+                batch_started=batch_started,
+            )
+            continue
         try:
             batch_texts = [point.embedding_text for point in batch]
             sparse_vectors = None
@@ -557,6 +693,7 @@ def _sync_points(
         inserted=inserted,
         vector_updated=vector_updated,
         payload_updated=payload_updated,
+        vector_reused=vector_reused,
         failures=tuple(failures),
     )
 
@@ -572,6 +709,7 @@ def _write_quality_report(path: Path, *, manifest: dict[str, Any]) -> None:
         f"- Inserted: {manifest['inserted_count']}",
         f"- Vector updated: {manifest['vector_updated_count']}",
         f"- Payload updated: {manifest['payload_updated_count']}",
+        f"- Vector reused: {manifest['vector_reused_count']}",
         f"- Skipped unchanged: {manifest['skipped_count']}",
         f"- Failures: {manifest['failure_count']}",
         "",
@@ -589,6 +727,19 @@ def _write_quality_report(path: Path, *, manifest: dict[str, Any]) -> None:
             f"- vector size: {manifest['embedding']['vector_size']}",
         ]
     )
+    reuse = manifest["vector_reuse"]
+    if reuse["enabled"]:
+        lines.extend(
+            [
+                "",
+                "## Vector Reuse Source",
+                f"- collection: `{reuse['collection_name']}`",
+                f"- run id: `{reuse['run_id']}`",
+                f"- manifest: `{reuse['manifest_path']}`",
+                f"- manifest sha256: `{reuse['manifest_sha256']}`",
+                f"- source chunks sha256: `{reuse['chunks_hash']}`",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -605,6 +756,8 @@ def run_indexing_pipeline(
     tmp_dir = prepare_run_dir(cfg.resolved_artifacts_root, run_id)
     final_dir = cfg.resolved_artifacts_root / run_id
     created_client = client is None
+    reuse_client: QdrantClient | None = None
+    reuse_provenance: dict[str, Any] = {"enabled": False}
 
     try:
         validation = validate_clean_dataset(cfg.resolved_dataset_dir, strict=cfg.strict)
@@ -670,6 +823,19 @@ def run_indexing_pipeline(
         if progress_callback:
             progress_callback({"event": "embedding_probe_finished", "vector_size": vector_size})
 
+        reuse_provenance = _validate_vector_reuse_manifest(cfg, vector_size=vector_size)
+        if reuse_provenance["enabled"]:
+            reuse_index_dir = cfg.resolved_reuse_vectors_index_dir
+            assert reuse_index_dir is not None
+            assert cfg.reuse_vectors_collection is not None
+            reuse_client = QdrantClient(path=str(reuse_index_dir))
+            reuse_provenance["collection_topology"] = validate_vector_reuse_collection(
+                reuse_client,
+                collection_name=cfg.reuse_vectors_collection,
+                vector_size=vector_size,
+                hybrid_enabled=cfg.hybrid_enabled,
+            )
+
         if client is None:
             client = connect_qdrant(cfg)
         collection_name = build_collection_name(cfg, dataset_hash=source_hash)
@@ -694,6 +860,9 @@ def run_indexing_pipeline(
             points=points,
             embedder=embedder,
             config=cfg,
+            reuse_client=reuse_client,
+            reuse_collection=cfg.reuse_vectors_collection,
+            vector_size=vector_size,
             progress_callback=progress_callback,
         )
         indexing_threshold_restored = restore_collection_indexing_threshold(client, cfg, collection_name=collection_name)
@@ -798,6 +967,10 @@ def run_indexing_pipeline(
             "selected_chunks_non_empty": len(points) > 0,
             "embedding_model_recorded": bool(cfg.embedding_model),
             "vector_size_detected": vector_size > 0,
+            "vector_reuse_source_compatible": (
+                not reuse_provenance["enabled"]
+                or all(reuse_provenance["manifest_checks"].values())
+            ),
             "indexed_count_matches_selected": indexed_count == len(points) and sync_stats.failure_count == 0,
             "collection_count_matches_selected": count_gate,
             "duplicate_chunk_ids_rejected": bool(duplicate_check.get("ok")),
@@ -873,9 +1046,14 @@ def run_indexing_pipeline(
                 "hybrid_enabled": cfg.hybrid_enabled,
                 "vector_size": vector_size,
             },
+            "vector_reuse": {
+                **reuse_provenance,
+                "vector_reused_count": sync_stats.vector_reused,
+            },
             "selected_count": len(points),
             "indexed_count": indexed_count,
             "embedded_count": sync_stats.embedded,
+            "vector_reused_count": sync_stats.vector_reused,
             "skipped_count": sync_stats.skipped,
             "upserted_count": sync_stats.upserted,
             "inserted_count": sync_stats.inserted,
@@ -923,6 +1101,7 @@ def run_indexing_pipeline(
                     "collection_name": collection_name,
                     "ready_for_retrieval": index_manifest["ready_for_retrieval"],
                     "indexed_count": indexed_count,
+                    "vector_reused_count": sync_stats.vector_reused,
                     "collection_points_count": point_count,
                     "failure_count": sync_stats.failure_count,
                 }
@@ -933,6 +1112,8 @@ def run_indexing_pipeline(
             shutil.rmtree(tmp_dir)
         raise
     finally:
+        if reuse_client is not None:
+            reuse_client.close()
         if created_client and client is not None:
             close = getattr(client, "close", None)
             if callable(close):

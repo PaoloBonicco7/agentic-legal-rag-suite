@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 INDEXING_SCHEMA_VERSION = "indexing-contract-v2"
 LOCAL_DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
@@ -111,6 +111,9 @@ class IndexingConfig(BaseModel):
     collection_name: str = "legal_chunks"
     qdrant_url: str | None = None
     qdrant_api_key: str = ""
+    reuse_vectors_index_dir: str | None = None
+    reuse_vectors_collection: str | None = None
+    reuse_vectors_manifest_path: str | None = None
     force_rebuild: bool = False
     chunk_selection_mode: ChunkSelectionMode = "full"
     sample_size: int | None = Field(default=None, gt=0)
@@ -166,6 +169,38 @@ class IndexingConfig(BaseModel):
     def _normalize_embed_mode(cls, value: str) -> str:
         return str(value or "ollama").strip().lower()
 
+    @field_validator(
+        "reuse_vectors_index_dir",
+        "reuse_vectors_collection",
+        "reuse_vectors_manifest_path",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_optional_path_or_name(cls, value: str | None) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @model_validator(mode="after")
+    def _validate_vector_reuse(self) -> IndexingConfig:
+        reuse_values = (
+            self.reuse_vectors_index_dir,
+            self.reuse_vectors_collection,
+            self.reuse_vectors_manifest_path,
+        )
+        if any(reuse_values) and not all(reuse_values):
+            raise ValueError(
+                "reuse_vectors_index_dir, reuse_vectors_collection and "
+                "reuse_vectors_manifest_path must be configured together"
+            )
+        if all(reuse_values):
+            if self.qdrant_url:
+                raise ValueError("Vector reuse is supported only for a local Qdrant target")
+            if not self.force_rebuild:
+                raise ValueError("Vector reuse requires force_rebuild=True for the target collection")
+            if self.resolved_reuse_vectors_index_dir == self.resolved_index_dir:
+                raise ValueError("Vector reuse source and target must use different local Qdrant paths")
+        return self
+
     @field_validator("hybrid_enabled")
     @classmethod
     def _hybrid_requires_local_backend_by_default(cls, value: bool) -> bool:
@@ -178,6 +213,18 @@ class IndexingConfig(BaseModel):
     @property
     def resolved_index_dir(self) -> Path:
         return Path(self.index_dir).resolve()
+
+    @property
+    def resolved_reuse_vectors_index_dir(self) -> Path | None:
+        if self.reuse_vectors_index_dir is None:
+            return None
+        return Path(self.reuse_vectors_index_dir).resolve()
+
+    @property
+    def resolved_reuse_vectors_manifest_path(self) -> Path | None:
+        if self.reuse_vectors_manifest_path is None:
+            return None
+        return Path(self.reuse_vectors_manifest_path).resolve()
 
     @property
     def resolved_artifacts_root(self) -> Path:

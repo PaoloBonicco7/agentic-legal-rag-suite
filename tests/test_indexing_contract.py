@@ -120,6 +120,66 @@ def _write_dataset(root: Path, chunks: list[dict[str, object]], *, ready: bool =
     )
 
 
+def _update_dataset_chunks(root: Path, chunks: list[dict[str, object]]) -> None:
+    _write_jsonl(root / "chunks.jsonl", chunks)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["output_hashes"]["chunks"] = sha256_file(root / "chunks.jsonl")
+    _write_json(manifest_path, manifest)
+
+
+def _build_vector_reuse_source(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, list[dict[str, object]]]:
+    dataset = tmp_path / "laws_dataset_clean"
+    chunks = [_chunk("c1", text="Contributi regionali.")]
+    _write_dataset(dataset, chunks)
+    source_index = tmp_path / "source_index"
+    runs_dir = tmp_path / "runs"
+    run_indexing_pipeline(
+        IndexingConfig(
+            clean_dataset_dir=str(dataset),
+            index_dir=str(source_index),
+            runs_dir=str(runs_dir),
+            collection_name="source_collection",
+            force_rebuild=True,
+            run_id="source",
+            embedding_backend="local",
+            embedding_model="fake-embedding",
+            diagnostic_queries=["contributi"],
+        ),
+        embedder=FakeEmbedder(),
+    )
+    return dataset, source_index, runs_dir / "source" / "index_manifest.json", chunks
+
+
+def _run_vector_reuse_target(
+    tmp_path: Path,
+    *,
+    dataset: Path,
+    source_index: Path,
+    source_manifest: Path,
+    run_id: str,
+) -> dict[str, object]:
+    return run_indexing_pipeline(
+        IndexingConfig(
+            clean_dataset_dir=str(dataset),
+            index_dir=str(tmp_path / f"{run_id}_target_index"),
+            runs_dir=str(tmp_path / "runs"),
+            collection_name=f"{run_id}_target_collection",
+            force_rebuild=True,
+            reuse_vectors_index_dir=str(source_index),
+            reuse_vectors_collection="source_collection",
+            reuse_vectors_manifest_path=str(source_manifest),
+            run_id=run_id,
+            embedding_backend="local",
+            embedding_model="fake-embedding",
+            diagnostic_queries=["contributi"],
+        ),
+        embedder=FakeEmbedder(),
+    )
+
+
 def test_validate_clean_dataset_rejects_missing_ready_flag(tmp_path: Path) -> None:
     dataset = tmp_path / "laws_dataset_clean"
     _write_dataset(dataset, [_chunk("c1", text="Testo.")], ready=False)
@@ -358,6 +418,103 @@ def test_run_indexing_pipeline_rejects_changed_source_corpus(tmp_path: Path) -> 
         )
 
 
+def test_run_indexing_pipeline_reuses_matching_vectors(tmp_path: Path) -> None:
+    dataset, source_index, source_manifest, _ = _build_vector_reuse_source(tmp_path)
+
+    manifest = _run_vector_reuse_target(
+        tmp_path,
+        dataset=dataset,
+        source_index=source_index,
+        source_manifest=source_manifest,
+        run_id="reuse_match",
+    )
+
+    assert manifest["vector_reused_count"] == 1
+    assert manifest["embedded_count"] == 0
+    assert manifest["inserted_count"] == 1
+    assert manifest["upserted_count"] == 1
+    assert manifest["indexed_count"] == 1
+    assert manifest["vector_reuse"]["manifest_sha256"] == sha256_file(source_manifest)
+    assert manifest["vector_reuse"]["run_id"] == "source"
+    assert manifest["vector_reuse"]["chunks_hash"]
+
+
+def test_run_indexing_pipeline_reembeds_changed_content(tmp_path: Path) -> None:
+    dataset, source_index, source_manifest, chunks = _build_vector_reuse_source(tmp_path)
+    chunks[0]["text"] = "Contenuto modificato."
+    chunks[0]["text_for_embedding"] = "Contenuto modificato per embedding."
+    _update_dataset_chunks(dataset, chunks)
+
+    manifest = _run_vector_reuse_target(
+        tmp_path,
+        dataset=dataset,
+        source_index=source_index,
+        source_manifest=source_manifest,
+        run_id="reuse_changed",
+    )
+
+    assert manifest["vector_reused_count"] == 0
+    assert manifest["embedded_count"] == 1
+    assert manifest["inserted_count"] == 1
+    assert manifest["indexed_count"] == 1
+
+
+def test_run_indexing_pipeline_reembeds_point_with_model_mismatch(tmp_path: Path) -> None:
+    dataset, source_index, source_manifest, _ = _build_vector_reuse_source(tmp_path)
+    source_client = QdrantClient(path=str(source_index))
+    source_client.set_payload(
+        collection_name="source_collection",
+        payload={"embedding_model": "different-model"},
+        points=[point_id_from_chunk_id("c1")],
+        wait=True,
+    )
+    source_client.close()
+
+    manifest = _run_vector_reuse_target(
+        tmp_path,
+        dataset=dataset,
+        source_index=source_index,
+        source_manifest=source_manifest,
+        run_id="reuse_model_mismatch",
+    )
+
+    assert manifest["vector_reused_count"] == 0
+    assert manifest["embedded_count"] == 1
+    assert manifest["inserted_count"] == 1
+    assert manifest["indexed_count"] == 1
+
+
+def test_run_indexing_pipeline_rejects_incompatible_reuse_manifest(tmp_path: Path) -> None:
+    dataset, source_index, source_manifest, _ = _build_vector_reuse_source(tmp_path)
+    manifest = json.loads(source_manifest.read_text(encoding="utf-8"))
+    manifest["ready_for_retrieval"] = False
+    _write_json(source_manifest, manifest)
+
+    with pytest.raises(RuntimeError, match="ready_for_retrieval"):
+        _run_vector_reuse_target(
+            tmp_path,
+            dataset=dataset,
+            source_index=source_index,
+            source_manifest=source_manifest,
+            run_id="reuse_bad_manifest",
+        )
+
+
+def test_indexing_config_requires_complete_local_vector_reuse_source(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be configured together"):
+        IndexingConfig(
+            force_rebuild=True,
+            reuse_vectors_index_dir=str(tmp_path / "source"),
+        )
+
+    with pytest.raises(ValueError, match="requires force_rebuild"):
+        IndexingConfig(
+            reuse_vectors_index_dir=str(tmp_path / "source"),
+            reuse_vectors_collection="source",
+            reuse_vectors_manifest_path=str(tmp_path / "manifest.json"),
+        )
+
+
 def test_ensure_collection_applies_qdrant_server_tuning() -> None:
     class FakeQdrantClient:
         def __init__(self) -> None:
@@ -463,6 +620,45 @@ def test_indexing_cli_smoke_with_injected_pipeline(monkeypatch: pytest.MonkeyPat
     out = json.loads(capsys.readouterr().out)
     assert out["ready_for_retrieval"] is True
     assert out["collection_name"] == "cli_collection"
+
+
+def test_indexing_cli_parses_vector_reuse_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(config: IndexingConfig) -> dict[str, object]:
+        captured.update(config.model_dump())
+        return {
+            "ready_for_retrieval": True,
+            "collection_name": "cli_collection",
+            "indexed_count": 1,
+            "run_id": "cli",
+        }
+
+    monkeypatch.setattr("legal_rag.indexing.cli.run_indexing_pipeline", fake_run)
+    source_index = tmp_path / "source"
+    target_index = tmp_path / "target"
+    source_manifest = tmp_path / "source_manifest.json"
+
+    assert indexing_main(
+        [
+            "--index-dir",
+            str(target_index),
+            "--force-rebuild",
+            "--reuse-vectors-index-dir",
+            str(source_index),
+            "--reuse-vectors-collection",
+            "source_collection",
+            "--reuse-vectors-manifest-path",
+            str(source_manifest),
+        ]
+    ) == 0
+
+    assert captured["reuse_vectors_index_dir"] == str(source_index)
+    assert captured["reuse_vectors_collection"] == "source_collection"
+    assert captured["reuse_vectors_manifest_path"] == str(source_manifest)
 
 
 def test_indexing_cli_parses_qdrant_server_tuning(monkeypatch: pytest.MonkeyPatch) -> None:
