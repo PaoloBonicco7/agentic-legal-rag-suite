@@ -336,6 +336,7 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
     source_dir = Path(cfg.source_dir)
     output_dir = Path(cfg.output_dir)
     validate_output_dir(source_dir, output_dir)
+    git_revision, git_dirty = _git_identity()
 
     registry, inventory = build_corpus_registry(source_dir)
     selected_law_files = [registry.by_law_id[law_id] for law_id in sorted(registry.by_law_id)]
@@ -475,7 +476,6 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
             "output_hashes": output_hashes,
             "manifest_hash_note": "manifest.json is excluded from output_hashes because a file cannot contain a stable hash of itself.",
         }
-        git_revision, git_dirty = _git_identity()
         manifest["git_revision"] = git_revision
         manifest["git_dirty"] = git_dirty
         _write_json(tmp_dir / "manifest.json", manifest)
