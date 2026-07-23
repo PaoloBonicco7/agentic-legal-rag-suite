@@ -41,6 +41,7 @@ notebooks/rag_pipeline/checkpoints/
 data/laws_html/
 data/laws_dataset/
 data/laws_dataset_clean/
+data/laws_dataset_clean_status_v2/
 data/evaluation_clean/
 data/baseline_runs/
 data/evaluation_runs/
