@@ -19,8 +19,11 @@ from .inventory import (
     sha256_file,
 )
 from .models import (
+    ALLOWED_CONTENT_AVAILABILITIES,
     ALLOWED_LAW_STATUSES,
     ALLOWED_RELATION_TYPES,
+    LAWS_PREPROCESSING_SCHEMA_VERSION,
+    LEGAL_STATUS_RULES_VERSION,
     LIST_CHUNK_FIELDS,
     REQUIRED_CHUNK_FIELDS,
     SCHEMA_VERSION,
@@ -33,11 +36,15 @@ from .models import (
     Line,
     Link,
     ResolvedLawRef,
+    StatusEventRecord,
 )
 
 __all__ = [
+    "ALLOWED_CONTENT_AVAILABILITIES",
     "ALLOWED_LAW_STATUSES",
     "ALLOWED_RELATION_TYPES",
+    "LAWS_PREPROCESSING_SCHEMA_VERSION",
+    "LEGAL_STATUS_RULES_VERSION",
     "LIST_CHUNK_FIELDS",
     "REQUIRED_CHUNK_FIELDS",
     "SCHEMA_VERSION",
@@ -50,6 +57,7 @@ __all__ = [
     "Line",
     "Link",
     "ResolvedLawRef",
+    "StatusEventRecord",
     "build_corpus_registry",
     "classify_law_status",
     "compute_source_hash",

@@ -49,6 +49,7 @@ def test_run_laws_preprocessing_exports_contract_files(tmp_path: Path) -> None:
         "articles.jsonl",
         "passages.jsonl",
         "notes.jsonl",
+        "status_events.jsonl",
         "edges.jsonl",
         "chunks.jsonl",
         "quality_report.md",
@@ -56,12 +57,18 @@ def test_run_laws_preprocessing_exports_contract_files(tmp_path: Path) -> None:
     }
     assert expected_files == {path.name for path in output.iterdir()}
     assert manifest["ready_for_indexing"] is True
+    assert manifest["schema_version"] == "laws-preprocessing-v2"
+    assert manifest["status_rules_version"] == "legal-status-rules-v1"
+    assert manifest["pipeline_code_hash"]
+    assert "git_revision" in manifest
+    assert "git_dirty" in manifest
     assert manifest["inventory"]["ignored_files"] == [".DS_Store"]
     assert set(manifest["output_hashes"]) == {
         "laws",
         "articles",
         "passages",
         "notes",
+        "status_events",
         "edges",
         "chunks",
         "quality_report",
@@ -83,4 +90,13 @@ def test_run_laws_preprocessing_exports_contract_files(tmp_path: Path) -> None:
         assert isinstance(chunk["inbound_law_ids"], list)
         assert isinstance(chunk["outbound_law_ids"], list)
         assert isinstance(chunk["relation_types"], list)
+        assert isinstance(chunk["status_event_ids"], list)
+        assert isinstance(chunk["status_rule_ids"], list)
+        assert chunk["passage_status"] in {"current", "partial", "past", "unknown"}
+        assert chunk["content_availability"] in {
+            "substantive",
+            "unstructured",
+            "metadata_only",
+            "empty",
+        }
     assert any("current" in chunk["index_views"] for chunk in chunks)

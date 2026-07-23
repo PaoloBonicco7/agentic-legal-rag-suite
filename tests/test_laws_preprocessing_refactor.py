@@ -186,7 +186,15 @@ def test_run_laws_preprocessing_golden_jsonl_outputs(tmp_path: Path) -> None:
     )
 
     assert manifest["ready_for_indexing"] is True
-    expected_counts = {"laws": 2, "articles": 2, "passages": 3, "notes": 1, "edges": 2, "chunks": 3}
+    expected_counts = {
+        "laws": 2,
+        "articles": 2,
+        "passages": 3,
+        "notes": 1,
+        "status_events": 0,
+        "edges": 2,
+        "chunks": 3,
+    }
     assert manifest["counts"] == expected_counts
 
     expected = {
@@ -206,6 +214,7 @@ def test_run_laws_preprocessing_golden_jsonl_outputs(tmp_path: Path) -> None:
         "notes.jsonl": [
             {"law_id": "vda:lr:2000-01-01:1", "linked_article_ids": ["vda:lr:2000-01-01:1#art:1"], "linked_passage_ids": ["vda:lr:2000-01-01:1#art:1#p:c2"], "links_out": [{"href": "/app/leggieregolamenti/dettaglio?tipo=L&numero_legge=2%2F01&versione=V", "text": "L.R. 2/2001"}], "note_anchor_name": "nota_1", "note_id": "vda:lr:2000-01-01:1#note:nota_1", "note_kind": "modified", "note_number": "1", "note_text": "Nota modificata dalla L.R. 2/2001."},
         ],
+        "status_events.jsonl": [],
         "edges.jsonl": [
             {"confidence": 0.45, "context": "passage", "dst_article_label_norm": None, "dst_law_id": "vda:lr:2001-01-02:2", "edge_id": "33b7c3447ae7ac4810950d58b348468eb5a3f3e7c2744cd192e7d1fe58cf981b", "evidence": "1. Richiama la Legge regionale 2 gennaio 2001, n. 2.", "evidence_text": "1. Richiama la Legge regionale 2 gennaio 2001, n. 2.", "extraction_method": "text_regex", "is_self_loop": False, "note_anchor_name": None, "relation_type": "REFERENCES", "source_file": "0001_LR-1-gennaio-2000-n1.html", "src_article_id": "vda:lr:2000-01-01:1#art:1", "src_law_id": "vda:lr:2000-01-01:1", "src_passage_id": "vda:lr:2000-01-01:1#art:1#p:c1"},
             {"confidence": 0.8, "context": "note", "dst_article_label_norm": None, "dst_law_id": "vda:lr:2001-01-02:2", "edge_id": "461ba7c4f264c0f34ec4f15c195baa3f53febc64909212cc2b149c5634fba279", "evidence": "(1) Nota modificata dalla L.R. 2/2001.", "evidence_text": "(1) Nota modificata dalla L.R. 2/2001.", "extraction_method": "href", "is_self_loop": False, "note_anchor_name": "nota_1", "relation_type": "MODIFIED_BY", "source_file": "0001_LR-1-gennaio-2000-n1.html", "src_article_id": None, "src_law_id": "vda:lr:2000-01-01:1", "src_passage_id": None},
@@ -216,6 +225,39 @@ def test_run_laws_preprocessing_golden_jsonl_outputs(tmp_path: Path) -> None:
             {"article_id": "vda:lr:2001-01-02:2#art:1", "article_label_norm": "1", "article_status": "current", "chunk_id": "vda:lr:2001-01-02:2#art:1#p:c1#chunk:0", "chunk_seq": 0, "inbound_law_ids": ["vda:lr:2000-01-01:1"], "index_views": ["historical", "current"], "law_date": "2001-01-02", "law_id": "vda:lr:2001-01-02:2", "law_number": 2, "law_status": "current", "law_title": "Legge regionale 2 gennaio 2001, n. 2 - Testo vigente", "outbound_law_ids": [], "passage_id": "vda:lr:2001-01-02:2#art:1#p:c1", "passage_label": "c1", "related_law_ids": [], "relation_types": [], "source_file": "0002_LR-2-gennaio-2001-n2.html", "structure_path": "", "text": "1. Testo.", "text_for_embedding": "[LR 2001-01-02 n.2] Legge regionale 2 gennaio 2001, n. 2 - Testo vigente | Art. 1 | c1 |\n\n1. Testo."},
         ],
     }
+
+    for record in expected["laws.jsonl"]:
+        record.pop("status_confidence")
+        record.pop("status_evidence")
+        record.update(
+            content_availability="substantive",
+            status_event_ids=[],
+            status_rule_ids=["status-no-explicit-cessation-v1"],
+        )
+    for record in expected["articles.jsonl"]:
+        record.pop("is_abrogated")
+        record.pop("abrogated_by")
+        record.update(
+            content_availability="substantive",
+            status_event_ids=[],
+            status_rule_ids=["status-no-explicit-cessation-v1"],
+        )
+    for record in expected["passages.jsonl"]:
+        record.update(
+            passage_status="current",
+            content_availability="substantive",
+            status_event_ids=[],
+            status_rule_ids=["status-no-explicit-cessation-v1"],
+            is_bracketed=False,
+        )
+    for record in expected["chunks.jsonl"]:
+        record["index_views"].append("not_explicitly_past")
+        record.update(
+            passage_status="current",
+            content_availability="substantive",
+            status_event_ids=[],
+            status_rule_ids=["status-no-explicit-cessation-v1"],
+        )
 
     for filename, expected_records in expected.items():
         actual_records = [json.loads(line) for line in (output / filename).read_text(encoding="utf-8").splitlines()]

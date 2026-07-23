@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import hashlib
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,11 +14,13 @@ from typing import Any
 from .ingest import ingest_law
 from .inventory import build_corpus_registry, compute_source_hash, sha256_file
 from .models import (
+    ALLOWED_CONTENT_AVAILABILITIES,
     ALLOWED_LAW_STATUSES,
     ALLOWED_RELATION_TYPES,
     LIST_CHUNK_FIELDS,
     REQUIRED_CHUNK_FIELDS,
     SCHEMA_VERSION,
+    LEGAL_STATUS_RULES_VERSION,
     LawsPreprocessingConfig,
     chunk_record,
 )
@@ -94,9 +98,11 @@ def _build_quality(
     articles: list[dict[str, Any]],
     passages: list[dict[str, Any]],
     notes: list[dict[str, Any]],
+    status_events: list[dict[str, Any]],
     edges: list[dict[str, Any]],
     chunks: list[dict[str, Any]],
     unresolved_refs: int,
+    status_diagnostics: dict[str, int] | None = None,
     output_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compute counts, diagnostics and quality gates for the generated dataset."""
@@ -107,7 +113,30 @@ def _build_quality(
     relation_type_errors = sum(
         1 for edge in edges if str(edge.get("relation_type") or "") not in ALLOWED_RELATION_TYPES
     )
-    status_errors = sum(1 for law in laws if str(law.get("law_status") or "") not in ALLOWED_LAW_STATUSES)
+    status_errors = (
+        sum(1 for law in laws if str(law.get("law_status") or "") not in ALLOWED_LAW_STATUSES)
+        + sum(1 for article in articles if str(article.get("article_status") or "") not in ALLOWED_LAW_STATUSES)
+        + sum(1 for passage in passages if str(passage.get("passage_status") or "") not in ALLOWED_LAW_STATUSES)
+    )
+    availability_errors = sum(
+        1
+        for record in [*laws, *articles, *passages, *chunks]
+        if str(record.get("content_availability") or "") not in ALLOWED_CONTENT_AVAILABILITIES
+    )
+    event_ids = {str(event.get("status_event_id") or "") for event in status_events}
+    event_ref_errors = sum(
+        1
+        for record in [*laws, *articles, *passages, *chunks]
+        for event_id in record.get("status_event_ids") or []
+        if event_id not in event_ids
+    )
+    applied_passage_event_errors = sum(
+        1
+        for event in status_events
+        if event.get("resolution_status") == "resolved"
+        and event.get("target_kind") in {"comma", "letter"}
+        and len(event.get("target_ids") or []) != 1
+    )
     gates = {
         "valid_source_html_found": inventory.get("valid_html_files", 0) > 0,
         "stable_ids_non_empty_duplicate_free": all(
@@ -116,6 +145,7 @@ def _build_quality(
                 _validate_unique(articles, "article_id"),
                 _validate_unique(passages, "passage_id"),
                 _validate_unique(notes, "note_id") if notes else True,
+                _validate_unique(status_events, "status_event_id") if status_events else True,
                 _validate_unique(edges, "edge_id") if edges else True,
                 _validate_unique(chunks, "chunk_id"),
             ]
@@ -125,6 +155,9 @@ def _build_quality(
         "clean_graph_edges_have_no_self_loops": all(edge.get("src_law_id") != edge.get("dst_law_id") for edge in edges),
         "relation_types_allowed": relation_type_errors == 0,
         "law_statuses_allowed": status_errors == 0,
+        "content_availability_allowed": availability_errors == 0,
+        "status_event_references_resolve": event_ref_errors == 0,
+        "resolved_passage_cessations_have_one_backlink": applied_passage_event_errors == 0,
         "manifest_output_files_exist_and_hash": bool(output_hashes) and all(output_hashes.values()),
         "chunks_jsonl_non_empty": len(chunks) > 0,
     }
@@ -135,17 +168,31 @@ def _build_quality(
             "articles": len(articles),
             "passages": len(passages),
             "notes": len(notes),
+            "status_events": len(status_events),
             "edges": len(edges),
             "chunks": len(chunks),
         },
         "ignored_files": inventory.get("ignored_files", []),
         "unresolved_refs": unresolved_refs,
-        "status_distribution": dict(Counter(str(law.get("law_status") or "") for law in laws)),
+        "status_distribution": {
+            "laws": dict(Counter(str(law.get("law_status") or "") for law in laws)),
+            "articles": dict(Counter(str(article.get("article_status") or "") for article in articles)),
+            "passages": dict(Counter(str(passage.get("passage_status") or "") for passage in passages)),
+        },
+        "content_availability_distribution": {
+            "laws": dict(Counter(str(law.get("content_availability") or "") for law in laws)),
+            "articles": dict(Counter(str(article.get("content_availability") or "") for article in articles)),
+            "passages": dict(Counter(str(passage.get("content_availability") or "") for passage in passages)),
+        },
+        "status_diagnostics": dict(status_diagnostics or {}),
         "relation_type_distribution": dict(Counter(str(edge.get("relation_type") or "") for edge in edges)),
         "chunk_missing_fields": chunk_missing_fields,
         "list_metadata_errors": list_metadata_errors,
         "relation_type_errors": relation_type_errors,
         "status_errors": status_errors,
+        "availability_errors": availability_errors,
+        "event_ref_errors": event_ref_errors,
+        "applied_passage_event_errors": applied_passage_event_errors,
         "quality_gates": gates,
         "ready_for_indexing": all(gates.values()),
     }
@@ -183,6 +230,7 @@ def _write_quality_report(path: Path, quality: dict[str, Any]) -> None:
             f"- articles: {quality['counts']['articles']}",
             f"- passages: {quality['counts']['passages']}",
             f"- notes: {quality['counts']['notes']}",
+            f"- status events: {quality['counts']['status_events']}",
             f"- edges: {quality['counts']['edges']}",
             f"- chunks: {quality['counts']['chunks']}",
             "",
@@ -203,6 +251,7 @@ def _build_dataset_profile(
     articles: list[dict[str, Any]],
     passages: list[dict[str, Any]],
     notes: list[dict[str, Any]],
+    status_events: list[dict[str, Any]],
     edges: list[dict[str, Any]],
     chunks: list[dict[str, Any]],
     quality: dict[str, Any],
@@ -212,11 +261,14 @@ def _build_dataset_profile(
         "counts": quality["counts"],
         "ignored_files": inventory.get("ignored_files", []),
         "status_distribution": quality["status_distribution"],
+        "content_availability_distribution": quality["content_availability_distribution"],
+        "status_diagnostics": quality["status_diagnostics"],
         "relation_type_distribution": quality["relation_type_distribution"],
         "sample_laws": laws[:3],
         "sample_articles": articles[:3],
         "sample_passages": passages[:3],
         "sample_notes": notes[:3],
+        "sample_status_events": status_events[:3],
         "sample_edges": edges[:3],
         "sample_chunks": chunks[:3],
         "ready_for_indexing": quality["ready_for_indexing"],
@@ -231,6 +283,42 @@ def _prepare_output_dir(output_dir: Path) -> Path:
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True)
     return tmp_dir
+
+
+def _pipeline_code_hash() -> str:
+    """Hash the preprocessing Python sources used by this run."""
+    package_dir = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(package_dir.glob("*.py"), key=lambda item: item.name):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sha256_file(path).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _git_identity() -> tuple[str | None, bool | None]:
+    """Read the current Git revision and worktree dirty state when available."""
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path.cwd(),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=normal"],
+                cwd=Path.cwd(),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None, None
+    return revision or None, dirty
 
 
 def _replace_output_dir(tmp_dir: Path, output_dir: Path) -> None:
@@ -257,10 +345,12 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
     articles: list[dict[str, Any]] = []
     passages: list[dict[str, Any]] = []
     notes: list[dict[str, Any]] = []
+    status_events: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     chunks: list[dict[str, Any]] = []
     warnings: list[str] = []
     unresolved_refs = 0
+    status_diagnostics: Counter[str] = Counter()
 
     for law_file in selected_law_files:
         ingested = ingest_law(
@@ -274,15 +364,18 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
         articles.extend(ingested.articles)
         passages.extend(ingested.passages)
         notes.extend(ingested.notes)
+        status_events.extend(ingested.status_events)
         edges.extend(ingested.edges)
         chunks.extend(ingested.chunks)
         warnings.extend(ingested.warnings)
         unresolved_refs += ingested.unresolved_refs
+        status_diagnostics.update(ingested.status_diagnostics)
 
     laws, dropped_laws = _deduplicate(laws, "law_id")
     articles, dropped_articles = _deduplicate(articles, "article_id")
     passages, dropped_passages = _deduplicate(passages, "passage_id")
     notes, dropped_notes = _deduplicate(notes, "note_id")
+    status_events, dropped_status_events = _deduplicate(status_events, "status_event_id")
     edges, dropped_edges = _deduplicate([edge for edge in edges if edge.get("src_law_id") != edge.get("dst_law_id")], "edge_id")
     chunks, dropped_chunks = _deduplicate(chunks, "chunk_id")
     chunks = [chunk_record(chunk) for chunk in _enrich_chunks_with_graph_fields(chunks, edges)]
@@ -292,6 +385,7 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
         "articles": "articles.jsonl",
         "passages": "passages.jsonl",
         "notes": "notes.jsonl",
+        "status_events": "status_events.jsonl",
         "edges": "edges.jsonl",
         "chunks": "chunks.jsonl",
         "quality_report": "quality_report.md",
@@ -303,6 +397,7 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
         _write_jsonl(articles, tmp_dir / output_files["articles"], "article_id")
         _write_jsonl(passages, tmp_dir / output_files["passages"], "passage_id")
         _write_jsonl(notes, tmp_dir / output_files["notes"], "note_id")
+        _write_jsonl(status_events, tmp_dir / output_files["status_events"], "status_event_id")
         _write_jsonl(edges, tmp_dir / output_files["edges"], "edge_id")
         _write_jsonl(chunks, tmp_dir / output_files["chunks"], "chunk_id")
 
@@ -317,9 +412,11 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
             articles=articles,
             passages=passages,
             notes=notes,
+            status_events=status_events,
             edges=edges,
             chunks=chunks,
             unresolved_refs=unresolved_refs,
+            status_diagnostics=dict(status_diagnostics),
             output_hashes=output_hashes,
         )
         _write_quality_report(tmp_dir / output_files["quality_report"], quality)
@@ -330,6 +427,7 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
             articles=articles,
             passages=passages,
             notes=notes,
+            status_events=status_events,
             edges=edges,
             chunks=chunks,
             quality=quality,
@@ -342,17 +440,21 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
             articles=articles,
             passages=passages,
             notes=notes,
+            status_events=status_events,
             edges=edges,
             chunks=chunks,
             unresolved_refs=unresolved_refs,
+            status_diagnostics=dict(status_diagnostics),
             output_hashes=output_hashes,
         )
         manifest = {
             "schema_version": SCHEMA_VERSION,
+            "status_rules_version": LEGAL_STATUS_RULES_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "source_dir": str(source_dir),
             "output_dir": str(output_dir),
             "source_hash": source_hash,
+            "pipeline_code_hash": _pipeline_code_hash(),
             "config": cfg.model_dump(mode="json"),
             "inventory": inventory,
             "counts": quality["counts"],
@@ -361,6 +463,7 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
                 "articles": dropped_articles,
                 "passages": dropped_passages,
                 "notes": dropped_notes,
+                "status_events": dropped_status_events,
                 "edges": dropped_edges,
                 "chunks": dropped_chunks,
             },
@@ -372,6 +475,9 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
             "output_hashes": output_hashes,
             "manifest_hash_note": "manifest.json is excluded from output_hashes because a file cannot contain a stable hash of itself.",
         }
+        git_revision, git_dirty = _git_identity()
+        manifest["git_revision"] = git_revision
+        manifest["git_dirty"] = git_dirty
         _write_json(tmp_dir / "manifest.json", manifest)
 
         output_hashes_with_manifest = dict(manifest["output_hashes"])
@@ -381,9 +487,11 @@ def run_laws_preprocessing(config: LawsPreprocessingConfig | None = None) -> dic
             articles=articles,
             passages=passages,
             notes=notes,
+            status_events=status_events,
             edges=edges,
             chunks=chunks,
             unresolved_refs=unresolved_refs,
+            status_diagnostics=dict(status_diagnostics),
             output_hashes=output_hashes_with_manifest,
         )
         if not final_quality["ready_for_indexing"]:

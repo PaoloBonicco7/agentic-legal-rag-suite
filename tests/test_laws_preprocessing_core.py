@@ -119,5 +119,5 @@ def test_self_references_are_not_exported_as_edges(tmp_path: Path) -> None:
 def test_law_statuses() -> None:
     assert classify_law_status("Testo vigente.", 1)[0] == "current"
     assert classify_law_status("(Legge abrogata dall'art. 1 della L.R. 1 gennaio 2000, n. 1)", 1)[0] == "past"
-    assert classify_law_status("(Abrogata dall'art. 1, ad eccezione dell'articolo 4)", 1)[0] == "unknown"
-    assert classify_law_status("INDICE", 0)[0] == "index_or_empty"
+    assert classify_law_status("(Abrogata dall'art. 1, ad eccezione dell'articolo 4)", 1)[0] == "partial"
+    assert classify_law_status("INDICE", 0)[0] == "unknown"

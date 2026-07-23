@@ -9,9 +9,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-SCHEMA_VERSION = "laws-preprocessing-v1"
+LAWS_PREPROCESSING_SCHEMA_VERSION = "laws-preprocessing-v2"
+LEGAL_STATUS_RULES_VERSION = "legal-status-rules-v1"
+SCHEMA_VERSION = LAWS_PREPROCESSING_SCHEMA_VERSION
 
-ALLOWED_LAW_STATUSES = {"current", "past", "unknown", "index_or_empty"}
+ALLOWED_VALIDITY_STATUSES = {"current", "partial", "past", "unknown"}
+ALLOWED_LAW_STATUSES = ALLOWED_VALIDITY_STATUSES
+ALLOWED_CONTENT_AVAILABILITIES = {"substantive", "unstructured", "metadata_only", "empty"}
 ALLOWED_RELATION_TYPES = {
     "REFERENCES",
     "ABROGATED_BY",
@@ -36,10 +40,14 @@ REQUIRED_CHUNK_FIELDS = {
     "law_title",
     "law_status",
     "article_status",
+    "passage_status",
     "article_label_norm",
     "passage_label",
     "structure_path",
     "source_file",
+    "content_availability",
+    "status_event_ids",
+    "status_rule_ids",
     "index_views",
     "related_law_ids",
     "inbound_law_ids",
@@ -48,6 +56,8 @@ REQUIRED_CHUNK_FIELDS = {
 }
 
 LIST_CHUNK_FIELDS = {
+    "status_event_ids",
+    "status_rule_ids",
     "index_views",
     "related_law_ids",
     "inbound_law_ids",
@@ -55,8 +65,16 @@ LIST_CHUNK_FIELDS = {
     "relation_types",
 }
 
-LawStatus = Literal["current", "past", "unknown", "index_or_empty"]
-ArticleStatus = Literal["current", "past", "unknown"]
+ValidityStatus = Literal["current", "partial", "past", "unknown"]
+ContentAvailability = Literal["substantive", "unstructured", "metadata_only", "empty"]
+LawStatus = ValidityStatus
+ArticleStatus = ValidityStatus
+PassageStatus = ValidityStatus
+StatusEventType = Literal["repeal", "expiration"]
+StatusEventSource = Literal["preamble", "note", "display_marker"]
+StatusTargetKind = Literal["law", "article", "comma", "letter", "annex", "unknown"]
+StatusScopeMode = Literal["all", "only", "all_except"]
+StatusResolution = Literal["resolved", "ambiguous", "unapplied"]
 RelationType = Literal[
     "REFERENCES",
     "ABROGATED_BY",
@@ -173,10 +191,12 @@ class IngestedLaw:
     articles: list[dict[str, Any]]
     passages: list[dict[str, Any]]
     notes: list[dict[str, Any]]
+    status_events: list[dict[str, Any]]
     edges: list[dict[str, Any]]
     chunks: list[dict[str, Any]]
     unresolved_refs: int
     warnings: list[str]
+    status_diagnostics: dict[str, int]
 
 
 class _Record(BaseModel):
@@ -198,8 +218,9 @@ class LawRecord(_Record):
     law_number: int
     law_title: str
     law_status: LawStatus
-    status_confidence: float
-    status_evidence: list[dict[str, str]]
+    content_availability: ContentAvailability
+    status_event_ids: list[str]
+    status_rule_ids: list[str]
     source_file: str
     preamble_text: str
     links_out: list[dict[str, str]]
@@ -217,9 +238,10 @@ class ArticleRecord(_Record):
     article_heading: str | None
     article_text: str
     article_status: ArticleStatus
+    content_availability: ContentAvailability
+    status_event_ids: list[str]
+    status_rule_ids: list[str]
     note_anchor_names: list[str]
-    is_abrogated: bool
-    abrogated_by: dict[str, Any] | None
     amended_by_law_ids: list[str]
     links_out: list[dict[str, str]]
 
@@ -233,6 +255,11 @@ class PassageRecord(_Record):
     passage_label: str
     passage_kind: str
     passage_text: str
+    passage_status: PassageStatus
+    content_availability: ContentAvailability
+    status_event_ids: list[str]
+    status_rule_ids: list[str]
+    is_bracketed: bool
     structure_path: str
     note_anchor_names: list[str]
     links_out: list[dict[str, str]]
@@ -252,6 +279,27 @@ class NoteRecord(_Record):
     linked_article_ids: list[str]
     linked_passage_ids: list[str]
     links_out: list[dict[str, str]]
+
+
+class StatusEventRecord(_Record):
+    """One deterministic cessation event extracted from source evidence."""
+
+    status_event_id: str
+    law_id: str
+    event_type: StatusEventType
+    source_kind: StatusEventSource
+    source_anchor: str | None
+    source_clause: str
+    evidence_text: str
+    event_sequence: int = Field(ge=0)
+    modifying_law_ids: list[str]
+    target_kind: StatusTargetKind
+    target_ids: list[str]
+    scope_mode: StatusScopeMode
+    exception_labels: list[str]
+    exception_target_ids: list[str]
+    resolution_status: StatusResolution
+    rule_id: str
 
 
 class EdgeRecord(_Record):
@@ -289,6 +337,10 @@ class ChunkRecord(_Record):
     law_title: str
     law_status: LawStatus
     article_status: ArticleStatus
+    passage_status: PassageStatus
+    content_availability: ContentAvailability
+    status_event_ids: list[str]
+    status_rule_ids: list[str]
     article_label_norm: str
     passage_label: str
     structure_path: str
@@ -318,6 +370,11 @@ def passage_record(data: dict[str, Any]) -> dict[str, Any]:
 def note_record(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and serialize a note record."""
     return NoteRecord.model_validate(data).to_json_record()
+
+
+def status_event_record(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and serialize a status-event record."""
+    return StatusEventRecord.model_validate(data).to_json_record()
 
 
 def edge_record(data: dict[str, Any]) -> dict[str, Any]:
