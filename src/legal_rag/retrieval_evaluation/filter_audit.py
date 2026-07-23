@@ -45,6 +45,7 @@ from .models import (
     FilterImpactRow,
     FilterReferenceAuditRow,
     QuestionTarget,
+    StatusTransitionRow,
 )
 from .profiles import (
     FILTER_AUDIT_EXACT_FILTER_NAMES,
@@ -211,6 +212,7 @@ class FilterAuditResult:
     filter_exclusions: pd.DataFrame
     filter_impact: pd.DataFrame
     filter_exact_control: pd.DataFrame
+    status_transitions: pd.DataFrame
     manifest: dict[str, Any]
 
 
@@ -231,6 +233,44 @@ def load_vigency_reference_review(path: str | Path) -> list[dict[str, str]]:
             raise ValueError(f"Duplicate vigency review row: {key}")
         seen.add(key)
     return rows
+
+
+def build_status_transitions(
+    baseline_laws_dir: str | Path,
+    current_laws_dir: str | Path,
+) -> pd.DataFrame:
+    """Compare canonical law and article status fields across clean datasets."""
+    baseline = Path(baseline_laws_dir)
+    current = Path(current_laws_dir)
+    rows: list[dict[str, Any]] = []
+    for entity_type, filename, id_field, status_field in (
+        ("law", "laws.jsonl", "law_id", "law_status"),
+        ("article", "articles.jsonl", "article_id", "article_status"),
+    ):
+        old_records = _jsonl_by_id(baseline / filename, id_field=id_field)
+        new_records = _jsonl_by_id(current / filename, id_field=id_field)
+        for entity_id in sorted(set(old_records) | set(new_records)):
+            old_record = old_records.get(entity_id)
+            new_record = new_records.get(entity_id)
+            old_status = _optional_text((old_record or {}).get(status_field))
+            new_status = _optional_text((new_record or {}).get(status_field))
+            law_id = str(
+                (new_record or old_record or {}).get("law_id")
+                or (entity_id if entity_type == "law" else "")
+            )
+            row = StatusTransitionRow(
+                entity_type=entity_type,  # type: ignore[arg-type]
+                entity_id=entity_id,
+                law_id=law_id,
+                status_field=status_field,  # type: ignore[arg-type]
+                old_present=old_record is not None,
+                new_present=new_record is not None,
+                old_status=old_status,
+                new_status=new_status,
+                transition=f"{old_status or 'missing'}->{new_status or 'missing'}",
+            )
+            rows.append(row.to_json_record())
+    return pd.DataFrame(rows, columns=StatusTransitionRow.model_fields)
 
 
 def build_filter_reference_audit(
@@ -565,6 +605,7 @@ def run_filter_audit(
     rrf_k_default: int,
     availability: ChunkAvailabilityIndex,
     reference_review: Sequence[Mapping[str, Any]] = (),
+    status_transitions: pd.DataFrame | None = None,
     profile: DiagnosticProfile | None = None,
     filter_variants: Mapping[str, dict[str, Any]] = FILTER_VARIANTS,
     show_progress: bool = True,
@@ -572,6 +613,11 @@ def run_filter_audit(
 ) -> FilterAuditResult:
     """Run the deterministic filter matrix, coverage audit, and exact control."""
     profile = profile or resolve_profile("filter_audit")
+    status_transitions = (
+        status_transitions.copy()
+        if status_transitions is not None
+        else pd.DataFrame(columns=StatusTransitionRow.model_fields)
+    )
     unsupported = set(profile.enabled_experiments) - {"direct", "hybrid"}
     if unsupported:
         raise ValueError(f"Filter audit cannot run nondeterministic experiments: {sorted(unsupported)}")
@@ -653,6 +699,7 @@ def run_filter_audit(
             else 0,
             "filter_impact": len(impact),
             "filter_exact_control": len(exact_control),
+            "status_transitions_v1_to_v2": len(status_transitions),
         },
     }
     return FilterAuditResult(
@@ -661,6 +708,7 @@ def run_filter_audit(
         filter_exclusions=build_filter_exclusions(reference_audit),
         filter_impact=impact,
         filter_exact_control=exact_control,
+        status_transitions=status_transitions,
         manifest=manifest,
     )
 
@@ -684,6 +732,7 @@ def write_filter_audit_artifacts(
         filter_exclusions=result.filter_exclusions.to_dict(orient="records"),
         filter_impact=result.filter_impact.to_dict(orient="records"),
         filter_exact_control=result.filter_exact_control.to_dict(orient="records"),
+        status_transitions=result.status_transitions.to_dict(orient="records"),
         manifest=merged_manifest,
     )
 
@@ -742,6 +791,22 @@ def _live_collection_identity(
             break
         offset = next_offset
     return values
+
+
+def _jsonl_by_id(path: Path, *, id_field: str) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            entity_id = str(record.get(id_field) or "")
+            if not entity_id:
+                raise ValueError(f"{path}: missing {id_field}")
+            if entity_id in records:
+                raise ValueError(f"{path}: duplicate {id_field}={entity_id!r}")
+            records[entity_id] = record
+    return records
 
 
 def _payload_values(chunks: Sequence[Mapping[str, Any]], key: str) -> list[str]:

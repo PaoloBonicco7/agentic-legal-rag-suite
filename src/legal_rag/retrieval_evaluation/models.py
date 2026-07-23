@@ -286,3 +286,18 @@ class FilterExactControlRow(_Record):
     ann_article_mrr: float = Field(ge=0.0, le=1.0)
     exact_article_mrr: float = Field(ge=0.0, le=1.0)
     article_mrr_delta: float
+
+
+class StatusTransitionRow(_Record):
+    """One comparable law or article status transition from v1 to v2."""
+
+    schema_version: Literal["filter-audit-v1"] = FILTER_AUDIT_SCHEMA_VERSION
+    entity_type: Literal["law", "article"]
+    entity_id: str
+    law_id: str
+    status_field: Literal["law_status", "article_status"]
+    old_present: bool
+    new_present: bool
+    old_status: str | None = None
+    new_status: str | None = None
+    transition: str

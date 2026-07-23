@@ -57,6 +57,7 @@ from .filter_audit import (
     build_filter_exclusions,
     build_filter_impact,
     build_filter_reference_audit,
+    build_status_transitions,
     load_vigency_reference_review,
     paired_bootstrap_interval,
     run_filter_audit,
@@ -78,6 +79,7 @@ from .models import (
     RerankEvaluationRow,
     RetrievalEvaluationRow,
     RetrievalScenarioSummary,
+    StatusTransitionRow,
 )
 from .profiles import (
     DATASET_SPECS,
@@ -166,6 +168,7 @@ __all__ = [
     "CandidateMetrics",
     "ChunkAvailabilityIndex",
     "QuestionTarget",
+    "StatusTransitionRow",
     "TECHNIQUE_COLORS",
     "VIGENCY_REFERENCE_REVIEW_SCHEMA_VERSION",
     "align_rerank_scores",
@@ -178,6 +181,7 @@ __all__ = [
     "build_filter_exclusions",
     "build_filter_impact",
     "build_filter_reference_audit",
+    "build_status_transitions",
     "build_query_rewrite_caches",
     "build_waterfall",
     "candidate_metrics",

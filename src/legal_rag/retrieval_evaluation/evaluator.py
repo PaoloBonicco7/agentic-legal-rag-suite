@@ -40,6 +40,7 @@ from .models import (
     FILTER_AUDIT_SCHEMA_VERSION,
     RetrievalEvaluationRow,
     RetrievalScenarioSummary,
+    StatusTransitionRow,
 )
 
 
@@ -728,6 +729,7 @@ def write_run_artifacts(
     filter_exclusions: Sequence[Mapping[str, Any]] = (),
     filter_impact: Sequence[Mapping[str, Any]] = (),
     filter_exact_control: Sequence[Mapping[str, Any]] = (),
+    status_transitions: Sequence[Mapping[str, Any]] = (),
     manifest: Mapping[str, Any],
 ) -> Path:
     """Persist scenarios, sweep tables and manifest under output_dir atomically."""
@@ -748,7 +750,13 @@ def write_run_artifacts(
             default_fields=["dataset", *QueryRewriteEvaluationRow.model_fields],
         )
         has_filter_audit = any(
-            (filter_reference_audit, filter_exclusions, filter_impact, filter_exact_control)
+            (
+                filter_reference_audit,
+                filter_exclusions,
+                filter_impact,
+                filter_exact_control,
+                status_transitions,
+            )
         )
         if has_filter_audit:
             _write_csv(
@@ -770,6 +778,11 @@ def write_run_artifacts(
                 tmp_dir / "filter_exact_control.csv",
                 filter_exact_control,
                 default_fields=FilterExactControlRow.model_fields,
+            )
+            _write_csv(
+                tmp_dir / "status_transitions_v1_to_v2.csv",
+                status_transitions,
+                default_fields=StatusTransitionRow.model_fields,
             )
         augmented_manifest = _augment_manifest(manifest)
         if has_filter_audit:

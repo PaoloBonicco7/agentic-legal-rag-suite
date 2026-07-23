@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -33,6 +34,7 @@ from legal_rag.retrieval_evaluation import (
     build_filter_exact_control,
     build_filter_impact,
     build_filter_reference_audit,
+    build_status_transitions,
     build_waterfall,
     evaluate_candidate_set,
     evaluate_query_rewrite,
@@ -507,6 +509,48 @@ def test_filter_reference_audit_distinguishes_partial_from_full_exclusion() -> N
     assert active["datasets"] == ["mcq", "no_hint"]
 
 
+def test_status_transitions_compare_laws_and_articles(tmp_path) -> None:
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    old_dir.mkdir()
+    new_dir.mkdir()
+    (old_dir / "laws.jsonl").write_text(
+        json.dumps({"law_id": "law-1", "law_status": "current"}) + "\n",
+        encoding="utf-8",
+    )
+    (new_dir / "laws.jsonl").write_text(
+        json.dumps({"law_id": "law-1", "law_status": "past"}) + "\n",
+        encoding="utf-8",
+    )
+    (old_dir / "articles.jsonl").write_text(
+        json.dumps(
+            {
+                "law_id": "law-1",
+                "article_id": "law-1#art:1",
+                "article_status": "past",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (new_dir / "articles.jsonl").write_text(
+        json.dumps(
+            {
+                "law_id": "law-1",
+                "article_id": "law-1#art:1",
+                "article_status": "partial",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    transitions = build_status_transitions(old_dir, new_dir)
+
+    assert transitions["transition"].tolist() == ["current->past", "past->partial"]
+    assert transitions["entity_type"].tolist() == ["law", "article"]
+
+
 def test_filter_impact_uses_paired_bootstrap_and_separate_verdict_axes() -> None:
     direct = pd.DataFrame(
         [
@@ -903,6 +947,13 @@ def test_write_run_artifacts_creates_csvs_and_manifest(tmp_path) -> None:
         filter_exclusions=[],
         filter_impact=[{"filter_name": "none", "article_success_delta_pp": 0.0}],
         filter_exact_control=[],
+        status_transitions=[
+            {
+                "entity_type": "law",
+                "entity_id": "law-1",
+                "transition": "current->past",
+            }
+        ],
         manifest=manifest,
     )
 
@@ -916,6 +967,7 @@ def test_write_run_artifacts_creates_csvs_and_manifest(tmp_path) -> None:
     assert (output_dir / "filter_exclusions.csv").exists()
     assert (output_dir / "filter_impact.csv").exists()
     assert (output_dir / "filter_exact_control.csv").exists()
+    assert (output_dir / "status_transitions_v1_to_v2.csv").exists()
     with (output_dir / "sweep_rerank.csv").open(encoding="utf-8") as handle:
         assert "rerank_model" in next(csv.reader(handle))
     with (output_dir / "sweep_query_rewriting.csv").open(encoding="utf-8") as handle:
@@ -924,6 +976,7 @@ def test_write_run_artifacts_creates_csvs_and_manifest(tmp_path) -> None:
     assert RETRIEVAL_EVALUATION_SCHEMA_VERSION in manifest_text
     assert FILTER_AUDIT_SCHEMA_VERSION in manifest_text
     assert "filter_reference_audit.csv" in manifest_text
+    assert "status_transitions_v1_to_v2.csv" in manifest_text
     assert "created_at" in manifest_text
 
 
