@@ -15,7 +15,21 @@ from typing import Any
 import pandas as pd
 from qdrant_client import QdrantClient
 
+from legal_rag.indexing.dataset import read_manifest, validate_clean_dataset
 from legal_rag.indexing.embeddings import SupportsEmbedding
+from legal_rag.indexing.io import sha256_file
+from legal_rag.indexing.models import (
+    IDENTITY_PAYLOAD_FIELDS,
+    INDEXING_SCHEMA_VERSION,
+)
+from legal_rag.laws_preprocessing import (
+    LAWS_PREPROCESSING_SCHEMA_VERSION,
+    LEGAL_STATUS_RULES_VERSION,
+)
+from legal_rag.laws_preprocessing.inventory import (
+    build_corpus_registry,
+    compute_source_hash,
+)
 
 from .evaluator import ChunkAvailabilityIndex, payload_matches_filters, write_run_artifacts
 from .experiments.direct import (
@@ -45,6 +59,147 @@ PRIMARY_FILTER_NAMES = frozenset(
 )
 _ACTIVE_STATUSES = frozenset({"current", "partial"})
 _VALID_STATUSES = frozenset({"current", "partial", "past", "unknown"})
+
+
+def validate_filter_audit_preflight(
+    *,
+    laws_dir: str | Path,
+    source_dir: str | Path,
+    index_manifest_path: str | Path,
+    index_manifest: Mapping[str, Any],
+    qdrant_client: QdrantClient,
+    collection_name: str,
+    require_clean_provenance: bool = True,
+) -> dict[str, Any]:
+    """Reconcile the source corpus, clean files, index manifest, and live collection."""
+    dataset_dir = Path(laws_dir).resolve()
+    corpus_dir = Path(source_dir).resolve()
+    manifest_path = Path(index_manifest_path).resolve()
+    errors: list[str] = []
+
+    validation = validate_clean_dataset(dataset_dir, strict=True)
+    if not validation.ok:
+        errors.extend(validation.errors)
+    clean_manifest = read_manifest(dataset_dir)
+    clean_hash = sha256_file(dataset_dir / "manifest.json")
+    index_hash = sha256_file(manifest_path)
+
+    if index_manifest.get("schema_version") != INDEXING_SCHEMA_VERSION:
+        errors.append(
+            "index schema mismatch: "
+            f"expected={INDEXING_SCHEMA_VERSION!r}, actual={index_manifest.get('schema_version')!r}"
+        )
+    if index_manifest.get("ready_for_retrieval") is not True:
+        errors.append("index manifest does not expose ready_for_retrieval=true")
+    if (index_manifest.get("config") or {}).get("chunk_selection_mode") != "full":
+        errors.append("filter audit requires chunk_selection_mode='full'")
+    if index_manifest.get("collection_name") != collection_name:
+        errors.append(
+            "collection name mismatch: "
+            f"manifest={index_manifest.get('collection_name')!r}, requested={collection_name!r}"
+        )
+
+    expected_versions = {
+        "preprocessing_schema_version": LAWS_PREPROCESSING_SCHEMA_VERSION,
+        "status_rules_version": LEGAL_STATUS_RULES_VERSION,
+    }
+    for field, expected in expected_versions.items():
+        clean_field = "schema_version" if field == "preprocessing_schema_version" else field
+        if clean_manifest.get(clean_field) != expected:
+            errors.append(
+                f"clean manifest {clean_field} mismatch: "
+                f"expected={expected!r}, actual={clean_manifest.get(clean_field)!r}"
+            )
+        if index_manifest.get(field) != expected:
+            errors.append(
+                f"index manifest {field} mismatch: "
+                f"expected={expected!r}, actual={index_manifest.get(field)!r}"
+            )
+
+    declared_output_hashes = dict(clean_manifest.get("output_hashes") or {})
+    indexed_output_hashes = dict(index_manifest.get("source_output_hashes") or {})
+    if declared_output_hashes != validation.actual_output_hashes:
+        errors.append("clean output hashes do not match the actual files")
+    if indexed_output_hashes != validation.actual_output_hashes:
+        errors.append("index source_output_hashes do not match the actual clean files")
+    if index_manifest.get("dataset_manifest_hash") != clean_hash:
+        errors.append("index dataset_manifest_hash does not match manifest.json")
+
+    registry, _ = build_corpus_registry(corpus_dir)
+    actual_source_hash = compute_source_hash(list(registry.by_law_id.values()))
+    if clean_manifest.get("source_hash") != actual_source_hash:
+        errors.append("clean source_hash does not match the source corpus")
+    if index_manifest.get("source_hash") != actual_source_hash:
+        errors.append("index source_hash does not match the source corpus")
+
+    expected_count = int(validation.counts.get("chunks") or 0)
+    selected_count = int(index_manifest.get("selected_count") or 0)
+    indexed_count = int(index_manifest.get("indexed_count") or 0)
+    manifest_collection_count = int(index_manifest.get("collection_points_count") or 0)
+    live_count = int(
+        qdrant_client.count(collection_name=collection_name, exact=True).count
+    )
+    if len({expected_count, selected_count, indexed_count, manifest_collection_count, live_count}) != 1:
+        errors.append(
+            "chunk/collection count mismatch: "
+            f"clean={expected_count}, selected={selected_count}, indexed={indexed_count}, "
+            f"manifest_collection={manifest_collection_count}, live_collection={live_count}"
+        )
+
+    expected_identity = {
+        "dataset_source_hash": actual_source_hash,
+        "dataset_manifest_hash": clean_hash,
+        "dataset_chunks_hash": validation.actual_output_hashes.get("chunks"),
+        **expected_versions,
+    }
+    manifest_identity = dict(index_manifest.get("collection_identity") or {})
+    if manifest_identity != {"collection_name": collection_name, **expected_identity}:
+        errors.append("index collection_identity does not match the reconciled dataset identity")
+
+    identity_values = _live_collection_identity(
+        qdrant_client,
+        collection_name=collection_name,
+    )
+    for field, expected in expected_identity.items():
+        values = identity_values[field]
+        if values != {str(expected)}:
+            errors.append(
+                f"live collection identity mismatch for {field}: "
+                f"expected={expected!r}, actual={sorted(values)!r}"
+            )
+
+    false_quality_gates = sorted(
+        key
+        for key, value in dict(index_manifest.get("quality_gates") or {}).items()
+        if value is not True
+    )
+    if false_quality_gates:
+        errors.append(f"index quality gates are not all green: {false_quality_gates}")
+    if index_manifest.get("failure_count") != 0:
+        errors.append(f"index manifest records failures: {index_manifest.get('failure_count')!r}")
+    index_git_dirty = (index_manifest.get("pipeline_identity") or {}).get("git_dirty")
+    if require_clean_provenance and index_git_dirty is not False:
+        errors.append("definitive index was not built from a clean worktree")
+
+    if errors:
+        raise RuntimeError("Filter audit preflight failed: " + "; ".join(errors))
+
+    return {
+        "ok": True,
+        "clean_manifest_sha256": clean_hash,
+        "index_manifest_sha256": index_hash,
+        "source_hash": actual_source_hash,
+        "output_hashes": validation.actual_output_hashes,
+        "chunk_count": expected_count,
+        "collection_count": live_count,
+        "collection_name": collection_name,
+        "collection_identity": expected_identity,
+        "index_run_id": index_manifest.get("run_id"),
+        "index_git_commit": (index_manifest.get("pipeline_identity") or {}).get(
+            "git_commit"
+        ),
+        "index_git_dirty": index_git_dirty,
+    }
 
 
 @dataclass(frozen=True)
@@ -562,6 +717,33 @@ def _has_unknown_status(chunk: Mapping[str, Any]) -> bool:
         or str(chunk.get(key) or "") == "unknown"
         for key in ("law_status", "article_status", "passage_status")
     )
+
+
+def _live_collection_identity(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+) -> dict[str, set[str]]:
+    values = {field: set() for field in IDENTITY_PAYLOAD_FIELDS}
+    offset: Any = None
+    while True:
+        records, next_offset = client.scroll(
+            collection_name=collection_name,
+            limit=512,
+            offset=offset,
+            with_payload=list(IDENTITY_PAYLOAD_FIELDS),
+            with_vectors=False,
+        )
+        for record in records:
+            payload = record.payload or {}
+            for field in IDENTITY_PAYLOAD_FIELDS:
+                value = payload.get(field)
+                if value is not None:
+                    values[field].add(str(value))
+        if next_offset is None:
+            break
+        offset = next_offset
+    return values
 
 
 def _payload_values(chunks: Sequence[Mapping[str, Any]], key: str) -> list[str]:

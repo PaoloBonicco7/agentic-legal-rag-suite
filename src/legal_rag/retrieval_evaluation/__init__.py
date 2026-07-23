@@ -60,6 +60,7 @@ from .filter_audit import (
     load_vigency_reference_review,
     paired_bootstrap_interval,
     run_filter_audit,
+    validate_filter_audit_preflight,
     write_filter_audit_artifacts,
 )
 from .models import (
@@ -220,6 +221,7 @@ __all__ = [
     "rewrite_query",
     "run_direct_experiment",
     "run_filter_audit",
+    "validate_filter_audit_preflight",
     "run_graph_experiment",
     "run_query_rewriting_experiment",
     "run_rerank_experiment",

@@ -23,6 +23,7 @@ from legal_rag.indexing.qdrant_store import (
 )
 from legal_rag.indexing.io import sha256_file
 from legal_rag.laws_preprocessing.inventory import build_corpus_registry, compute_source_hash
+from legal_rag.retrieval_evaluation import validate_filter_audit_preflight
 
 
 class FakeEmbedder:
@@ -218,6 +219,47 @@ def test_run_indexing_pipeline_creates_qdrant_contract_artifacts(tmp_path: Path)
         "batch_finished",
         "run_finished",
     ]
+
+    preflight = validate_filter_audit_preflight(
+        laws_dir=dataset,
+        source_dir=dataset.parent / "laws_html",
+        index_manifest_path=run_dir / "index_manifest.json",
+        index_manifest=stored,
+        qdrant_client=client,
+        collection_name="test_collection",
+        require_clean_provenance=False,
+    )
+    assert preflight["ok"] is True
+    assert preflight["chunk_count"] == 2
+
+    client.set_payload(
+        collection_name="test_collection",
+        payload={"dataset_chunks_hash": "wrong"},
+        points=[point_id_from_chunk_id("c1")],
+        wait=True,
+    )
+    with pytest.raises(RuntimeError, match="live collection identity mismatch"):
+        validate_filter_audit_preflight(
+            laws_dir=dataset,
+            source_dir=dataset.parent / "laws_html",
+            index_manifest_path=run_dir / "index_manifest.json",
+            index_manifest=stored,
+            qdrant_client=client,
+            collection_name="test_collection",
+            require_clean_provenance=False,
+        )
+
+    (dataset / "chunks.jsonl").write_text("", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="chunks.jsonl hash mismatch"):
+        validate_filter_audit_preflight(
+            laws_dir=dataset,
+            source_dir=dataset.parent / "laws_html",
+            index_manifest_path=run_dir / "index_manifest.json",
+            index_manifest=stored,
+            qdrant_client=client,
+            collection_name="test_collection",
+            require_clean_provenance=False,
+        )
 
 
 def test_run_indexing_pipeline_reuse_skips_unchanged_points(tmp_path: Path) -> None:
