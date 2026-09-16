@@ -1,5 +1,10 @@
 # 01 — Preprocessing delle leggi
 
+La revisione del 16 settembre ha corretto propagazione delle cessazioni totali, anchor duplicate
+e backlink nelle intestazioni. I conteggi sotto documentano il run di luglio precedente a queste
+correzioni; la nuova esecuzione è ancora da effettuare. Vedi la
+[guida di consolidamento e riesecuzione](../notes/validity_audit_stabilization.md).
+
 La pipeline deterministica HTML → dataset pulito vive in `src/legal_rag/laws_preprocessing/`.
 Legge il corpus versionato `data/laws_html/`, estrae struttura, relazioni ed eventi espliciti di
 cessazione, quindi costruisce i chunk per il retrieval. Il corpus sorgente non viene modificato.

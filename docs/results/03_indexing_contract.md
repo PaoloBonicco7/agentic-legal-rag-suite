@@ -1,5 +1,10 @@
 # 03 — Indicizzazione
 
+L'indice status-v2 di luglio documentato sotto precede le ulteriori correzioni al parser del
+16 settembre. Il prossimo audit definitivo richiede il nuovo clean e un indice aggiornato;
+i vettori invariati possono essere riutilizzati. Comandi nella
+[guida di consolidamento e riesecuzione](../notes/validity_audit_stabilization.md).
+
 `legal_rag.indexing` valida il dataset pulito, calcola l'embedding di `text_for_embedding`, usa
 point ID deterministici (UUIDv5 da `chunk_id`), salva payload e vettori dense+sparse e produce gli
 artefatti in `data/indexing_runs/<run_id>/`. Metodologia in

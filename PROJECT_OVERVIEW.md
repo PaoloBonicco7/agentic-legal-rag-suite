@@ -1,5 +1,13 @@
 # Implementation Summary and References
 
+> Historical baseline: the results below precede the validity-filter audit. The current
+> retrieval contract reports Article Success, Law Success and MRR only; Recall, MAP and
+> All-Relevant values below are historical exploratory calculations, not current outputs.
+> The September consolidation and rerun procedure are documented in
+> [the stabilization review](docs/notes/validity_audit_stabilization.md).
+> The audit has identified both status-annotation errors and genuinely historical benchmark
+> references; its full retrieval comparison is still pending.
+
 Questo lavoro verifica empiricamente se un retrieval più ricco — hybrid dense + sparse con query rewriting — migliora le risposte su un set di domande basate su un corpus di leggi regionali italiane rispetto a un Naive RAG dense-only e a un controllo no-RAG. Le sezioni 1–7 descrivono le scelte implementative dei sette step della pipeline e le motivano con la letteratura di riferimento; la sezione 8 raccoglie i risultati misurati nei notebook `06b_retrieval_diagnostics.ipynb` (diagnosi retrieval-only) e `06_advanced_graph_rag.ipynb` (verifica end-to-end sul dataset completo).
 
 ## 1. Preprocessing strutturale del corpus
@@ -277,7 +285,7 @@ Questa scelta è coerente con la letteratura IR e RAG. [BEIR](https://arxiv.org/
 
 Nel progetto il protocollo raccomandato è quindi:
 
-1. riportare subito `Article Success@k`, `Macro Recall@k`, `All-Relevant@k` e `MRR@k` a `k ∈ {10, 15, 100}`;
+1. riportare `Article Success@k`, `Law Success@k` e `MRR@k`; l'audit dei filtri usa `k ∈ {5, 10, 20, 50, 100}`, mentre il contesto end-to-end mantiene il proprio budget esplicito;
 2. usare `k=100` per la copertura della candidate list e `k=15` per ciò che il generatore può davvero vedere;
 3. costruire una piccola qrel answer-bearing, con annotazione umana pooled dei candidati dei sistemi confrontati, prima di usare `Context Precision@15`, answer-bearing `MAP@15`, `nDCG@15` e metriche claim-level di faithfulness;
 4. accompagnare i delta end-to-end con intervalli di confidenza paired-bootstrap, perché tutti i sistemi rispondono agli stessi `qid`.
@@ -426,7 +434,7 @@ I 43 casi `unknown` vanno letti in questa luce: non indicano solo "errore genera
 
 L'aggiunta più utile non è un elenco indiscriminato di metriche NLP, ma una ground truth più fine. Il protocollo minimo proposto è:
 
-1. **Già implementato, senza nuove annotazioni**: lo schema `retrieval-evaluation-v5` esporta Macro Recall@k, All-Relevant@k e MAP@k dalla stessa lista ordinata già usata per Success e MRR. MAP resta secondaria per la quasi equivalenza con MRR sul benchmark corrente. Gli artifact storici v4 non vengono riscritti: i nuovi campi saranno prodotti dalla prossima run diagnostica.
+1. **Contratto corrente**: lo schema `retrieval-evaluation-v5` mantiene Article Success, Law Success e MRR. Macro Recall, All-Relevant e MAP sono state rimosse dal contratto e non vengono reintrodotte dall'audit dei filtri. Gli artefatti storici restano invariati. La copertura statica dei riferimenti è una diagnosi separata dalle metriche retrieval.
 2. **Con un piccolo costo di annotazione**: fare pooling dei top-15 di Dense, Hybrid e Advanced e far assegnare a ogni chunk un grado `0/1/2`. Da queste qrel derivano Context Precision@15, answer-bearing Recall@15, MAP@15 binaria e nDCG@15 graduata. Questa è la misura più diretta del collo di bottiglia osservato tra 93% candidate Success e 72% context Success.
 3. **Per il grounding della risposta**: segmentare un campione di risposte in claim e annotare se ogni claim è supportato dalle citazioni. Riportare citation validity, citation precision e claim-support recall separatamente dalla correttezza. Un LLM judge può assistere, ma va calibrato su un subset umano, come suggerisce l'impostazione di [ARES](https://aclanthology.org/2024.naacl-long.20/).
 4. **Per la robustezza statistica**: mantenere confronti paired per qid, IC bootstrap dei delta e, se si fanno molte ablation, correggere le comparazioni multiple. La necessità di scegliere test coerenti con metrica e dipendenze è discussa da [Dror et al., 2018](https://aclanthology.org/P18-1128/); l'uso degli intervalli per quantificare la dimensione dell'effetto è sostenuto da [Bestgen, 2022](https://aclanthology.org/2022.lrec-1.640/).

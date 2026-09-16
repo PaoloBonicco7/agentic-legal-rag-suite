@@ -13,5 +13,6 @@ Le note sono in italiano, con i termini tecnici lasciati in inglese.
 - [04 — No-RAG baseline](04_no_rag_baseline_methodology.md)
 - [06 — Advanced RAG](06_advanced_graph_rag_methodology.md)
 - [06b — Retrieval diagnostics](06b_retrieval_diagnostics_methodology.md)
+- [Validity audit — consolidation and rerun](validity_audit_stabilization.md)
 - [06c — Audit dei casi `unknown`](06c_advanced_unknown_audit.md)
 - [UI Advanced RAG](ui_advanced_rag.md)

@@ -1,5 +1,10 @@
 # 06b — Retrieval diagnostics e audit dei filtri (risultati)
 
+Revisione del 16 settembre: l'audit completo resta da eseguire, dopo rigenerazione del clean e
+dell'indice con le ulteriori correzioni al parser. La
+[guida operativa](../notes/validity_audit_stabilization.md) definisce la sequenza e conserva i run
+di luglio come evidenza storica.
+
 Il documento separa due lineage:
 
 - il baseline storico v1, usato per scegliere hybrid e multi-query nella run Advanced RAG;
@@ -90,8 +95,9 @@ irrilevante. Nessuna configurazione del sweep rispetta un noise cap ragionevole
 | 50 | 84.0% | 82.0% | −2pp |
 | 100 | 88.0% | 89.0% | +1pp |
 
-Punto operativo scelto: `top_k=100`, `rrf_k=30` → **89.0%** `article_hit`, MRR 0.551. Rispetto a
-`dense@10` sono **+16pp** di `article_hit` e +0.032 di MRR. `rrf_k` basso premia i primi rank,
+Punto operativo scelto: `top_k=100`, `rrf_k=30` → **89.0%** `article_hit`, MRR 0.551. A parità di
+budget, rispetto a `dense@100` sono **+1pp** di `article_hit` e +0.027 di MRR. Il +16pp rispetto a
+`dense@10` include anche l'aumento del candidate budget. `rrf_k` basso premia i primi rank,
 coerente col dominio legale dove i primi candidati pesano di più (a `top_k=100` il hit è 89% per
 `rrf_k` 30/60/90; cambia solo l'MRR di terzo decimale).
 
@@ -115,9 +121,9 @@ Pilot di 30 domande/dataset, `failure_rate=0%`. Strategie confrontate sopra l'hy
 | hyde | 86.7% | 96.7% | 0.471 | +3.3pp |
 | **multi_query** | **93.3%** | **100.0%** | 0.467 | **+10.0pp** |
 
-`multi_query` (n=3) è la migliore su entrambi i dataset: +4.3pp sopra l'hybrid full, `law_hit` al
-100% sul pilot. La diversità delle riformulazioni copre meglio il vocabolario normativo della stessa
-intent. `rewrite` resta un fallback più economico (una sola query).
+Sul pilot MCQ appaiato, `multi_query` (n=3) guadagna +10pp rispetto a `none`, ma MRR scende da
+0.493 a 0.467. Il confronto 93.3% pilot contro 89% full non isola un effetto perché usa QID
+diversi. `rewrite` resta un fallback più economico (una sola query).
 
 ## Waterfall storico
 
@@ -129,7 +135,7 @@ intent. `rewrite` resta un fallback più economico (una sola query).
 | graph | best graph | 74.0% | +1pp | scartato (noise 99.7%) |
 | **hybrid** | **top_k=100, rrf_k=30** | **89.0%** | **+16pp** | **promosso** |
 | rerank | input 20 / output 10 (pilot) | 82.6% | +9.6pp | scartato (−6.4pp vs hybrid) |
-| **rewriting** | **multi_query, n=3 (pilot)** | **93.3%** | **+20.3pp** | **promosso (+4.3pp vs hybrid)** |
+| **rewriting** | **multi_query, n=3 (pilot)** | **93.3%** | non comparabile al full | **+10pp vs none sullo stesso pilot** |
 
 La fase promuove **due** leve: hybrid (F) come retrieval di base e multi-query (H) come
 trasformazione della richiesta.
@@ -157,14 +163,13 @@ graph e rerank restano nel config come default disattivati, riattivabili con un 
 
 ## Perché questa configurazione
 
-- **Il dominio legale favorisce l'hybrid.** Le domande contengono marker lessicali (numeri di
-  articolo, sigle, riferimenti puntuali) che il dense BGE-M3 cattura male da solo; il vettore sparse
-  li indicizza esplicitamente. Il +16pp di F non è cosmetico.
+- **L'hybrid aggiunge un segnale lessicale.** Il guadagno osservato a budget fisso è +3pp a k=10
+  e +1pp a k=100; i risultati non attribuiscono alla fusione l'effetto dell'aumento di k.
 - **La fusione migliora anche il ranking, non solo il recall.** L'MRR sale da 0.519 (dense@10) a
   0.551 (hybrid@100), oltre il dense@100 (0.524): la RRF porta in cima i chunk che entrambe le viste
   ritengono rilevanti.
-- **Multi-query aggiunge un guadagno indipendente** (+4.3pp sopra l'hybrid), al costo di una
-  chiamata LLM per domanda con cache versionata.
+- **Multi-query mostra un guadagno esplorativo** (+10pp sullo stesso pilot, con MRR inferiore),
+  al costo di una chiamata LLM per domanda con cache versionata.
 - **Le leve scartate hanno costi senza beneficio retrieval-only nel run v1**: rerank perde recall,
   graph aggiunge ~99.7% di rumore e i filtri v1 riducono l'Article Success. La natura delle
   esclusioni dei filtri è riesaminata separatamente nell'audit v2.

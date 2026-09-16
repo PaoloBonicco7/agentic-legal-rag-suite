@@ -2,6 +2,11 @@
 
 Data revisione: 2026-07-23.
 
+Aggiornamento del 16 settembre: gli artefatti status-v2 qui elencati precedono le ulteriori
+correzioni al parser. Sono conservati come storico e sorgente per il riuso dei vettori.
+I nuovi output `*_review_20260916` descritti nella
+[guida di riesecuzione](validity_audit_stabilization.md) sono pianificati, non ancora generati.
+
 Questa nota fotografa lo stato locale della cartella `data/`, separando sorgenti, output
 riproducibili, run di riferimento e candidati di pulizia. La revisione è basata su:
 
