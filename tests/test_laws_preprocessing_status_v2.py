@@ -179,6 +179,58 @@ def test_later_cessation_of_exceptions_makes_law_fully_past(
     assert later["modifying_law_ids"] == ["vda:lr:2002-01-03:3"]
 
 
+@pytest.mark.parametrize("whole_law", [False, True])
+@pytest.mark.parametrize("anchored_heading", [False, True])
+def test_whole_cessation_dominates_ambiguous_passage_notes(
+    tmp_path: Path, whole_law: bool, anchored_heading: bool,
+) -> None:
+    preamble = "<p>Legge abrogata dalla L.R. 2/2001.</p>" if whole_law else ""
+    article_marker = "" if whole_law else '<a href="#nota_2">(2)</a>'
+    article_note = "" if whole_law else '<p><a name="nota_2">(2)</a> Articolo abrogato dalla L.R. 2/2001.</p>'
+    heading = '<a name="articolo_1__">Art. 1</a>' if anchored_heading else "Art. 1"
+    _write_law(tmp_path, "0001_LR-1-gennaio-2000-n1.html", f"""<article>
+<h1>Legge regionale 1 gennaio 2000, n. 1</h1>{preamble}
+<p>{heading} {article_marker}</p>
+<p>1. Primo comma. <a href="#nota_1">(1)</a></p>
+<p>2. Secondo comma. <a href="#nota_1">(1)</a></p>
+{article_note}
+<p><a name="nota_1">(1)</a> Comma abrogato dalla L.R. 2/2001.</p>
+</article>""")
+    _modifier_law(tmp_path)
+    registry, _ = build_corpus_registry(tmp_path)
+    ingested = ingest_law(
+        registry.by_law_id["vda:lr:2000-01-01:1"], registry,
+        chunk_size=100, chunk_overlap=10,
+    )
+    assert ingested.law["law_status"] == "past"
+    assert len(ingested.passages) == 2
+    assert {item["passage_status"] for item in ingested.passages} == {"past"}
+    assert all(item["index_views"] == ["historical"] for item in ingested.chunks)
+
+
+def test_duplicate_note_anchor_preserves_ambiguous_targets(tmp_path: Path) -> None:
+    _write_law(tmp_path, "0001_LR-1-gennaio-2000-n1.html", """<article>
+<h1>Legge regionale 1 gennaio 2000, n. 1</h1>
+<p><a name="articolo_1__">Art. 1</a></p>
+<p>1. Testo incerto. <a href="#nota_1">(1)</a></p>
+<p><a name="nota_1">(1)</a> Comma abrogato dalla L.R. 2/2001.</p>
+<p><a name="nota_1">(1)</a> Comma modificato dalla L.R. 2/2001.</p>
+</article>""")
+    _modifier_law(tmp_path)
+    registry, _ = build_corpus_registry(tmp_path)
+    ingested = ingest_law(
+        registry.by_law_id["vda:lr:2000-01-01:1"], registry,
+        chunk_size=100, chunk_overlap=10,
+    )
+    event = ingested.status_events[0]
+    assert event["resolution_status"] == "ambiguous"
+    assert event["target_ids"] == [ingested.passages[0]["passage_id"]]
+    assert ingested.passages[0]["passage_status"] == "unknown"
+    assert ingested.articles[0]["article_status"] == "unknown"
+    assert ingested.law["law_status"] == "unknown"
+    assert "current" not in ingested.chunks[0]["index_views"]
+
+
 def test_status_event_contract_forbids_extra_fields() -> None:
     with pytest.raises(ValidationError):
         StatusEventRecord.model_validate(

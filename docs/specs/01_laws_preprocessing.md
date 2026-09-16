@@ -84,6 +84,9 @@ Status classification follows these deterministic rules:
 - a resolved whole-law or whole-article cessation makes the target and its descendants `past`;
 - `all_except` produces a `partial` parent, makes resolved non-excepted targets `past`, and leaves unresolved exceptions `unknown`;
 - a later resolved whole-target cessation overrides an earlier partial exception;
+- a resolved whole-target cessation remains binding on every descendant even when later-parsed notes are ambiguous or narrower in scope; parsing order is not legal chronology;
+- duplicate note anchors retain all scope-compatible candidate targets and mark them `unknown` unless a resolved whole-target cessation already determines their status;
+- note markers in anchored or plain article headings attach to the article without introducing a passage;
 - a comma or letter becomes `past` only when the source clause has one scope-compatible backlink;
 - a cessation narrower than the available passage makes that passage `partial`; multiple or incompatible targets make it `unknown`;
 - bracketed text without a resolved cessation event is `unknown`, never implicitly `past`;

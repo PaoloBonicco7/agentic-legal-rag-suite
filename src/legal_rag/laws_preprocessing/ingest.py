@@ -319,6 +319,7 @@ def ingest_law(
     current_article_id: str | None = None
     current_note_anchor: str | None = None
     current_note_id: str | None = None
+    article_heading_lines: dict[str, Line] = {}
 
     def start_article(
         label_norm: str,
@@ -418,6 +419,7 @@ def ingest_law(
             in_index_mode = False
             _, label_norm, heading = anchored_article
             start_article(label_norm, anchored_article[0], heading)
+            article_heading_lines[str(current_article_id)] = Line(block.text, block.links)
             continue
 
         plain_article = _plain_article_in_block(block)
@@ -430,6 +432,7 @@ def ingest_law(
             saw_first_article = True
             in_index_mode = False
             start_article(plain_article[0], None, plain_article[1])
+            article_heading_lines[str(current_article_id)] = Line(block.text, block.links)
             continue
 
         if note_mode and current_note_anchor and current_note_id:
@@ -513,6 +516,15 @@ def ingest_law(
     passages: list[dict[str, Any]] = []
     chunks: list[dict[str, Any]] = []
     known_note_anchors = {str(note["note_anchor_name"]) for note in notes}
+    for article_id, heading_line in article_heading_lines.items():
+        anchors = _extract_note_anchor_names(
+            heading_line.text,
+            [link.href for link in heading_line.links if link.href],
+            known_note_anchors,
+        )
+        article_by_id[article_id]["note_anchor_names"] = anchors
+        for anchor in anchors:
+            note_links_articles.setdefault(anchor, set()).add(article_id)
 
     for article in articles:
         article_id = article["article_id"]
@@ -660,7 +672,9 @@ def ingest_law(
     for passage in passages:
         by_article_notes[passage["article_id"]].update(passage.get("note_anchor_names") or [])
     for article in articles:
-        article["note_anchor_names"] = sorted(by_article_notes.get(article["article_id"], set()))
+        article["note_anchor_names"] = sorted(
+            set(article["note_anchor_names"]) | by_article_notes.get(article["article_id"], set())
+        )
 
     notes_by_anchor: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for note in notes:
@@ -788,6 +802,10 @@ def ingest_law(
         if len(notes_by_anchor[anchor]) > 1:
             resolution = "ambiguous"
             rule_id = "status-note-duplicate-anchor-v1"
+            target_ids = (
+                candidate_articles if target_kind == "article"
+                else candidate_passages or candidate_articles
+            )
         elif target_kind == "article":
             target_ids = candidate_articles
             if len(candidate_articles) == 1:
@@ -854,14 +872,18 @@ def ingest_law(
     ambiguous_articles: set[str] = set()
 
     def apply_passage_event(passage: dict[str, Any], event: dict[str, Any], status: str) -> None:
-        passage["passage_status"] = status
         passage["status_event_ids"] = sorted(set(passage["status_event_ids"]) | {event["status_event_id"]})
+        if passage["article_id"] in explicit_past_articles and status != "past":
+            return
+        passage["passage_status"] = status
         passage["status_rule_ids"] = [event["rule_id"]]
 
     for event in sorted(status_events, key=lambda item: int(item["event_sequence"])):
         if event["source_kind"] == "preamble":
             law_direct_event_ids.append(event["status_event_id"])
             law_direct_rule_ids.append(event["rule_id"])
+            if law_explicit_status == "past":
+                continue
             if event["resolution_status"] != "resolved":
                 law_explicit_status = "unknown"
                 continue
@@ -871,8 +893,6 @@ def ingest_law(
                     explicit_past_articles.add(str(article["article_id"]))
                     for passage in passages_by_article[str(article["article_id"])]:
                         apply_passage_event(passage, event, "past")
-                continue
-            if law_explicit_status == "past":
                 continue
             law_explicit_status = "partial"
             exceptions = set(event["exception_target_ids"])
