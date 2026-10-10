@@ -9,14 +9,16 @@ One package contains `corpus`, `indexing`, `retrieval`, `generation`, `evaluatio
 - [Numbered workflow](docs/specs/README.md): inputs, outputs and quality gates.
 - [Architecture decisions](docs/notes/00_architecture.md): reasons, alternatives and limits.
 - [Implementation status](docs/results/00_delivery.md): actual artifacts and outstanding empirical work.
+- [Preprocessing walkthrough](docs/notes/05_preprocessing_walkthrough.html): real source examples, transformations and limits.
+- [Manual workflow](docs/notes/06_manual_workflow.md): stages to launch and inspect yourself.
 - [Literature](docs/notes/01_literature.md): primary references and what they support.
 
 ## Setup
 
-Python 3.11–3.13 and `uv`:
+Python 3.11–3.13 and `uv` (this delivery was verified on Python 3.12):
 
 ```bash
-uv sync --extra local --extra dev --extra ui
+uv sync --locked --default-index https://pypi.org/simple --extra local --extra dev --extra ui
 cp .env.example .env
 uv run --no-sync pytest
 uv run --no-sync legal-rag --help
@@ -51,8 +53,8 @@ CPU, float32 and batch 2 are portable defaults. GPU execution is explicit (`--em
 uv run --no-sync legal-rag preflight --live --output data/diagnostics/utopia.json
 uv run --no-sync legal-rag ask --index data/indexes/current-bge --corpus data/corpora/current-final 'Quali sono i requisiti previsti dalla legge?'
 uv run --no-sync legal-rag ui --index data/indexes/current-bge --corpus data/corpora/current-final
-uv run --no-sync legal-rag diagnose --index data/indexes/current-bge --output data/diagnostics/current-final
-uv run --no-sync legal-rag report --corpus data/corpora/current-final --diagnostics data/diagnostics/current-final --output data/reports/current-final
+uv run --no-sync legal-rag diagnose --index data/indexes/current-bge --output data/diagnostics/retrieval-manual01
+uv run --no-sync legal-rag report --corpus data/corpora/current-final --diagnostics data/diagnostics/retrieval-manual01 --output data/reports/retrieval-manual01
 ```
 
 Profiles: `no_rag`, `dense`, `sparse`, `hybrid`, `multiquery`, `graph`, `rerank`, `oracle`. Every profile uses the same context builder (4096 BGE tokens, 12 units). Current retrieval excludes only confirmed cessations with resolved scope. Unknown cases remain included. `--include-ceased` is an explicit alternative policy and must match across compared runs.
@@ -79,6 +81,12 @@ uv run --no-sync legal-rag report --corpus data/corpora/current-final --runs dat
 Utopia is the default generator; OpenAI Luna judges and Sol checks a fixed stratified sample of 20 QID. OpenAI requires a key and prices verified **today** in `configs/openai-pricing.json`, with a recent sourced exchange rate. The shared persistent ledger caps all attempts and retries at 20 EUR (16 experiment + 4 validation). Accounted amounts are conservative estimates/reservations, not invoiced costs. No fallback changes provider or model. `--without-control` runs a diagnostic comparison that cannot justify promotion.
 
 Run one profile at a time. `--resume` keeps frozen answers and retries missing judgments only when code and scientific inputs match. `--qids ...` makes an explicitly marked pilot. `--mcq` adds the secondary view without doubling independent observations. Oracle requires `--oracle-evidence` with approved per-QID chunks; annotations never enter runtime prompts. Approved gold-only revisions can use `rejudge`; changed questions, evidence policy or sources require regeneration. Missing judgments keep a run incomplete. The same 100 intents have already informed development, so findings are exploratory.
+
+Acquisition, preprocessing, indexing and evaluation expose stage/count progress
+on stderr. stdout remains the final JSON result; dependencies may also print
+diagnostics on stderr. Progress is observational, not proof of completion: use
+the final manifest and quality gates. No complete benchmark has been run in
+this delivery. The new progress wiring was left unexecuted at your request.
 
 ## Portable experiment package
 

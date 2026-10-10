@@ -63,8 +63,8 @@ These are explicit diagnostics, not a measurement of legal parsing accuracy.
 Full-current inspection exposed repeated numeric identity paragraphs being
 used as thematic titles, multiline preambles being treated as operative text,
 and a missing closing quote swallowing later root articles. New raw fixtures
-cover sources 11541, 11621 and 11824. The focused corpus suite now has 36
-passing tests; the UI suite has eight. The original LR 42/1992, repeal stub,
+cover sources 11541, 11621 and 11824. At frozen-corpus validation, the focused
+corpus suite had 36 passing tests and the UI suite had eight. The original LR 42/1992, repeal stub,
 LR 44/1991, note 40 of LR 21/2003 and omitted-annex cases remain covered.
 
 Source 11824, LR 10/2026, contains an unclosed replacement quote in article 6.

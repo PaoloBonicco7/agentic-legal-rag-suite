@@ -26,12 +26,41 @@ byte-identical to an independent repeat. Semantic annotation accuracy still
 requires human sampling. See the [source audit](../notes/03_current_snapshot.md)
 for observed warnings and limits.
 
+Manual inspection also identified compound references that need separate
+article targets or may attach an article to the wrong law. The
+[reference review](../notes/07_reference_review.md) records exact source evidence
+and IDs. Graph expansion remains experimental until those cases are reviewed;
+structural gates alone do not establish correct links.
+
 ## Execution status
 
-The current BGE-M3 index is being built in `data/indexes/current-bge` with
-MPS/float16, inference batch 8 and upload groups of 64. Its ready flag remains
-false until every payload, ID, dimension and count is reconciled. Older partial
-indexes and parser outputs are diagnostic artifacts, not the delivered index.
+This delivery is restricted to setup and documentation, as requested after the
+provider preflight. No complete answer benchmark or retrieval ablation was run.
+Before the execution stop, the implementation subsequently committed as
+`b92c857` passed 246 offline software tests, including Streamlit AppTest, local
+Qdrant integration and portable-archive checks. Tests use controlled fixtures;
+they do not establish answer quality on the real benchmark. Progress callbacks,
+CLI wiring and the explanatory HTML were added afterwards without executing
+tests, compilation, rendering or pipeline runs. Their first execution is left
+to the user; see the [manual workflow](../notes/06_manual_workflow.md).
+
+The offline corpus report is `data/reports/current-final/index.html`. It records
+the definitive corpus and separately stored audit comments. Its generator
+uses no model or new retrieval. Browser visual verification was unavailable;
+static checks and their scope are recorded in
+`data/diagnostics/current_report_static_qa.json`: 3,178 HTML pages, 9,533 local
+links and all recorded input/output hashes passed before the later stop.
+
+The already-running BGE-M3 job completed successfully in
+`data/indexes/current-bge`: 21,322 points, 1,024 dense dimensions and native
+sparse vectors, with `ready_for_retrieval=true`. It used MPS/float16, inference
+batch 8, upload groups of 64 and no cached vectors. The measured job duration
+was 3,874.72 seconds; this is local execution evidence, not a retrieval-quality
+result. Every payload, ID, dimension and count was reconciled by the build.
+The record is `data/diagnostics/current_index_completed.json`. Its manifest
+retains the actual build-time commit/dirty/source-hash identity; later code
+edits do not retroactively rewrite it. Older partial indexes and parser outputs
+are diagnostic artifacts, not the delivered index.
 The [local execution note](../notes/04_local_embedding.md) explains the measured
 hardware calibration and its limits.
 
@@ -40,6 +69,11 @@ configured endpoint, requested 32,768-token window and model are recorded in
 `data/diagnostics/utopia_final_preflight.json`. Model identity/capabilities
 therefore remain unverified. No OpenAI runtime key is available. No paid calls
 have been made, and no answer-quality improvement has been measured.
+
+No new phase was launched after the final instruction to leave execution to
+the user. The portable bundle and restore commands are ready to launch; no
+final bundle or restoration was run after that instruction. The previously
+verified private backup preserves the original research checkout.
 
 ## Remaining empirical work
 

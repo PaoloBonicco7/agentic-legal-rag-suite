@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dal testo di legge alla base di conoscenza — guida al preprocessing</title>
+  <style>
+    :root { color-scheme: light; --ink:#183235; --muted:#52676b; --paper:#f5f7f5; --line:#d5dfdc; --teal:#176b60; --pale:#e8f3ee; --amber:#775217; --amber-bg:#fff4dc; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    header,main,footer { max-width:1120px; margin:auto; padding:28px; }
+    header { padding-top:52px; padding-bottom:20px; }
+    h1 { font-size:clamp(2rem,4vw,3.2rem); line-height:1.13; max-width:900px; margin:12px 0 20px; letter-spacing:-.035em; }
+    h2 { font-size:1.65rem; line-height:1.25; margin:0 0 14px; }
+    h3 { font-size:1.05rem; margin:24px 0 8px; }
+    p { margin:10px 0 16px; }
+    a { color:var(--teal); text-underline-offset:3px; }
+    a:hover { text-decoration-thickness:2px; }
+    a:focus-visible,summary:focus-visible { outline:3px solid var(--teal); outline-offset:4px; }
+    .eyebrow { font-size:.8rem; letter-spacing:.12em; text-transform:uppercase; color:var(--teal); font-weight:700; }
+    .lead { font-size:1.1rem; max-width:890px; }
+    .muted,.caption { color:var(--muted); }
+    .caption { font-size:.88rem; }
+    nav { display:flex; flex-wrap:wrap; gap:8px 20px; padding:14px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+    nav a { font-size:.9rem; }
+    section { margin-bottom:24px; padding:28px; border:1px solid var(--line); border-radius:14px; background:#fff; scroll-margin-top:20px; }
+    .note { border-left:4px solid var(--teal); background:var(--pale); padding:13px 18px; border-radius:0 8px 8px 0; margin:18px 0; }
+    .caution { border-color:var(--amber); background:var(--amber-bg); }
+    .note p { margin:0; }
+    .stats,.two { display:grid; gap:14px; }
+    .stats { grid-template-columns:repeat(4,1fr); margin:20px 0; }
+    .stat { background:var(--paper); padding:16px; border-radius:9px; }
+    .stat strong { display:block; font-size:1.7rem; line-height:1.25; }
+    .stat span { color:var(--muted); font-size:.9rem; }
+    .two { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .flow { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; padding:0; counter-reset:step; list-style:none; }
+    .flow li { background:var(--pale); padding:14px; border-radius:8px; }
+    .flow li::before { counter-increment:step; content:counter(step) ". "; font-weight:700; color:var(--teal); }
+    .flow small { display:block; color:var(--muted); }
+    code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.88em; overflow-wrap:anywhere; }
+    pre { margin:10px 0 16px; padding:16px; border:1px solid var(--line); border-radius:8px; background:#f3f6f5; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.55; font-size:.85rem; }
+    pre code { font-size:inherit; }
+    blockquote { margin:16px 0; padding:14px 18px; background:var(--paper); border-left:3px solid var(--line); }
+    .table-wrap { overflow-x:auto; }
+    table { border-collapse:collapse; width:100%; margin:14px 0; font-size:.92rem; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:10px 12px; }
+    th { background:var(--pale); font-weight:650; }
+    caption { text-align:left; color:var(--muted); font-size:.88rem; padding-bottom:8px; }
+    details { border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin:16px 0; }
+    summary { cursor:pointer; font-weight:650; }
+    details[open] summary { margin-bottom:12px; }
+    ul,ol { padding-left:23px; }
+    li { margin:6px 0; }
+    .badge { display:inline-block; padding:2px 8px; background:var(--pale); color:var(--teal); border-radius:5px; font-size:.78rem; font-weight:650; }
+    footer { padding-top:0; padding-bottom:40px; font-size:.88rem; color:var(--muted); }
+    @media(max-width:760px) { header,main,footer { padding:20px; } section { padding:20px; } .two,.flow { grid-template-columns:1fr; } .stats { grid-template-columns:repeat(2,1fr); } }
+    @media print { body { background:#fff; font-size:11pt; } header,main,footer { max-width:none; padding:12px; } section { border-radius:0; break-inside:auto; } nav { display:none; } pre,table,.note { break-inside:avoid; } a { color:inherit; } }
+  </style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Tesi Legal RAG · guida agli artefatti</div>
+  <h1>Dal testo di legge alla base di conoscenza</h1>
+  <p class="lead">Come il preprocessing separa struttura, contenuto e annotazioni giuridiche prima di creare i chunk. Gli esempi provengono da fonti e artefatti già presenti nel progetto: nessun testo di legge è stato generato per questa pagina.</p>
+  <p class="caption">Riferimento: corpus <code>current-final</code>, snapshot <code>vda-efe319281d52e13a</code>, acquisizione <time datetime="2026-10-10T13:26:27.149876+00:00">10 ottobre 2026, 13:26 UTC</time>. La data descrive l’acquisizione, non certifica l’applicabilità delle norme.</p>
+  <nav aria-label="Indice della guida">
+    <a href="#pipeline">Percorso</a><a href="#stub">Stub</a><a href="#historical">Note e storia</a><a href="#chunk">Chunk contestuale</a><a href="#multiple">Riferimenti multipli</a><a href="#quote">Citazione difettosa</a><a href="#retrieval">Retrieval</a><a href="#limits">Limiti e fonti</a>
+  </nav>
+</header>
+<main>
+  <section id="pipeline">
+    <span class="badge">Osservazione degli artefatti esistenti</span>
+    <h2>Quattro passaggi, quattro oggetti distinti</h2>
+    <ol class="flow">
+      <li><strong>HTML sorgente</strong><small>Pagina conservata con URL, snapshot e hash.</small></li>
+      <li><strong>Blocchi e regioni</strong><small>Testo normalizzato, ordine, collegamenti, ruolo del contenuto.</small></li>
+      <li><strong>Unità e annotazioni</strong><small>Articoli, commi, lettere; eventi e relazioni con evidenza locale.</small></li>
+      <li><strong>Chunk e indice</strong><small>Testo contestuale, provenienza, stato e rappresentazioni di ricerca.</small></li>
+    </ol>
+    <p>Il parser non tratta ogni paragrafo HTML come una norma. Un’intestazione, una nota redazionale e una citazione della formulazione originaria possono avere tag simili ma funzioni diverse. La classificazione precede la segmentazione e rimane ispezionabile.</p>
+    <div class="stats" aria-label="Conteggi del manifest esistente">
+      <div class="stat"><strong>3.176</strong><span>documenti</span></div>
+      <div class="stat"><strong>171.722</strong><span>blocchi</span></div>
+      <div class="stat"><strong>76.912</strong><span>unità</span></div>
+      <div class="stat"><strong>21.322</strong><span>chunk</span></div>
+    </div>
+    <p class="caption">Conteggi trascritti dal <a href="../../data/corpora/current-final/manifest.json">manifest già prodotto</a>. Parser <code>deterministic-parser-3</code>, chunking <code>contextual-chunking-2</code>, grafo <code>explicit-graph-2</code>. I 17 controlli strutturali registrati sono positivi; questo non misura accuratezza giuridica o qualità delle risposte.</p>
+    <div class="note"><p><strong>Una coordinata riproducibile.</strong> Uno <code>SourceSpan</code> indica <code>block_id</code> e intervallo di caratteri <code>[start, end)</code> nel testo normalizzato del blocco. Non è un offset nei byte dell’HTML. Il testo del chunk si ricostruisce dai suoi span, separati da newline; identità, titolo e intestazione sono un prefisso esplicito distinto.</p></div>
+    <p>Per passare dalla spiegazione ai record: <a href="../../data/reports/current-final/index.html">report del corpus</a>, <a href="../specs/02_preprocessing.md">spec 02 — preprocessing</a>, <a href="../specs/03_metadata_graph.md">spec 03 — metadati e grafo</a>, <a href="../specs/04_indexing.md">spec 04 — indice</a>.</p>
+  </section>
+
+  <section id="stub">
+    <h2>1. LR1/1950: conservare uno stub senza inventare un articolo</h2>
+    <p><a href="https://www.consiglio.vda.it/app/leggieregolamenti/dettaglio?pk_lr=273&amp;versione=V">Legge regionale 10 ottobre 1950, n. 1</a>: la pagina contiene identità, titolo, pubblicazione e formula di abrogazione, senza un corpo articolato disponibile.</p>
+    <details>
+      <summary>HTML sorgente: estratti reali</summary>
+      <pre><code>&lt;h2&gt;Legge regionale 10 ottobre 1950, n. 1&lt;/h2&gt;
+&lt;p&gt;Classificazione delle strade di interesse regionale.&lt;/p&gt;
+&lt;p&gt;(B.U. 15 novembre 1950).&lt;/p&gt;
+&lt;p&gt;(Abrogata dall'art. 20, comma 1, della &lt;a href="/app/leggieregolamenti/dettaglio?tipo=L&amp;amp;numero_legge=26%2F06&amp;amp;versione=V" onclick="target='_blank';"&gt;L.R. 20 novembre 2006, n.
+26&lt;/a&gt;)&lt;/p&gt;</code></pre>
+      <p class="caption">Da <a href="../../tests/fixtures/273_LR-10-ottobre-1950-n1.html">fixture 273</a>; i tag sono mostrati come testo, non interpretati dalla pagina.</p>
+    </details>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Passaggio</th><th>Output osservato</th><th>Decisione</th></tr></thead>
+      <tbody>
+        <tr><td>Blocchi</td><td>Identità e titolo separati dalla formula editoriale.</td><td>La formula non diventa testo di un articolo.</td></tr>
+        <tr><td>Documento</td><td><code>vda:lr:1950-10-10:1</code><br><code>availability: metadata_only</code></td><td>Lo stub rimane nel catalogo e nella base strutturata.</td></tr>
+        <tr><td>Evento</td><td><code>repeal / law / confirmed</code><br><code>status: ceased_confirmed</code></td><td>La cessazione ha evidenza esplicita; nessun articolo sintetico.</td></tr>
+        <tr><td>Chunk</td><td>Nessun chunk normativo per questa legge.</td><td>Non si indicizzano metadati come se fossero il corpo mancante.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">Evidenza: blocco <code>…#b:00004</code>, span <code>[0,68)</code>; evento <code>event:3e1cb92adc91b27de6962125</code>. La data della legge abrogante non è automaticamente la data di effetto: il record mantiene <code>effective_at: null</code>.</p>
+  </section>
+
+  <section id="historical">
+    <h2>2. LR42/1992: eccezioni, note operative e formulazioni storiche</h2>
+    <p>La <a href="https://www.consiglio.vda.it/app/leggieregolamenti/dettaglio?pk_lr=2065&amp;versione=V">Legge regionale 19 agosto 1992, n. 42</a> contiene un’abrogazione con eccezioni, articoli residui e note che riportano il testo originario. La parola «abrogata» da sola non basta a eliminare l’intera legge.</p>
+    <details>
+      <summary>HTML sorgente: eccezione e ingresso nella regione storica</summary>
+      <pre><code>&lt;p&gt;(Abrogata dall'articolo 77, comma 1, lettera v), della &lt;a href="/app/leggieregolamenti/dettaglio?tipo=L&amp;amp;numero_legge=22%2F10&amp;amp;versione=V" onclick="target='_blank';"&gt;L.R. 23
+luglio 2010, n. 22&lt;/a&gt;, ad eccezione degli artt. 2 e 5)&lt;/p&gt;</code></pre>
+      <p class="caption">Più avanti nella medesima fonte:</p>
+      <pre><code>&lt;p&gt;Nella formulazione originaria, il testo dell'articolo 1
+recitava:&lt;/p&gt;
+&lt;p&gt;&lt;i&gt;"(Campo di applicazione e durata)&lt;/i&gt;&lt;/p&gt;</code></pre>
+      <p class="caption">Estratti non consecutivi da <a href="../../tests/fixtures/2065_LR-19-agosto-1992-n42.html">fixture 2065</a>.</p>
+    </details>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Blocco</th><th>Regione / interpretazione software</th><th>Effetto sulla KB</th></tr></thead>
+      <tbody>
+        <tr><td><code>…#b:00004</code><br>«ad eccezione degli artt. 2 e 5»</td><td><code>editorial</code>; evento sull’intera legge non risolto.</td><td>Stato del documento <code>unknown</code>; nessuna esclusione globale.</td></tr>
+        <tr><td><code>…#b:00019</code><br>Nota (1): «Articolo abrogato…»</td><td><code>note</code>; il backlink identifica l’articolo 1.</td><td>Evento confermato sul solo articolo interessato.</td></tr>
+        <tr><td><code>…#b:00020–00022</code><br>«Nella formulazione originaria…»</td><td><code>historical</code>, inclusa la citazione successiva.</td><td>Contenuto conservato per ispezione, escluso dai chunk normativi correnti.</td></tr>
+        <tr><td><code>…#b:00008–00009</code><br>Articolo 2, commi 1 e 2</td><td><code>body</code>; unità sotto l’articolo 2.</td><td>Chunk contestuale reale, stato <code>unknown</code>, interrogabile con la policy conservativa.</td></tr>
+      </tbody>
+    </table></div>
+    <p>Un’intestazione «Art. 4» dentro la citazione storica non riapre il corpo corrente. La regione protegge dal mescolare una formulazione passata con quella disponibile nella rappresentazione acquisita. Le citazioni normative aggiunte da una legge modificativa appartengono invece a <code>body_quote</code>: il loro contenuto resta con la disposizione modificativa che lo introduce.</p>
+    <details>
+      <summary>Un chunk residuo reale: articolo 2</summary>
+      <pre><code>chunk_id: chunk:e22e0c65b80a0d47f5b84a99
+document_id: vda:lr:1992-08-19:42
+article_label: 2
+status: unknown
+spans: b:00008 [0,492), b:00009 [0,197)</code></pre>
+      <blockquote>2. In caso di sentenza di condanna esecutiva per fatti commessi con dolo o con colpa grave, la Regione ripeterà dal dipendente tutti gli oneri sostenuti per la sua difesa in ogni grado di giudizio.</blockquote>
+      <p class="caption">È mostrato soltanto il secondo comma del chunk. Il record include anche il primo: <a href="../../data/corpora/current-final/chunks.jsonl">chunks.jsonl</a>, ID sopra indicato.</p>
+    </details>
+    <div class="note"><p><strong>Stato conservativo.</strong> <code>unknown</code> rimane recuperabile. <code>no_cessation_evidence</code> significa assenza di cessazione confermata nello snapshot, non un giudizio di piena applicabilità. La dicitura «Testo vigente» e il parametro URL <code>versione=V</code> non sono evidenze sufficienti.</p></div>
+  </section>
+
+  <section id="chunk">
+    <h2>3. Introduzione e lettere: costruire un chunk che conservi il senso</h2>
+    <p>Nell’articolo 10 della <a href="https://www.consiglio.vda.it/app/leggieregolamenti/dettaglio?pk_lr=11824&amp;versione=V">LR10/2026</a>, «Sono abrogate le seguenti disposizioni» dà il significato alle lettere successive. La sola lettera a) elenca un riferimento, senza esprimere da sé l’intervento.</p>
+    <details>
+      <summary>HTML sorgente: introduzione e prime due lettere</summary>
+      <pre><code>&lt;p&gt;1.    Sono abrogate le seguenti disposizioni:&lt;/p&gt;
+
+&lt;p&gt;a)    il comma 3 dell'articolo 5 della &lt;a href="/app/leggieregolamenti/dettaglio?tipo=L&amp;amp;numero_legge=11%2F96&amp;amp;versione=V" onclick="target='_blank';"&gt;l.r.
+11/1996&lt;/a&gt;;&lt;/p&gt;
+
+&lt;p&gt;b)    il comma 3 dell'articolo 6 della &lt;a href="/app/leggieregolamenti/dettaglio?tipo=L&amp;amp;numero_legge=11%2F96&amp;amp;versione=V" onclick="target='_blank';"&gt;l.r.
+11/1996&lt;/a&gt;;&lt;/p&gt;</code></pre>
+      <p class="caption">Estratto di <a href="../../data/snapshots/current_20261010/sources/11824.html">sorgente 11824 già acquisita</a>. Seguono le lettere c)–j), incluse nel chunk qui sotto.</p>
+    </details>
+    <div class="table-wrap"><table>
+      <caption>Il prefisso comune degli ID è <code>vda:lr:2026-06-17:10</code>.</caption>
+      <thead><tr><th>Blocco e span</th><th>Unità</th><th>Ruolo</th></tr></thead>
+      <tbody>
+        <tr><td><code>#b:00136 [0,42)</code></td><td><code>#art:10#p:1</code></td><td>Introduzione del comma.</td></tr>
+        <tr><td><code>#b:00137 [0,49)</code></td><td><code>#art:10#p:1#l:a</code></td><td>Lettera a), figlia del comma.</td></tr>
+        <tr><td><code>#b:00138 [0,49)</code></td><td><code>#art:10#p:1#l:b</code></td><td>Lettera b), medesima introduzione.</td></tr>
+        <tr><td><code>#b:00139–00146</code></td><td>Lettere c)–j)</td><td>Altri blocchi dello stesso elenco, con span propri.</td></tr>
+      </tbody>
+    </table></div>
+    <details open>
+      <summary>Testo completo del chunk reale</summary>
+      <pre><code>1. Sono abrogate le seguenti disposizioni:
+a) il comma 3 dell'articolo 5 della l.r. 11/1996;
+b) il comma 3 dell'articolo 6 della l.r. 11/1996;
+c) il comma 2 dell'articolo 23 della l.r. 11/1996;
+d) il comma 1bis dell'articolo 1 della l.r. 12/1999;
+e) l'articolo 1bis della l.r. 12/1999;
+f) il comma 2bis dell'articolo 9 della l.r. 12/1999;
+g) il comma 3 dell'articolo 20 della l.r. 19/2001;
+h) il comma 2 dell'articolo 1 della legge regionale 25 febbraio 2013, n. 5 (Modificazioni alla legge regionale 7 giugno 1999, n. 12 (Principi e direttive per l'esercizio dell'attività commerciale));
+i) l'articolo 2 della l.r. 5/2013;
+j) l'articolo 11 della l.r. 5/2013.</code></pre>
+      <p class="caption">ID <code>chunk:207adeeb757598d5821f4ada</code>; 11 span; articolo, comma e lettere presenti in <code>unit_ids</code>. Il prefisso <code>embedding_text</code> aggiunge identità esatta della legge, titolo e <code>Articolo 10. (Abrogazioni)</code>. Il warning ereditato dal documento riguarda il caso di citazione difettosa descritto più avanti, non questo elenco.</p>
+    </details>
+    <p>La segmentazione aggrega unità compatibili e conserva l’introduzione insieme alle lettere quando il budget lo consente. I limiti dichiarati sono target 384 e massimo 512 token BGE, conteggiando anche prefisso e token speciali. Sono scelte da valutare, non lunghezze già dimostrate ottimali. Il contesto finale evita di ripetere span interamente già mostrati e non taglia in modo silenzioso il testo selezionato.</p>
+  </section>
+
+  <section id="multiple">
+    <h2>4. Una menzione può interessare più destinazioni</h2>
+    <p>Nella LR42/1992, il rinvio della rubrica «Artt. 3 -4» alla nota (2) consente di associare la stessa evidenza a due articoli. Un solo bersaglio arbitrario perderebbe informazione; estendere l’evento all’intera legge cambierebbe il suo ambito.</p>
+    <details>
+      <summary>HTML sorgente: rubriche e nota collegata</summary>
+      <pre><code>&lt;p&gt;Artt. 3 -4 &lt;sup&gt;&lt;sup&gt;&lt;a href="#nota_2"&gt;(2)&lt;/a&gt;&lt;/sup&gt;&lt;/sup&gt;&lt;/p&gt;</code></pre>
+      <p class="caption">La nota richiamata, più avanti nella fonte:</p>
+      <pre><code>&lt;p&gt;&lt;a name="nota_2"&gt;(&lt;span&gt;2&lt;/span&gt;)&lt;/a&gt; Articoli abrogati dall'articolo 77, comma 1, lettera v),
+della &lt;a href="/app/leggieregolamenti/dettaglio?tipo=L&amp;amp;numero_legge=22%2F10&amp;amp;versione=V" onclick="target='_blank';"&gt;L.R. 23 luglio 2010, n. 22&lt;/a&gt;.&lt;/p&gt;</code></pre>
+    </details>
+    <div class="table-wrap"><table>
+      <caption>Due record reali in <a href="../../data/corpora/current-final/events.jsonl">events.jsonl</a>; medesimo blocco <code>vda:lr:1992-08-19:42#b:00024</code>, span <code>[0,94)</code>.</caption>
+      <thead><tr><th>Evento</th><th>Target</th><th>Ambito e risoluzione</th></tr></thead>
+      <tbody>
+        <tr><td><code>event:9dbe0db25ee0166feb4cbda4</code></td><td><code>vda:lr:1992-08-19:42#art:3</code></td><td><code>article / confirmed</code></td></tr>
+        <tr><td><code>event:7c0b419f248dca76049eb900</code></td><td><code>vda:lr:1992-08-19:42#art:4</code></td><td><code>article / confirmed</code></td></tr>
+      </tbody>
+    </table></div>
+    <p>Questo esempio documenta un’associazione plurima di <em>eventi</em> mediante backlink. Non dimostra che ogni citazione composta sia già risolta correttamente come relazione di grafo.</p>
+    <div class="note caution"><p><strong>Problema osservato di risoluzione sperimentale.</strong> LR10/2026, art. 9, comma 1 cita gli articoli 6 e 13 della LR20/1999: l’edge esportato risolve la legge, non i due articoli. Nella LR54/1998, art. 21, comma 3, un edge associa «articolo 23» alla LR45/1995, sebbene la medesima frase citi gli articoli 4 e 5 di quella legge. L’aggancio va verificato manualmente prima di usare graph expansion su questi casi. Un target esistente e un controllo strutturale positivo non provano la correttezza semantica del collegamento. Dettagli in <a href="07_reference_review.md">nota di revisione dei riferimenti</a>.</p></div>
+  </section>
+
+  <section id="quote">
+    <h2>5. LR10/2026: una citazione non chiusa resta un’incertezza esplicita</h2>
+    <p>Nell’articolo 6, comma 2, la sorgente 11824 apre il testo inserito con <code>"2bis.</code> e termina il paragrafo senza chiudere la citazione. Un parser che attenda soltanto la virgoletta finale può assorbire le disposizioni successive.</p>
+    <details>
+      <summary>Frammenti HTML reali: apertura, fine del paragrafo, nuova intestazione</summary>
+      <p class="caption">Tre frammenti non consecutivi; le righe intermedie non sono riprodotte.</p>
+      <pre><code>&lt;p&gt;"2bis.  Nei casi in cui le domande di cui al comma 1 siano</code></pre>
+      <pre><code>predetta durata.&lt;/p&gt;</code></pre>
+      <pre><code>&lt;p style="text-align: center; margin: 0px;"&gt;&lt;a name="articolo_7__"&gt;Art. 7&lt;/a&gt;&lt;/p&gt;</code></pre>
+      <p class="caption">Fonte: <a href="../../data/snapshots/current_20261010/sources/11824.html">HTML acquisito</a>. Nessuna virgoletta correttiva è stata aggiunta al testo del corpus.</p>
+    </details>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Osservazione nel corpus</th><th>Decisione e limite</th></tr></thead>
+      <tbody>
+        <tr><td><code>#b:00105</code>, introduzione del comma 2: <code>body</code>.</td><td>Il testo aggiunto resta collegato alla disposizione modificativa.</td></tr>
+        <tr><td><code>#b:00106</code>, citazione «2bis»: <code>body_quote</code>.</td><td>La citazione è preservata letteralmente, inclusa la chiusura mancante.</td></tr>
+        <tr><td>I blocchi successivi fino alla nuova intestazione rimangono in <code>body_quote</code>.</td><td>Il recupero del confine non certifica la segmentazione interna dei commi dell’articolo 6; è un caso da revisione.</td></tr>
+        <tr><td><code>#b:00117</code>, anchor <code>articolo_7__</code>, regione <code>heading</code>.</td><td>Il confine esplicito riapre l’articolo 7; warning <code>source_quote_boundary_recovered:117</code>.</td></tr>
+      </tbody>
+    </table></div>
+    <p>Il documento e i suoi chunk conservano il warning. Nel contesto destinato al modello il marker, anche con suffisso, rende visibile <code>Parsing uncertainty: source_quote_boundary_recovered</code>; questa riga entra nel budget del contesto. Il suffisso 117 identifica il blocco del confine recuperato, non una misura di confidenza.</p>
+    <div class="note caution"><p><strong>Recupero strutturale, non riparazione normativa.</strong> Il parser non inventa punteggiatura, non riscrive il testo aggiunto e non deduce un nuovo stato giuridico. Il controllo degli span verifica la fedeltà al testo normalizzato; non dimostra che una citazione difettosa sia stata interpretata completamente.</p></div>
+  </section>
+
+  <section id="retrieval">
+    <h2>Che cosa cambia tra Dense, Sparse, Hybrid e Graph</h2>
+    <p>Le strategie consumano lo stesso corpus: non possono recuperare correttamente un’informazione già persa o attribuita al bersaglio sbagliato. Il preprocessing si controlla prima di attribuire differenze di risposta al retrieval.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Strategia</th><th>Che cosa cambia</th><th>Che cosa misurare</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Dense</strong></td><td>Vettore semantico del testo contestuale; utile a sperimentare corrispondenze tra formulazioni diverse.</td><td>Presenza e posizione dell’evidenza pertinente; errori su numeri, identità normative e termini vicini.</td></tr>
+        <tr><td><strong>Sparse</strong></td><td>Segnale lessicale: BGE-M3 sparse nativo, oppure BM25 italiano separato per embedding dense OpenAI/Utopia. Le due opzioni hanno identità distinte.</td><td>Recupero di citazioni e termini esatti; sensibilità a abbreviazioni e varianti lessicali.</td></tr>
+        <tr><td><strong>Hybrid</strong></td><td>Due liste dense/sparse fuse per rango con RRF, <code>k=60</code>, tramite Qdrant Query API.</td><td>Evidenze aggiunte o perse rispetto alle singole liste; correttezza e fedeltà della risposta; costo e latenza aggiuntivi.</td></tr>
+        <tr><td><strong>Graph</strong></td><td>Dal pool hybrid, espansione di un solo hop verso articoli esplicitamente risolti, al massimo due aggiunte. Adiacenze caricate una volta, scelta deterministica.</td><td>Evidenza utile realmente aggiunta, rumore, errori di risoluzione dei target, effetto della sostituzione di altri chunk sotto lo stesso budget.</td></tr>
+      </tbody>
+    </table></div>
+    <p>Nel confronto previsto, dense/sparse/hybrid producono al massimo 100 candidati. Il contesto condiviso ha massimo 4.096 token BGE e 12 blocchi di evidenza; include intestazioni, stato e avvisi. Il grafo è un esperimento da validare e valutare, con beneficio ancora da dimostrare. Il no-RAG costituisce una baseline separata che non riceve testo del corpus.</p>
+    <p>La correttezza delle risposte alle domande senza alternative è l’obiettivo primario. Article Success e MRR usano inizialmente i riferimenti già presenti nelle domande come proxy, non come giudizi esaustivi di rilevanza. Le misure di copertura delle evidenze richiedono annotazioni approvate. Un riferimento non giudicato non equivale a un chunk irrilevante.</p>
+    <p class="caption">Motivazione metodologica: <a href="https://arxiv.org/abs/2402.03216">BGE-M3</a>, <a href="https://doi.org/10.1145/1571941.1572114">RRF</a>, <a href="https://qdrant.tech/documentation/search/hybrid-queries/">Qdrant hybrid queries</a>, <a href="https://journals.sagepub.com/doi/10.3233/FAIA251598">SAT-Graph RAG</a>. La nostra espansione di un hop non riproduce un’intera ontologia temporale.</p>
+  </section>
+
+  <section id="limits">
+    <h2>Che cosa è osservato, che cosa rimane da dimostrare</h2>
+    <div class="two">
+      <div>
+        <h3>Osservazioni software documentate</h3>
+        <ul>
+          <li>Gli esempi, gli ID e gli span qui riportati esistono negli artefatti letti.</li>
+          <li>Il manifest distingue versione del parser, chunking, grafo e fonte acquisita.</li>
+          <li>Lo stub non produce un corpo normativo inventato; note storiche ed eccezioni hanno trattamenti distinti.</li>
+          <li>Il corpus registra 762 eventi e 2.265 relazioni non risolti; 66 allegati omessi. Questi limiti non vengono nascosti dai controlli strutturali.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Prove sperimentali ancora da eseguire</h3>
+        <ul>
+          <li>Revisione manuale del campione e dei riferimenti composti prima dell’uso del grafo.</li>
+          <li>Valutazione iniziale delle 100 domande legacy e successiva approvazione delle evidenze gold proposte.</li>
+          <li>Confronti controllati no-RAG/dense/sparse/hybrid/graph con stessi modelli e policy.</li>
+          <li>Analisi di errori, qualità, tempi e costi prima di dichiarare un miglioramento.</li>
+        </ul>
+      </div>
+    </div>
+    <p>La rappresentazione acquisita è coordinata; non ricostruisce automaticamente la legge applicabile a qualsiasi data passata. Nel retrieval corrente si escludono le sole cessazioni confermate e si mantengono gli stati incerti. Un benchmark storico può richiedere una policy temporale diversa, da dichiarare e confrontare separatamente.</p>
+    <p>La segmentazione è una scelta sperimentale motivata da <a href="https://journals.sagepub.com/doi/10.3233/FAIA241255">Legal Chunking</a>. La distinzione fra recupero, correttezza e fedeltà è sostenuta da <a href="https://arxiv.org/abs/2603.01710">Legal RAG Bench</a> e <a href="https://aclanthology.org/2024.naacl-long.20/">ARES</a>; qui non sono riprodotti i giudici addestrati e l’inferenza statistica di ARES. Le fonti e i limiti delle analogie sono raccolti in <a href="01_literature.md">nota 01 — letteratura primaria</a>.</p>
+    <div class="note"><p><strong>Stato di questa consegna.</strong> Pagina scritta manualmente dopo lo stop alle esecuzioni, leggendo solo fixture, specifiche e artefatti già prodotti. Non sono stati avviati modelli, pipeline, test, benchmark o rendering per realizzarla. Non contiene score simulati né una dichiarazione di miglioramento ottenuto.</p></div>
+  </section>
+</main>
+<footer>
+  <p>Pagina autonoma, senza JavaScript, font remoti o altre risorse esterne. I collegamenti online sono riferimenti consultabili volontariamente; il report del corpus richiede gli artefatti locali già presenti. Gli esempi congelati descrivono <code>current-final</code>: una futura correzione del parser o del grafo deve produrre nuovi artefatti e nuovi hash.</p>
+</footer>
+</body>
+</html>
