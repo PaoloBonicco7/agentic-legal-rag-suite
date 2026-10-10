@@ -1,0 +1,15 @@
+{
+  "verified_at": "2026-10-10",
+  "price_source_url": "https://developers.openai.com/api/docs/pricing",
+  "fx_date": "2026-10-09",
+  "fx_source_url": "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html",
+  "ecb_usd_per_eur": 1.1206,
+  "eur_per_usd": 1.0,
+  "conversion_note": "Conservative ceilings: 1 EUR per USD exceeds the ECB reference conversion of 1/1.1206; chat input prices include the short-context cache-write ceiling. Cost fields are upper estimates, not billing receipts. Refresh prices before every day's paid batch.",
+  "models": {
+    "gpt-6-luna": {"input_usd_per_million": 0.125, "output_usd_per_million": 0.50, "context_window_tokens": 1050000},
+    "gpt-6-sol": {"input_usd_per_million": 2.50, "output_usd_per_million": 10.0, "context_window_tokens": 1050000},
+    "text-embedding-3-small": {"input_usd_per_million": 0.02, "output_usd_per_million": 0.0},
+    "text-embedding-3-large": {"input_usd_per_million": 0.13, "output_usd_per_million": 0.0}
+  }
+}

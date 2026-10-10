@@ -1,0 +1,4 @@
+schema_version,qid,issue,review_status,support_passage_ids,rationale
+enrichment-reference-review-v1,eval-0007,maximum_not_entitlement,unresolved,vda:lr:2019-10-08:16#art:8#p:c2|vda:lr:2019-10-08:16#art:8#p:c3|vda:lr:2019-10-08:16#art:8#p:c3.lit_a|vda:lr:2019-10-08:16#art:8#p:c4,The cited clauses state a maximum and additional conditions; their coverage does not certify an exact entitlement or validate the unchanged gold.
+enrichment-reference-review-v1,eval-0014,missing_options,unresolved,,The no-hint question retains a reference to alternatives that are not supplied; keep the original gold and report this ambiguity separately.
+enrichment-reference-review-v1,eval-0095,attribution_not_established,unresolved,,The supplied review questions whether the cited article supports regional collection of the tax; no alternative gold is asserted.

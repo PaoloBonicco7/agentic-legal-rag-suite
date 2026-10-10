@@ -1,0 +1,2 @@
+tests/fixtures/*.html -text -diff
+data/evaluation/*.csv -text

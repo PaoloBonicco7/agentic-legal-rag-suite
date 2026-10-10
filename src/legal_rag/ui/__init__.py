@@ -1,2 +1,1 @@
-"""Local user interfaces for thesis demos."""
-
+"""Thin stateless question-answer interface."""
