@@ -34,6 +34,14 @@ frozen; generations blocked before dispatch may be retried. Missing judge/contro
 calls are retried without repeating a saved generation. Existing output directories require
 explicit resume. Duplicate completed QIDs and malformed checkpoints are rejected.
 
+Monitoring: optional `progress=None` accepts a callback receiving only `stage`,
+`profile`, `qid`, `processed`, `total` and `status`. Events announce start,
+durably saved generation checkpoints, saved evaluation records and final status.
+Totals count QID/format pairs; checkpoint and result counts are separate stages.
+Resume starts with existing counts and does not regenerate completed records.
+The callback is invoked directly and its errors propagate; previously persisted
+checkpoints remain available. Monitoring is excluded from run identity.
+
 `run_rejudge(benchmark, judge, source_run_dir, output_dir, identity=...)` creates
 a separate corrected-gold view of frozen answers. It requires identical question
 text, generation configuration, corpus, prompts, filters and budgets. A changed
@@ -129,3 +137,5 @@ Fake-client tests verify aligned inputs, failed/missing scores, exact MCQ labels
 separate correctness/grounding, checkpoint integrity, oracle approval and corpus
 hashes, snapshot-bound reviews and corrected-gold rejudging without regeneration.
 All tests run without credentials, remote model calls or source CSV changes.
+The monitoring callback was added after the user's execution stop and has not
+been run or tested under that restriction.

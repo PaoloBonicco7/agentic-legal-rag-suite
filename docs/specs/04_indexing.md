@@ -13,7 +13,9 @@ identity, code identity, count and readiness. Secrets are never serialized.
 Interrupted output stays incomplete and cannot be resumed in place. Rebuild
 under a fresh index path; verified model/text cache entries avoid repeated
 embedding calls. An optional progress callback emits state initially, every
-100 batches and after readiness verification.
+approximately 100 processed chunks and after readiness verification. CLI emits
+these events to stderr; stdout is the final manifest. The monitoring changes
+made after the requested execution stop have not been run or tested.
 
 ## Pipeline
 - Verify recorded source file hashes and unique nonempty chunk identities.

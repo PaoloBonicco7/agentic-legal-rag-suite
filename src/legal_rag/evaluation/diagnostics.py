@@ -1,6 +1,7 @@
 """Retrieval-only diagnostics with no generation or judge dependency."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 
@@ -11,7 +12,7 @@ from legal_rag.contracts import AnswerResult, EngineConfig, Record
 from legal_rag.retrieval import build_context
 
 from .models import Benchmark, Reference
-from .runner import TERMINAL_CODES, _failure, _reject_secrets, reference_proxies
+from .runner import TERMINAL_CODES, _emit_progress, _failure, _reject_secrets, reference_proxies
 
 DIAGNOSTIC_SCHEMA_VERSION = "retrieval-diagnostics-v1"
 PROFILES = ("dense", "sparse", "hybrid", "graph")
@@ -81,6 +82,7 @@ def summarize_diagnostics(rows: list[DiagnosticResult], denominator: int) -> dic
 def run_retrieval_diagnostics(
     benchmark: Benchmark, retriever, counter, output_dir: Path | str, *,
     profiles: tuple[str, ...] = PROFILES, config: EngineConfig | None = None,
+    progress: Callable[[dict], None] | None = None,
 ) -> dict:
     config = config or EngineConfig()
     if not benchmark.questions or not profiles or len(set(profiles)) != len(profiles) or any(profile not in PROFILES for profile in profiles):
@@ -98,6 +100,8 @@ def run_retrieval_diagnostics(
     if output_dir.exists():
         raise FileExistsError(f"Diagnostic directory already exists: {output_dir}")
     rows, stopped_reason = [], None
+    total = len(benchmark.questions) * len(profiles)
+    _emit_progress(progress, stage="diagnostic_start", profile=None, qid=None, processed=0, total=total, status="running")
     for profile in profiles:
         policy = config.model_copy(update={"profile": profile})
         for question in benchmark.questions:
@@ -136,6 +140,8 @@ def run_retrieval_diagnostics(
             timings["total"] = perf_counter() - started
             rows.append(DiagnosticResult(qid=question.qid, level=question.level, expected_references=question.expected_references,
                 flags=question.flags, answer=result, retrieval_proxies=proxies, timings=timings))
+            _emit_progress(progress, stage="retrieval_record", profile=profile, qid=question.qid,
+                           processed=len(rows), total=total, status=result.status)
             if stopped_reason:
                 break
         if stopped_reason:
@@ -150,4 +156,6 @@ def run_retrieval_diagnostics(
         warnings=[*benchmark.warnings, "Retrieval-only diagnostics contain no correctness scores.", inputs["timing_policy"]],
         output_hashes={filename: file_hash(output_dir / filename) for filename in ("records.jsonl", "metrics.json")})
     write_json(output_dir / "manifest.json", manifest)
+    _emit_progress(progress, stage="diagnostic_complete", profile=None, qid=None, processed=len(rows), total=total,
+                   status="complete" if manifest.complete else "incomplete")
     return manifest.to_json_record()

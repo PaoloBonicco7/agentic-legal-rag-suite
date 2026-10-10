@@ -1,6 +1,7 @@
 """Build immutable, validated corpus artifacts from one source snapshot."""
 
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import Field
@@ -80,12 +81,17 @@ def _quality(documents: list[Document], blocks: list[Block], units: list[Unit], 
     return CorpusQuality(gates=gates, distributions=distributions, counts=counts, warnings=warnings, ready_for_indexing=all(gates.values()))
 
 
-def build_corpus(snapshot_dir: Path, output_dir: Path, counter: TokenCounter, target_tokens: int = 384, max_tokens: int = 512) -> dict:
+def build_corpus(snapshot_dir: Path, output_dir: Path, counter: TokenCounter, target_tokens: int = 384, max_tokens: int = 512, *, progress: Callable[[dict], None] | None = None) -> dict:
+    def notify(stage: str, processed: int, total: int, ready: bool = False) -> None:
+        if progress is not None:
+            progress({"stage": stage, "processed": processed, "total": total, "ready": ready})
+
     snapshot_dir, output_dir = Path(snapshot_dir), Path(output_dir)
     if output_dir.exists():
         raise FileExistsError(f"Artifact directory already exists: {output_dir}")
     if not 0 < target_tokens <= max_tokens:
         raise ValueError("Expected 0 < target_tokens <= max_tokens")
+    notify("preflight", 0, 0)
     source_manifest = SnapshotManifest.model_validate(read_json(snapshot_dir / "manifest.json")).to_json_record()
     if source_manifest["complete"] is not True:
         raise ValueError("Cannot build a corpus from an incomplete acquisition snapshot")
@@ -114,7 +120,9 @@ def build_corpus(snapshot_dir: Path, output_dir: Path, counter: TokenCounter, ta
         source_paths[source.source_id] = path
     documents, blocks, units, events = [], [], [], []
     per_document: dict[str, tuple[list[Block], list[Unit]]] = {}
-    for source in sorted(catalog, key=lambda row: row.source_id):
+    total = len(catalog)
+    notify("parsing", 0, total)
+    for processed, source in enumerate(sorted(catalog, key=lambda row: row.source_id), 1):
         path = source_paths[source.source_id]
         doc, doc_blocks, doc_units = parse_source(source, snapshot_id, path.read_bytes().decode(source.encoding))
         if doc.document_id in per_document:
@@ -124,13 +132,19 @@ def build_corpus(snapshot_dir: Path, output_dir: Path, counter: TokenCounter, ta
         units.extend(doc_units)
         events.extend(assess_status(doc, doc_blocks, doc_units, snapshot_date))
         per_document[doc.document_id] = (doc_blocks, doc_units)
+        if processed % 100 == 0:
+            notify("parsing", processed, total)
+    notify("parsing", total, total)
+    notify("graph_chunking", 0, total)
     by_identity = {doc.document_id: doc for doc in documents}
     registry = reference_registry(documents, units)
     relations, chunks = [], []
-    for doc in documents:
+    for processed, doc in enumerate(documents, 1):
         doc_blocks, doc_units = per_document[doc.document_id]
         relations.extend(extract_relations(doc, doc_blocks, doc_units, by_identity, units, registry=registry))
         chunks.extend(build_chunks(doc, doc_units, counter, target_tokens, max_tokens))
+        if processed % 100 == 0:
+            notify("graph_chunking", processed, total)
     references_by_span: dict[tuple[str, int], list[Relation]] = defaultdict(list)
     for relation in relations:
         if relation.kind == "references" and relation.span:
@@ -140,9 +154,13 @@ def build_corpus(snapshot_dir: Path, output_dir: Path, counter: TokenCounter, ta
         identities = list(dict.fromkeys(r.target_reference.split("#")[0] for r in refs if r.target_reference.split("#")[0] in by_identity))
         if len(identities) == 1:
             event.related_document_id = identities[0]
+    notify("graph_chunking", total, total)
+    notify("quality", 0, 1)
     quality = _quality(documents, blocks, units, events, relations, chunks, counter, max_tokens)
     nodes = graph_nodes(documents, units)
     quality.counts["nodes"] = len(nodes)
+    notify("quality", 1, 1)
+    notify("export", 0, 9)
     new_output(output_dir)
     for name, records in {"documents": documents, "blocks": blocks, "units": units, "events": events, "relations": relations, "chunks": chunks, "nodes": nodes}.items():
         write_jsonl(output_dir / f"{name}.jsonl", records)
@@ -150,4 +168,5 @@ def build_corpus(snapshot_dir: Path, output_dir: Path, counter: TokenCounter, ta
     files = {path.name: file_hash(path) for path in sorted(output_dir.iterdir())}
     manifest = CorpusManifest(snapshot_id=snapshot_id, snapshot_date=snapshot_date, created_at=utc_now(), source_manifest_sha256=file_hash(snapshot_dir / "manifest.json"), source_catalog_sha256=file_hash(snapshot_dir / "catalog.jsonl"), code=run_code, versions={"parser": PARSER_VERSION, "status": STATUS_VERSION, "graph": GRAPH_VERSION, "chunking": CHUNKING_VERSION}, tokenizer={"name": counter.name, "revision": counter.revision}, config={"target_tokens": target_tokens, "max_tokens": max_tokens}, counts=quality.counts, files=files, ready_for_indexing=quality.ready_for_indexing, quality=quality.gates, limitations=["Source representation and absence of cessation evidence do not certify applicability.", "Historical as-of reconstruction is not implemented."] + (["Legacy capture date is unknown; this snapshot does not establish current freshness."] if snapshot_date is None else []))
     write_json(output_dir / "manifest.json", manifest)
+    notify("export", 9, 9, quality.ready_for_indexing)
     return manifest.to_json_record()

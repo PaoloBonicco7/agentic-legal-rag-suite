@@ -125,7 +125,7 @@ def build_index(corpus_dir, index_dir, embedder, *, sparse_embedder=None, batch_
                                                 payload={**chunk.to_json_record(), "embedding_identity_sha256": identity_hash}))
             client.upsert(COLLECTION, points=points, wait=True)
             batch_number = offset // batch_size + 1
-            if progress and batch_number % 100 == 0:
+            if progress and (offset + len(batch)) // 100 != offset // 100:
                 progress({"processed": offset + len(batch), "total": len(chunks), "cached_vectors": cached_count,
                           "batches": batch_number, "dimension": dimension, "ready_for_retrieval": False})
         if client.count(COLLECTION, exact=True).count != len(chunks):

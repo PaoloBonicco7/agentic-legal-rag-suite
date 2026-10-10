@@ -44,6 +44,18 @@ endpoint. Source representation is independent from legal status.
 
 ## Contract
 
+`build_corpus(..., progress=None)` accepts an optional Python callback with
+`stage`, `processed`, `total` and `ready` fields. Stages are `preflight`,
+`parsing`, `graph_chunking`, `quality` and `export`. Preflight emits a start
+event with 0/0 counters. Parsing and graph/chunking emit start, every 100
+documents and completion; quality and export emit start and completion.
+`ready` becomes true only after all artifacts are exported and all quality
+gates pass. Callback failures propagate; monitoring does not change records,
+manifest fields or processing rules. The CLI sends progress as JSONL to stderr
+by default and keeps the final manifest on stdout; no extra flag is required.
+This monitoring wiring and its focused tests have not been executed as part of
+the setup-only update.
+
 Shared Pydantic models live in `contracts.py`. IDs are deterministic within a
 snapshot. `SourceSpan` offsets are half-open character positions in the exported
 normalized `Block.text`, not byte positions in raw HTML. A unit or chunk text is

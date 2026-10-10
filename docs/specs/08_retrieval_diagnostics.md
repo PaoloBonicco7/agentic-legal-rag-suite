@@ -20,6 +20,13 @@ Each record contains an `AnswerResult` explicitly labelled `retrieval_only=true`
 with `status='insufficient_evidence'` and no generated answer, score or LLM usage.
 Existing output directories are rejected.
 
+Monitoring: optional `progress=None` receives only `stage`, `profile`, `qid`,
+`processed`, `total` and `status`: start, each concluded retrieval record and
+final export status. Totals count QID/profile pairs. Per-record events describe
+completed in-memory work; the existing final export remains the persistence
+boundary. The callback is invoked directly and its errors propagate; in-memory
+records are not checkpoints. Monitoring is not part of run identity.
+
 ## Pipeline
 
 1. Freeze benchmark, profile/config, code, index and tokenizer identities.
@@ -56,3 +63,5 @@ in notebooks. Offline reports accept `diagnostic_dirs=()` as an additional input
 Focused fake-retriever tests cover dense/hybrid/graph staging, failed retrieval,
 no-gold leakage and report labels. A real run may execute all 100 questions with
 the indexed local embeddings even when generation providers are unavailable.
+The monitoring callback was added after the user's execution stop and has not
+been run or tested under that restriction.

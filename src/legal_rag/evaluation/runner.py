@@ -5,6 +5,7 @@ import json
 import os
 import random
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 from legal_rag.artifacts import code_identity, digest, file_hash, read_json, utc_now, write_json
@@ -17,6 +18,11 @@ IDENTITY_FIELDS = ("generator", "judge", "answer_prompt_version", "filters", "to
 BOOTSTRAP_SEED = 20261010
 NOT_ATTEMPTED_CODES = {"budget_exceeded", "budget_review_required", "prices_stale", "prices_missing", "prices_invalid", "credentials_missing", "context_unverified"}
 TERMINAL_CODES = NOT_ATTEMPTED_CODES | {"http_401", "http_403", "http_404", "cost_bound_exceeded", "model_mismatch"}
+
+
+def _emit_progress(progress, **event) -> None:
+    if progress is not None:
+        progress(event)
 
 
 def _canonical(value: dict) -> str:
@@ -191,6 +197,7 @@ def run_evaluation(
     qids: list[str] | None = None, judge_control=None, control_size: int = 20,
     corpus_dir: Path | str | None = None,
     oracle_evidence_path: Path | str | None = None, frozen_generation: dict | None = None,
+    progress: Callable[[dict], None] | None = None,
 ) -> dict:
     if not formats or len(set(formats)) != len(formats) or any(value not in {"no_hint", "mcq"} for value in formats):
         raise ValueError("formats must be distinct no_hint/mcq names")
@@ -288,6 +295,8 @@ def run_evaluation(
         manifest.setdefault("accounting_history", []).append(accounting)
         manifest["stopped_reason"] = None
         write_json(output_dir / "manifest.json", EvaluationManifest.model_validate(manifest))
+        _emit_progress(progress, stage="evaluation_start", profile=profile, qid=None,
+                       processed=len(results), total=len(expected_keys), status="running")
         stopped_reason = None
         for question in questions:
             for format_name in formats:
@@ -315,6 +324,8 @@ def run_evaluation(
                     attempted[key] = _answer_error_code(answer) not in NOT_ATTEMPTED_CODES
                     _append(output_dir / "answers.jsonl", {"key": list(key), "answer": answer.to_json_record(), "attempted": attempted[key]})
                     answers[key] = answer
+                    _emit_progress(progress, stage="generation_checkpoint", profile=profile, qid=question.qid,
+                                   processed=len(answers), total=len(expected_keys), status=answer.status if attempted[key] else "not_attempted")
                 flags = list(question.flags)
                 for reference in question.expected_references:
                     status = article_status.get((reference.document_id, reference.article_label), status_lookup.get(reference.document_id))
@@ -367,6 +378,9 @@ def run_evaluation(
                 results[key] = row
                 if terminal_generation:
                     stopped_reason = f"generator:{terminal_generation}"
+                _emit_progress(progress, stage="evaluation_record", profile=profile, qid=question.qid,
+                               processed=len(results), total=len(expected_keys), status="not_attempted" if not row.generation_attempted
+                               else "missing_judgment" if row.score is None else "error" if answer.status == "error" else "evaluated")
                 if stopped_reason:
                     break
             if stopped_reason:
@@ -380,6 +394,8 @@ def run_evaluation(
                          "control_complete": not stopped_reason and len(rows) == len(expected_keys) and all(not row.control_error for row in rows),
                          "output_hashes": {name: file_hash(output_dir / name) for name in ("answers.jsonl", "results.jsonl", "metrics.json")}})
         write_json(output_dir / "manifest.json", EvaluationManifest.model_validate(manifest))
+        _emit_progress(progress, stage="evaluation_complete", profile=profile, qid=None,
+                       processed=len(results), total=len(expected_keys), status=manifest["status"])
         return manifest
 
 

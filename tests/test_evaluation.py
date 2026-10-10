@@ -642,3 +642,66 @@ def test_known_success_after_unknown_failed_attempt_and_resolved_alias_is_compar
         judge.blocked = False
         run_evaluation(benchmark, PriorUnknownEngine(), judge, tmp_path / profile, profile=profile, identity=identity(), resume=True)
     assert compare_runs([tmp_path / "dense", tmp_path / "hybrid"], resamples=100)["comparisons"][0]["comparable"]
+
+
+def test_evaluation_progress_observes_persisted_checkpoints_and_final_export(tmp_path):
+    benchmark = load_benchmark(sources(tmp_path / 'sources'), expected_count=2)
+    output = tmp_path / 'run'
+    engine, judge, events = FakeEngine(), FakeJudge(), []
+
+    def progress(event):
+        events.append(event)
+        if event['stage'] == 'generation_checkpoint':
+            checkpoints = [json.loads(line) for line in (output / 'answers.jsonl').read_text().splitlines()]
+            assert len(checkpoints) == event['processed']
+            assert checkpoints[-1]['key'] == [event['qid'], 'no_hint']
+            assert checkpoints[-1]['answer']['answer'] == 'Presidente e Consiglio.'
+            assert len(judge.calls) == event['processed'] - 1
+        elif event['stage'] == 'evaluation_record':
+            saved = load_results(output)
+            assert len(saved) == event['processed'] and saved[-1].qid == event['qid']
+        elif event['stage'] == 'evaluation_complete':
+            saved_manifest = json.loads((output / 'manifest.json').read_text())
+            assert saved_manifest['complete'] and event['status'] == 'complete'
+            assert all(file_hash(output / name) == expected for name, expected in saved_manifest['output_hashes'].items())
+            metrics = json.loads((output / 'metrics.json').read_text())['no_hint']
+            assert metrics['denominator'] == 2 and metrics['missing_scores'] == 0
+
+    run_evaluation(benchmark, engine, judge, output, identity=identity(), progress=progress)
+    assert events[0]['stage'] == 'evaluation_start' and events[0]['processed'] == 0
+    assert events[-1]['stage'] == 'evaluation_complete' and events[-1]['processed'] == 2
+    assert [event['processed'] for event in events if event['stage'] == 'generation_checkpoint'] == [1, 2]
+    assert [event['processed'] for event in events if event['stage'] == 'evaluation_record'] == [1, 2]
+
+
+def test_diagnostic_progress_counts_completed_ram_records_without_new_metrics(tmp_path):
+    benchmark = load_benchmark(sources(tmp_path / 'sources'), expected_count=2)
+    profiles = ('dense', 'sparse')
+    baseline = tmp_path / 'baseline'
+    run_retrieval_diagnostics(benchmark, FakeRetriever(), FakeCounter(), baseline, profiles=profiles)
+    output, retriever, events = tmp_path / 'monitored', FakeRetriever(), []
+
+    def progress(event):
+        events.append(event)
+        if event['stage'] == 'retrieval_record':
+            assert len(retriever.calls) == event['processed']
+            assert not output.exists()
+        elif event['stage'] == 'diagnostic_complete':
+            saved_manifest = json.loads((output / 'manifest.json').read_text())
+            assert event['status'] == 'complete' and saved_manifest['complete']
+            assert all(file_hash(output / name) == expected for name, expected in saved_manifest['output_hashes'].items())
+            rows = load_diagnostics(output)
+            assert len(rows) == event['processed'] == 4
+            assert all(row.retrieval_only and not row.answer.answer and not row.answer.usage for row in rows)
+
+    run_retrieval_diagnostics(benchmark, retriever, FakeCounter(), output, profiles=profiles, progress=progress)
+    assert events[0]['stage'] == 'diagnostic_start' and events[0]['total'] == 4
+    assert [event['processed'] for event in events if event['stage'] == 'retrieval_record'] == [1, 2, 3, 4]
+    assert [event['profile'] for event in events if event['stage'] == 'retrieval_record'] == ['dense', 'dense', 'sparse', 'sparse']
+    assert events[-1]['stage'] == 'diagnostic_complete' and events[-1]['processed'] == 4
+    baseline_metrics = json.loads((baseline / 'metrics.json').read_text())
+    monitored_metrics = json.loads((output / 'metrics.json').read_text())
+    for profile in profiles:
+        baseline_metrics[profile].pop('timings_seconds')
+        monitored_metrics[profile].pop('timings_seconds')
+    assert monitored_metrics == baseline_metrics

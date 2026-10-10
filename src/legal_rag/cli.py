@@ -18,6 +18,10 @@ def _json(value):
     print(json.dumps(value.to_json_record() if hasattr(value, 'to_json_record') else value, ensure_ascii=False, indent=2))
 
 
+def _progress(state):
+    print(json.dumps(state, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
 def _provider_args(parser):
     parser.add_argument('--provider', choices=('utopia', 'openai'), default='utopia')
     parser.add_argument('--model')
@@ -179,8 +183,10 @@ def _run(args):
     if args.command == 'acquire':
         from legal_rag.corpus.acquisition import acquire_snapshot
         def progress(state):
-            if state.get('page', 0) % 25 == 0 and 'page' in state or state.get('completed', 0) % 100 == 0 and 'completed' in state:
-                print(json.dumps(state), flush=True)
+            catalog = 'page' in state and (state['page'] == 1 or state['page'] % 25 == 0 or state['page'] == state.get('pages_seen'))
+            details = 'completed' in state and (state['completed'] == 1 or state['completed'] % 100 == 0 or state['completed'] == state.get('total'))
+            if catalog or details:
+                _progress(state)
         _json(acquire_snapshot(args.output, resume=args.resume, progress=progress))
     elif args.command == 'import-legacy':
         from legal_rag.corpus.acquisition import import_legacy
@@ -189,7 +195,7 @@ def _run(args):
         from legal_rag.corpus.pipeline import build_corpus
         from legal_rag.tokens import BgeTokenCounter
         result = build_corpus(args.snapshot, args.output, BgeTokenCounter(local_files_only=args.local_files_only),
-                              target_tokens=args.target_tokens, max_tokens=args.max_tokens)
+                              target_tokens=args.target_tokens, max_tokens=args.max_tokens, progress=_progress)
         _json(result)
         return int(not result['ready_for_indexing'])
     elif args.command == 'index':
@@ -212,7 +218,8 @@ def _run(args):
             raise ValueError('Reference BGE-M3 uses native sparse vectors; BM25 is a separate alternative')
         sparse = BM25Embedder() if args.bm25 else None
         _json(build_index(args.corpus, args.output, embedder, sparse_embedder=sparse,
-                          batch_size=args.upload_batch_size or args.batch_size, cache_dir=args.cache))
+                          batch_size=args.upload_batch_size or args.batch_size, cache_dir=args.cache,
+                          progress=lambda state: _progress({'stage': 'index', **state})))
     elif args.command == 'ask':
         if args.profile == 'oracle':
             raise ValueError('Oracle is diagnostic only and requires verified evidence via the Python API')
@@ -252,7 +259,7 @@ def _run(args):
             result = run_evaluation(benchmark, engine, judge, args.output, profile=args.profile, identity=identity,
                                   resume=args.resume, formats=('no_hint', 'mcq') if args.mcq else ('no_hint',),
                                   qids=args.qids, judge_control=control, corpus_dir=args.corpus,
-                                  oracle_evidence_path=args.oracle_evidence)
+                                  oracle_evidence_path=args.oracle_evidence, progress=_progress)
             _json(result)
             return int(not result['complete'])
         finally:
@@ -291,7 +298,7 @@ def _run(args):
         try:
             retriever = Retriever(client, embedder, sparse_embedder=sparse, corpus_dir=args.corpus, manifest=manifest)
             result = run_retrieval_diagnostics(load_benchmark(args.benchmark), retriever, counter, args.output,
-                profiles=tuple(args.profiles), config=EngineConfig(exclude_ceased=not args.include_ceased))
+                profiles=tuple(args.profiles), config=EngineConfig(exclude_ceased=not args.include_ceased), progress=_progress)
             _json(result)
             return int(not result['complete'] or result['errors'] > 0)
         finally:
