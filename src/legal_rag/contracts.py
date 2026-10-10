@@ -168,6 +168,7 @@ class AnswerResult(Record):
     question: str
     profile: Profile
     snapshot_id: str | None = None
+    snapshot_date: str | None = None
     answer: str = ""
     status: Literal["answered", "insufficient_evidence", "uncertain", "error"]
     citations: list[Citation] = Field(default_factory=list)

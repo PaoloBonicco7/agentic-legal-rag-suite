@@ -6,10 +6,13 @@ and verified oracle context through one answer contract.
 
 ## Inputs
 Question, optional MCQ choices, immutable index, EngineConfig and chat client.
+The engine accepts optional snapshot_id and snapshot_date provenance supplied
+after corpus/index reconciliation; existing Python callers inherit the ID from
+their retriever and keep an unknown date rather than inventing one.
 
 ## Outputs
 AnswerResult containing candidates, actual context, query
-variants, usage, exact source quotations and exposed errors.
+variants, snapshot ID/acquisition date, usage, exact source quotations and exposed errors.
 
 ## Pipeline
 - Dense/sparse retrieve 100 candidates. Hybrid applies the same policy to both
@@ -44,6 +47,10 @@ variants, usage, exact source quotations and exposed errors.
 ## Contract
 Clients return a validated Pydantic object and Usage. Utopia uses structured
 Ollama output; OpenAI uses SDK Responses parsing with storage disabled.
+answer-v2 includes the corpus acquisition date in RAG prompts, explicitly
+distinguishing acquisition provenance from certified legal applicability.
+No-RAG preserves the same snapshot metadata in its output but does not receive
+that date, corpus text or other new evidence in its model prompt.
 Requested and returned model identities are distinct; a missing returned ID is
 recorded as unknown. A known Utopia returned model different from the request
 is a terminal model_mismatch, preserving its usage and model output. OpenAI

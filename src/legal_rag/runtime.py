@@ -88,6 +88,13 @@ def create_engine(config: ProviderConfig, engine_config: EngineConfig, *, index_
     manifest = IndexManifest.model_validate(read_json(Path(index_dir) / 'manifest.json')).to_json_record() if index_dir else None
     if manifest is not None and not manifest['ready_for_retrieval']:
         raise ValueError('The index is incomplete')
+    source = Path(corpus_dir or manifest['corpus_dir']) if corpus_dir or manifest is not None else None
+    corpus = read_json(source / 'manifest.json') if source is not None else None
+    if corpus is not None and not corpus.get('ready_for_indexing'):
+        raise ValueError('The corpus is incomplete')
+    if manifest is not None and (corpus['snapshot_id'] != manifest['snapshot_id'] or
+                                 file_hash(source / 'manifest.json') != manifest['corpus_manifest_sha256']):
+        raise ValueError('Corpus and index identities differ')
     counter = BgeTokenCounter(local_files_only=local_files_only)
     retriever = None
     if engine_config.profile != 'no_rag':
@@ -100,7 +107,9 @@ def create_engine(config: ProviderConfig, engine_config: EngineConfig, *, index_
         except Exception:
             qdrant.close()
             raise
-    return RagEngine(client, retriever, counter, engine_config), manifest
+    return RagEngine(client, retriever, counter, engine_config,
+                     snapshot_id=corpus['snapshot_id'] if corpus else None,
+                     snapshot_date=corpus.get('snapshot_date') if corpus else None), manifest
 
 
 def evaluation_identity(engine, judge, index_manifest, corpus_dir):

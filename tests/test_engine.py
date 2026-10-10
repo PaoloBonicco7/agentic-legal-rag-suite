@@ -151,6 +151,38 @@ def test_no_rag_does_not_retrieve_and_rag_empty_context_does_not_generate():
     assert "using your knowledge" in client.prompts[0][0]
 
 
+def test_snapshot_date_is_rag_provenance_and_no_rag_output_only():
+    client = Chat([answer(), AnswerPayload(answer="Knowledge answer", status="uncertain")])
+    retriever = FixedRetriever([chunk("one")])
+    date = "2026-10-10T12:00:00Z"
+    engine = RagEngine(client, retriever, Words(), snapshot_id="snapshot", snapshot_date=date)
+    grounded = engine.answer("Question", profile="hybrid")
+    no_rag = engine.answer("Question", profile="no_rag")
+    assert grounded.status == "answered" and no_rag.status == "uncertain"
+    assert grounded.snapshot_id == no_rag.snapshot_id == "snapshot"
+    assert grounded.snapshot_date == no_rag.snapshot_date == date
+    assert f"Corpus acquisition date: {date}" in client.prompts[0][0]
+    assert "does not certify legal applicability" in client.prompts[0][0]
+    assert date not in client.prompts[1][0] and "Corpus acquisition date:" not in client.prompts[1][0]
+    assert retriever.hits[0].chunk.text not in client.prompts[1][0] and not no_rag.context.text
+    assert retriever.calls == ["Question"]
+    assert engine.identity["prompts"]["answer"] == "answer-v2"
+
+
+def test_snapshot_date_is_not_invented_for_existing_python_callers():
+    client = Chat([answer()])
+    result = RagEngine(client, FixedRetriever([chunk("one")]), Words()).answer("Question")
+    assert result.snapshot_id == "snapshot" and result.snapshot_date is None
+    assert "Corpus acquisition date: unknown" in client.prompts[0][0]
+
+
+def test_no_rag_without_retriever_preserves_explicit_snapshot_metadata():
+    client = Chat([AnswerPayload(answer="Knowledge answer", status="uncertain")])
+    result = RagEngine(client, None, Words(), snapshot_id="snapshot", snapshot_date="2026-10-10").answer("Question", profile="no_rag")
+    assert result.snapshot_id == "snapshot" and result.snapshot_date == "2026-10-10"
+    assert "2026-10-10" not in client.prompts[0][0] and not result.candidates
+
+
 def test_multiquery_original_plus_two_distinct_queries_is_cached(tmp_path):
     client = Chat([QueryVariants(queries=["Variant one", "Variant two"]), answer(), answer()])
     retriever = FixedRetriever([chunk("one")])

@@ -72,3 +72,20 @@ def test_controlled_identity_rejects_another_or_changed_corpus(tmp_path):
     (tmp_path / 'chunks.jsonl').write_text('changed\n')
     with pytest.raises(ValueError, match='hash mismatch'):
         evaluation_identity(engine, client, index, tmp_path)
+
+
+def test_no_rag_runtime_retains_verified_source_provenance(tmp_path, monkeypatch):
+    from legal_rag import runtime, providers
+
+    write_json(tmp_path / 'manifest.json', {'snapshot_id': 'snapshot', 'snapshot_date': '2026-10-10',
+                                          'ready_for_indexing': True})
+    client = SimpleNamespace(preflight=lambda: {}, identity={'provider': 'fake'})
+    monkeypatch.setattr(providers, 'build_chat_client', lambda *args, **kwargs: client)
+    monkeypatch.setattr(runtime, 'BgeTokenCounter', lambda **kwargs: SimpleNamespace(name='fake', revision='1'))
+    engine, index = runtime.create_engine(ProviderConfig(), EngineConfig(profile='no_rag'), corpus_dir=tmp_path)
+    assert index is None and engine.retriever is None
+    assert engine.snapshot_id == 'snapshot'
+    assert engine.snapshot_date == '2026-10-10'
+    write_json(tmp_path / 'manifest.json', {'snapshot_id': 'snapshot', 'ready_for_indexing': False})
+    with pytest.raises(ValueError, match='corpus is incomplete'):
+        runtime.create_engine(ProviderConfig(), EngineConfig(profile='no_rag'), corpus_dir=tmp_path)
