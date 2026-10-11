@@ -137,5 +137,6 @@ Fake-client tests verify aligned inputs, failed/missing scores, exact MCQ labels
 separate correctness/grounding, checkpoint integrity, oracle approval and corpus
 hashes, snapshot-bound reviews and corrected-gold rejudging without regeneration.
 All tests run without credentials, remote model calls or source CSV changes.
-The monitoring callback was added after the user's execution stop and has not
-been run or tested under that restriction.
+The monitoring callback was initially left unexecuted under the setup-only
+restriction. The 2026-10-11 offline suite and authorized eight-intent pilot
+verified it; the full 100-intent benchmark remains unexecuted.

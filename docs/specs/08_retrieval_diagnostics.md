@@ -63,5 +63,6 @@ in notebooks. Offline reports accept `diagnostic_dirs=()` as an additional input
 Focused fake-retriever tests cover dense/hybrid/graph staging, failed retrieval,
 no-gold leakage and report labels. A real run may execute all 100 questions with
 the indexed local embeddings even when generation providers are unavailable.
-The monitoring callback was added after the user's execution stop and has not
-been run or tested under that restriction.
+The monitoring callback was initially left unexecuted under the setup-only
+restriction. Its focused fake-retriever tests passed in the 2026-10-11 offline
+suite; no full retrieval ablation was run.

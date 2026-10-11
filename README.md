@@ -85,8 +85,10 @@ Run one profile at a time. `--resume` keeps frozen answers and retries missing j
 Acquisition, preprocessing, indexing and evaluation expose stage/count progress
 on stderr. stdout remains the final JSON result; dependencies may also print
 diagnostics on stderr. Progress is observational, not proof of completion: use
-the final manifest and quality gates. No complete benchmark has been run in
-this delivery. The new progress wiring was left unexecuted at your request.
+the final manifest and quality gates. The offline suite passed 251 tests before
+the [eight-intent Luna pilot](docs/results/07_luna_pilot.md) on 2026-10-11.
+That pilot compares No-RAG, Dense and Hybrid; the full 100-intent benchmark
+and Advanced ablations remain unexecuted.
 
 ## Portable experiment package
 

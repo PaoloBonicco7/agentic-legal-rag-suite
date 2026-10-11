@@ -53,8 +53,8 @@ documents and completion; quality and export emit start and completion.
 gates pass. Callback failures propagate; monitoring does not change records,
 manifest fields or processing rules. The CLI sends progress as JSONL to stderr
 by default and keeps the final manifest on stdout; no extra flag is required.
-This monitoring wiring and its focused tests have not been executed as part of
-the setup-only update.
+The setup-only update left this wiring unexecuted. The offline suite on
+2026-10-11 verified the callback and CLI wiring before the authorized pilot.
 
 Shared Pydantic models live in `contracts.py`. IDs are deterministic within a
 snapshot. `SourceSpan` offsets are half-open character positions in the exported

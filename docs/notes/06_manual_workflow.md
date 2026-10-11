@@ -15,7 +15,8 @@ implementation.
 | Parsed corpus | `data/corpora/current-final`, 21,322 contextual chunks |
 | Corpus inspection | `data/reports/current-final/index.html` |
 | Explanatory examples | [HTML walkthrough](05_preprocessing_walkthrough.html) |
-| Baseline and ablations | Not executed; user-controlled future work |
+| Small Luna pilot | `data/reports/pilot_20261011/index.html`, 8 intents, three profiles |
+| Full baseline and ablations | Not executed; separate future work |
 
 These generated assets are local and ignored by Git. The delivery note records
 the index completion state. Preserve the frozen source bytes when sharing the
@@ -28,9 +29,9 @@ execution stop.
 uv run --no-sync pytest
 ```
 
-The previous implementation passed 246 offline tests before the stop. Progress
-callbacks and their CLI wiring were subsequently added without executing tests,
-compilation or pipeline runs. Run this check before your first new build.
+The 2026-10-11 implementation passed 251 offline tests, including progress
+callbacks and their CLI wiring, before the authorized pilot. The subsequent
+reporter fix has separate focused tests. Rerun relevant checks after code changes.
 
 ## Follow the preprocessing
 
@@ -70,7 +71,9 @@ batch from upload batch. Keep device, dtype and model identity explicit.
 `diagnose` measures retrieval without a judge. `evaluate --qids ...` is a pilot;
 the full baseline is a separate deliberate run. First restore provider access,
 verify the live model, refresh sourced OpenAI prices and check the common budget
-ledger. Launch one profile at a time. Generation checkpoints are persisted before
+ledger. The [eight-intent Luna pilot](../results/07_luna_pilot.md) is complete;
+its configuration is not the default full-benchmark command. Launch one profile
+at a time. Generation checkpoints are persisted before
 their progress notification; retrieval-only records are written at final export.
 
 The comparison reporter reads saved artifacts and marks incompatible comparisons

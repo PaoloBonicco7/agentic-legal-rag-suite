@@ -7,6 +7,12 @@ Non è stata fornita una chiave OpenAI per la valutazione. Nessun miglioramento
 della correttezza generativa è quindi dichiarabile dalla nuova implementazione.
 I risultati della vecchia codebase restano evidenze storiche con un altro protocollo.
 
+Aggiornamento 11 ottobre: la chiave OpenAI è configurata e il
+[pilot Luna su otto intenti](07_luna_pilot.md) è completo. No-RAG, Dense e Hybrid
+ottengono ciascuno 5/8 risposte pienamente corrette; nessun miglioramento aggregato.
+Il giudice coincide con il generatore. La baseline completa e il controllo
+indipendente restano da eseguire; Utopia non è stato ricontattato.
+
 ## Protocollo implementato
 
 - I CSV originali restano intatti: 100 intenti, con no-hint primario e MCQ
@@ -76,13 +82,14 @@ cambiare l'identità scientifica o impedire la ripresa dei checkpoint.
 L'interfaccia comune no-RAG/dense/sparse/hybrid, le ablation di riscrittura,
 espansione del grafo e reranking LLM, il diagnostico oracle, i due giudici e la
 rivalutazione del gold corretto sono implementati e verificati con fakes.
-Non costituiscono ancora risultati QA misurati con modelli reali. I report
+Solo No-RAG, Dense e Hybrid hanno risultati QA reali sul pilot ristretto;
+le altre ablation non costituiscono ancora risultati misurati. I report
 affiancano risposte e checkpoint per QID/formato, mantenendo descrittivi i
 confronti incompleti o incompatibili. Le pagine retrieval affiancano proxy e
 contesti senza attribuire uno score generativo.
 
-I blocchi esterni alla verifica QA sono l'accesso Utopia rifiutato e l'assenza della
-chiave OpenAI. Il corpus corrente e il relativo indice devono inoltre essere
-identificati dalla stessa versione finale prima di una replica. La revisione
+L'accesso Utopia resta da verificare; il blocco OpenAI è stato risolto per il pilot.
+Il corpus corrente e l'indice del pilot hanno identità finali riconciliate.
+La revisione
 umana del companion e il controllo dei giudici restano da eseguire: nessuna
 proposta automatica o risultato di un fake vale come approvazione umana.

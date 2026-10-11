@@ -34,15 +34,17 @@ structural gates alone do not establish correct links.
 
 ## Execution status
 
-This delivery is restricted to setup and documentation, as requested after the
-provider preflight. No complete answer benchmark or retrieval ablation was run.
+The initial 2026-10-10 delivery was restricted to setup and documentation,
+as requested after the provider preflight. No complete answer benchmark or
+retrieval ablation was run at that time.
 Before the execution stop, the implementation subsequently committed as
 `b92c857` passed 246 offline software tests, including Streamlit AppTest, local
 Qdrant integration and portable-archive checks. Tests use controlled fixtures;
 they do not establish answer quality on the real benchmark. Progress callbacks,
 CLI wiring and the explanatory HTML were added afterwards without executing
-tests, compilation, rendering or pipeline runs. Their first execution is left
-to the user; see the [manual workflow](../notes/06_manual_workflow.md).
+tests, compilation, rendering or pipeline runs. The newly authorized work on
+2026-10-11 passed 251 offline tests, including that wiring, and completed the
+[small Luna pilot](07_luna_pilot.md). See the [manual workflow](../notes/06_manual_workflow.md).
 
 The offline corpus report is `data/reports/current-final/index.html`. It records
 the definitive corpus and separately stored audit comments. Its generator
@@ -67,18 +69,25 @@ hardware calibration and its limits.
 Utopia's live model-inspection preflight returned HTTP 403 on 2026-10-10; the
 configured endpoint, requested 32,768-token window and model are recorded in
 `data/diagnostics/utopia_final_preflight.json`. Model identity/capabilities
-therefore remain unverified. No OpenAI runtime key is available. No paid calls
-have been made, and no answer-quality improvement has been measured.
+therefore remain unverified. OpenAI was unavailable at the initial delivery;
+the user subsequently configured the private key and authorized limited Luna
+tests. The 2026-10-11 pilot made 46 calls for a conservative 0.02172325 EUR.
+No-RAG, Dense and Hybrid each achieved 5/8 fully correct answers: no aggregate
+improvement was observed. Full Advanced ablations and independent judge
+validation remain unexecuted.
 
-No new phase was launched after the final instruction to leave execution to
-the user. The portable bundle and restore commands are ready to launch; no
-final bundle or restoration was run after that instruction. The previously
+No new phase was launched during the setup-only restriction. The later pilot
+was explicitly authorized. The portable bundle and restore commands are ready;
+no final bundle or restoration was run in this pilot. The previously
 verified private backup preserves the original research checkout.
 
 ## Remaining empirical work
 
-After access is restored, verify Utopia model identity and context capacity,
-refresh the sourced OpenAI prices/exchange rate, and run the full 100-intent
+First address the citation-format and evidence-selection failures diagnosed
+by the pilot, and validate judge behavior without changing frozen scores.
+Verify Utopia model identity and context capacity if using that provider,
+refresh sourced OpenAI prices/exchange rates before further paid batches,
+and run the full 100-intent
 No-RAG/Dense/Sparse/Hybrid baseline with common judges and frozen settings.
 Then inspect errors, seek human approval for any benchmark changes and measure
 individual ablations before combinations. Graph, reranking and LLM enrichment
