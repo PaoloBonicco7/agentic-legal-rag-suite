@@ -141,6 +141,14 @@ def _qid_page(row, run_name: str, comments=(), *, snapshot=None) -> str:
     answer = row.answer
     judging = row.judge.to_json_record() if row.judge else {"score": row.score, "judge_error": row.judge_error}
     content = f'<section><span class="badge">{escape(row.level)} · {escape(row.format)} · score {escape(row.score)}</span><h2>{escape(row.question)}</h2><h3>Gold ({escape(run_name)})</h3>{_pre(row.correct_answer)}<h3>Risposta</h3>{_pre(answer.answer)}<p>Stato: {escape(answer.status)} · opzione: {escape(answer.selected_option)}</p></section>'
+    raw_outputs = [usage.raw_output for usage in answer.usage if usage.raw_output is not None]
+    if raw_outputs or answer.raw_payload is not None:
+        content += '<section><details><summary>Output grezzo della generazione</summary><p class="muted">Testo originale e payload conservato, anche per generazioni scartate. Stato e score restano quelli del risultato salvato.</p>'
+        for index, raw_output in enumerate(raw_outputs, 1):
+            content += f'<h3>Testo originale del modello · chiamata {index}</h3>' + _pre(raw_output)
+        if answer.raw_payload is not None:
+            content += '<h3>Payload conservato</h3>' + _pre(answer.raw_payload)
+        content += '</details></section>'
     content += '<section><h2>Giudizio e annotazioni</h2>' + _pre(judging) + _pre({"flags": row.flags, "expected_references": [ref.to_json_record() for ref in row.expected_references], "errors": answer.errors,
         "control_judge": row.control_judge.to_json_record() if row.control_judge else None, "control_error": row.control_error}) + '</section>'
     content += '<section><h2>Contesto realmente inviato</h2>' + f'<p>{answer.context.token_count} token sperimentali · {len(answer.context.evidence)} evidenze</p>' + _pre(answer.context.text)

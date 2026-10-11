@@ -42,6 +42,10 @@ all source/model text is escaped. No external CDN, analytics or LLM calls are us
    actual packed context, source snippets, exact quote validation, candidate ranks,
    query variants, original candidate pool/final selection trace, omissions, usage
    and errors.
+   When generation `raw_output` or `raw_payload` is saved, a collapsed detail
+   shows the original model text and preserved payload, including discarded
+   generations. The existing escaping/redaction applies; displaying this
+   diagnostic output never changes the saved answer, status or score.
    Comparative QID pages place gold, revisions, answer, score/status and judge
    reasons side by side. Missing checkpoints and unselected cases remain distinct.
    Existing compatibility and promotion gates qualify QA comparisons; incompatible
@@ -79,6 +83,7 @@ comments without a run binding. Rendering never modifies the comment source.
 - Reporting does not overwrite inputs or silently choose a latest run.
 - Comments persist independently, cannot cross a run binding and execute no HTML.
 - Focused tests cover escaping, missing scores, incompatible identities and links.
+  Discarded generation output remains visible as inert text with unchanged scores.
 
 ## Notebook Role
 

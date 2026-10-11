@@ -54,6 +54,40 @@ def test_report_preserves_failed_judgments_and_reuses_only_saved_outputs(tmp_pat
     assert "Filtra" in experiment
 
 
+@pytest.mark.parametrize("saved_output", ["raw_output", "raw_payload", "both", None])
+def test_qid_page_exposes_discarded_raw_generation_without_changing_score(saved_output):
+    from lxml import html
+
+    from legal_rag.contracts import AnswerResult, Usage
+    from legal_rag.evaluation.models import EvaluationResult
+    from legal_rag.reporting.runner import _qid_page
+
+    raw_output = '<script>DISCARDED_MODEL_TEXT</script>\n<img src=x onerror="alert(1)">'
+    raw_payload = {"answer": '<svg onload="alert(1)">DISCARDED_PAYLOAD</svg>', "authorization": "MUST_NOT_EXPORT"}
+    answer = AnswerResult(question="Question", profile="hybrid", status="error", answer="",
+        errors=["pipeline_error: invalid quotation"],
+        usage=[Usage(provider="openai", requested_model="test", returned_model="test",
+                     raw_output=raw_output if saved_output in {"raw_output", "both"} else None)],
+        raw_payload=raw_payload if saved_output in {"raw_payload", "both"} else None)
+    row = EvaluationResult(qid="eval-0001", format="no_hint", level="easy", question="Question",
+                           correct_answer="Reference", expected_references=[], answer=answer, score=0)
+    before = row.to_json_record()
+    page = html.fromstring(_qid_page(row, "hybrid"))
+    sections = page.xpath('//details[summary[text()="Output grezzo della generazione"]]')
+    assert bool(sections) == (saved_output is not None)
+    if sections:
+        section = sections[0]
+        assert "open" not in section.attrib
+        assert not section.xpath('.//script | .//img | .//svg')
+        assert ("DISCARDED_MODEL_TEXT" in section.text_content()) == (saved_output in {"raw_output", "both"})
+        assert ("DISCARDED_PAYLOAD" in section.text_content()) == (saved_output in {"raw_payload", "both"})
+        if saved_output in {"raw_output", "both"}:
+            assert raw_output in section.xpath('.//pre')[0].text_content()
+    assert "MUST_NOT_EXPORT" not in html.tostring(page, encoding="unicode")
+    assert "score 0" in page.text_content() and "Stato: error" in page.text_content()
+    assert row.to_json_record() == before
+
+
 def test_report_does_not_claim_comparable_results_with_different_models(tmp_path, monkeypatch):
     monkeypatch.setattr("legal_rag.evaluation.runner.code_identity", lambda: {"source_sha256": "test"})
     benchmark = load_benchmark(sources(tmp_path / "sources"), expected_count=2)
