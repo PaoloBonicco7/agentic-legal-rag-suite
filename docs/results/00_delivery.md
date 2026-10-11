@@ -38,6 +38,25 @@ The current implementation passed **313 offline tests**. Controlled tests verify
 software contracts, including provider failures, local Qdrant, UI, checkpoints
 and archive validation; they do not establish legal answer quality.
 
+The latest [twenty-intent pilot](09_terra20_pilot.md) uses five cases per level,
+fresh `gpt-6-luna` generations and `gpt-5.6-terra` primary judgments across seven
+profiles. All 140 end-to-end scores are available; 11 citation failures remain
+zeros and 129 successful generations have judgments. No-RAG scores 9/20;
+Dense 16/20; Sparse 14/20; Hybrid, Graph and Rerank 17/20; Multi-query 15/20.
+There is no independent control judge or treatment promotion. The expanded
+source/gold/judge audit identifies historical quoted provisions and inconsistent
+judgments that require human review. Original gold and prior runs are unchanged.
+
+The new pilot made **310 API calls / 1.89508825 EUR**, bringing cumulative
+accounting to **425 entries / 1.963799125 EUR**. All new entries settled; the
+earlier uncertain reservation remains. These are conservative estimates rather
+than invoices. A cumulative 5 EUR cap and 0.50 EUR reserve bounded this batch.
+The latest report is `data/reports/terra20_20261011/index.html`; retrieval-only
+diagnostics contain 80 records for the same 20 QIDs and four profiles. No new
+paid embedding, Utopia, Sol, control-judge, MCQ or enrichment call was made.
+
+The following four-case validation and its accounting remain historical records.
+
 The bounded Luna pilot used four original no-hint intents, one per difficulty
 level and three laws, with seven separate profiles. Generator and judge were
 both `gpt-6-luna`, with no retry or independent control judge.
@@ -76,7 +95,7 @@ its model identity and capacity still need verification if that provider is used
 
 ## Review artifacts and remaining work
 
-The main report is `data/reports/validated_20261011/index.html`; MCQ results are
+The four-case report is `data/reports/validated_20261011/index.html`; MCQ results are
 separate at `data/reports/validated_20261011_mcq/index.html`. Reports read frozen
 artifacts and durable audit comments without retrieval or model calls.
 All three notebooks were executed through Jupyter with build/paid switches

@@ -9,6 +9,7 @@ One package contains `corpus`, `indexing`, `retrieval`, `generation`, `evaluatio
 - [Numbered workflow](docs/specs/README.md): inputs, outputs and quality gates.
 - [Architecture decisions](docs/notes/00_architecture.md): reasons, alternatives and limits.
 - [Implementation status](docs/results/00_delivery.md): actual artifacts and outstanding empirical work.
+- [Twenty-intent Luna/Terra pilot](docs/results/09_terra20_pilot.md): five cases per level, seven profiles and source/judge audits.
 - [Bounded Luna validation](docs/results/08_pipeline_validation.md): seven profiles, case audits and costs.
 - [Preprocessing walkthrough](docs/notes/05_preprocessing_walkthrough.html): real source examples, transformations and limits.
 - [Manual workflow](docs/notes/06_manual_workflow.md): stages to launch and inspect yourself.
@@ -96,8 +97,13 @@ The [eight-intent pilot](docs/results/07_luna_pilot.md) remains frozen; the
 [four-intent validation](docs/results/08_pipeline_validation.md) compares seven
 profiles on the rebuilt graph/index. Hybrid scores 4/4, Dense 3/4 and No-RAG 2/4
 according to Luna, with provider/citation failures and judge inconsistencies
-exposed. Neither pilot authorizes promotion; the full 100-intent benchmark and
-independent judge validation remain unexecuted.
+exposed. The [expanded twenty-intent pilot](docs/results/09_terra20_pilot.md)
+uses fresh Luna answers and Terra judgments: No-RAG 9/20, Dense 16/20,
+Hybrid/Graph/Rerank 17/20, Sparse 14/20 and Multi-query 15/20. It made 310 new
+calls, conservatively accounted at 1.89508825 EUR. Citation failures and
+gold/temporal/judge concerns remain visible. None of these pilots authorizes
+promotion; the full 100-intent benchmark and independent control-judge
+validation remain unexecuted.
 
 ## Portable experiment package
 

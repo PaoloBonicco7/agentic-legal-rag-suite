@@ -13,9 +13,11 @@ artifact directories are immutable: choose a fresh path for every new build/run.
 | Frozen official source | `data/snapshots/current_20261010`, 3,176 documents acquired on 2026-10-10 |
 | Corpus | `data/corpora/validated_20261011`, 21,322 chunks, 119,398 relations, 4,010 unresolved destinations |
 | Local BGE-M3 index | `data/indexes/validated-bge_20261011`, 21,322 cached document vectors |
-| Main report | `data/reports/validated_20261011/index.html`, seven no-hint profiles on four QIDs |
+| Latest main report | `data/reports/terra20_20261011/index.html`, seven no-hint profiles, 20 QIDs / five per level, Luna generation / Terra judgment |
+| Previous validation report | `data/reports/validated_20261011/index.html`, seven no-hint profiles on four QIDs |
 | Separate MCQ report | `data/reports/validated_20261011_mcq/index.html`, one QID and three profiles |
 | Retrieval-only diagnostics | `data/diagnostics/validated_20261011/retrieval`, 16 records / four QIDs |
+| Latest retrieval-only diagnostics | `data/diagnostics/terra20_20261011/retrieval`, 80 records / 20 QIDs |
 | Executed notebook previews | `data/notebooks/validated_20261011`, three notebooks and HTML previews |
 
 These local generated assets are ignored by Git. The current code passed
@@ -39,6 +41,12 @@ model and explicit device/dtype. Saved responses do not require regeneration.
 
 Open the saved report before rebuilding anything. It exposes source snippets,
 rankings, selected context, answers, judges, errors and separate audit comments.
+The [twenty-case result](../results/09_terra20_pilot.md) preserves the frozen
+selection and complete Luna/Terra results. No-RAG scores 9/20, Dense 16/20 and
+Hybrid/Graph/Rerank 17/20. Citation copying, historical provisions, short-gold
+ambiguity and primary-judge consistency need review before a larger batch.
+The expanded batch cost 1.89508825 EUR in conservative estimates; cumulative
+ledger accounting is 1.963799125 EUR, including an earlier uncertain reservation.
 The [validation note](../results/08_pipeline_validation.md) explains the four-case
 scores: No-RAG 2/4; Dense/Sparse 3/4; Hybrid 4/4; Multi-query 2/4;
 Graph/Rerank 3/4. One provider failure and one header-quotation failure remain
@@ -73,17 +81,25 @@ payloads, IDs and corpus identity. Progress alone is not a completion gate.
 
 ## Launch only the intended experiment
 
-The completed pilot used Luna only, local embeddings, four no-hint QIDs,
+The previous four-case pilot used Luna only, local embeddings, four no-hint QIDs,
 zero retries and no control judge. Enrichment's four proposals were not adopted.
 The new work used 69 calls / 0.046987625 EUR; the cumulative ledger holds
 115 calls / 0.068710875 EUR, including one uncertain reservation. These are
 estimates/reservations, not invoices. No Sol/Utopia or paid BGE call was used.
 
-A future explicitly authorized repeat can use the bounded settings below and
-a new output directory; it still cannot justify promotion:
+A future explicitly authorized repeat of the twenty-case panel can use the
+latest Luna/Terra settings below and a new output directory. Repeat the same
+selection/settings for each separately chosen profile; this remains a pilot:
 
 ```bash
-uv run --no-sync legal-rag evaluate --index data/indexes/validated-bge_20261011 --corpus data/corpora/validated_20261011 --profile hybrid --provider openai --model gpt-6-luna --judge-provider openai --judge-model gpt-6-luna --without-control --qids eval-0002 eval-0004 eval-0007 eval-0053 --retries 0 --budget-eur 0.5 --budget-reserve-eur 0.1 --local-files-only --output data/runs/manual01/hybrid
+uv run --no-sync legal-rag evaluate \
+  --index data/indexes/validated-bge_20261011 --corpus data/corpora/validated_20261011 \
+  --profile hybrid --provider openai --model gpt-6-luna \
+  --judge-provider openai --judge-model gpt-5.6-terra --without-control \
+  --qids eval-0002 eval-0004 eval-0007 eval-0011 eval-0016 eval-0018 eval-0025 eval-0036 eval-0046 eval-0053 eval-0059 eval-0061 eval-0066 eval-0077 eval-0080 eval-0081 eval-0083 eval-0094 eval-0095 eval-0100 \
+  --timeout 120 --max-output-tokens 4096 --retries 0 \
+  --budget-eur 5 --budget-reserve-eur 0.5 --local-files-only \
+  --output data/runs/manual20/hybrid
 ```
 
 Refresh sourced prices/exchange rates and inspect the shared persistent ledger
