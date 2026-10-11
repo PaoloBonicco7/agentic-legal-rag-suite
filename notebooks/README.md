@@ -9,20 +9,32 @@ the repository root. Edit the paths in each notebook's first code cell.
 | `02_retrieval.ipynb` | Inspect saved retrieval proxies; optional local diagnostics. | 04, 05, 08 |
 | `03_evaluation_reporting.ipynb` | Inspect benchmark/runs; optional evaluation and offline HTML. | 06, 07, 09 |
 
+The companions point to corpus `data/corpora/validated_20261011`, index
+`data/indexes/validated-bge_20261011` and report `data/reports/validated_20261011`.
+Notebook 03 reads the seven saved profiles under `data/runs/validated_20261011/`:
+`no_rag`, `dense`, `sparse`, `hybrid`, `multiquery`, `graph` and `rerank`.
+Retrieval-only diagnostics for the same four QIDs are saved under
+`data/diagnostics/validated_20261011/retrieval` when available.
+
 All execution switches default to `False`. Running the notebooks with those
 defaults only reads saved artifacts: no weights, index, embedding or API calls.
 An enabled retrieval run loads embeddings and opens its index; an enabled
 evaluation run calls configured providers. Use new output directories and avoid
 concurrent index users or checkpoint writers.
+The optional evaluation example uses only `gpt-6-luna` for generator and judge,
+QIDs `eval-0002`, `eval-0004`, `eval-0007`, `eval-0053`, no control judge, zero
+retries and a 0.50 EUR shared-ledger cap with 0.10 EUR reserved for validation.
+This is an exploratory four-intent comparison, not the full benchmark.
 
 Logic remains in `src/legal_rag/`; notebooks do not define parsers, retrieval,
 metrics or prompts. Missing run directories mean results are unmeasured.
 Source metadata and structural gates do not certify legal applicability, and
 article matches do not establish answer correctness.
 
-Notebook JSON and code syntax are validated; default cells are checked in order
-against local frozen artifacts. Stored outputs are intentionally cleared.
-Full Jupyter-kernel execution requires the optional notebook dependencies:
+The updated notebook structure is validated with `nbformat`; code cells compile
+without execution. Stored outputs are intentionally cleared. Top-to-bottom
+execution and visual inspection are pending the new artifacts. With the optional
+notebook dependencies and all execution switches disabled, validate locally:
 
 ```bash
 python -m pip install -e '.[notebooks]'
