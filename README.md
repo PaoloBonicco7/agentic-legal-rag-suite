@@ -82,6 +82,12 @@ Utopia is the default generator; OpenAI Luna judges and Sol checks a fixed strat
 
 Run one profile at a time. `--resume` keeps frozen answers and retries missing judgments only when code and scientific inputs match. `--qids ...` makes an explicitly marked pilot. `--mcq` adds the secondary view without doubling independent observations. Oracle requires `--oracle-evidence` with approved per-QID chunks; annotations never enter runtime prompts. Approved gold-only revisions can use `rejudge`; changed questions, evidence policy or sources require regeneration. Missing judgments keep a run incomplete. The same 100 intents have already informed development, so findings are exploratory.
 
+For a small Luna-only pilot, set `--provider openai --model gpt-6-luna
+--judge-model gpt-6-luna --without-control --qids ... --budget-eur 0.5
+--budget-reserve-eur 0.1 --retries 0`. The budget is cumulative across all clients
+using the same ledger, including earlier runs. Keep a new output directory per
+profile; a pilot cannot authorize promotion.
+
 Acquisition, preprocessing, indexing and evaluation expose stage/count progress
 on stderr. stdout remains the final JSON result; dependencies may also print
 diagnostics on stderr. Progress is observational, not proof of completion: use

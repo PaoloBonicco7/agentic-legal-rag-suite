@@ -28,12 +28,13 @@ class PricingQuote(Record):
 
 
 def provider_config(provider='utopia', model=None, *, pricing_path=None, max_output_tokens=4096, timeout_seconds=180,
-                    context_window_tokens=None):
+                    context_window_tokens=None, budget_eur=20, budget_reserve_eur=4, retries=2):
     import os
 
     values = {'provider': provider, 'model': model or ('SLURM.gpt-oss:120b' if provider == 'utopia' else 'gpt-6-luna'),
               'base_url': os.getenv('UTOPIA_BASE_URL', 'https://utopia.hpc4ai.unito.it/api') if provider == 'utopia' else 'https://api.openai.com/v1',
-              'max_output_tokens': max_output_tokens, 'timeout_seconds': timeout_seconds}
+              'max_output_tokens': max_output_tokens, 'timeout_seconds': timeout_seconds,
+              'budget_eur': budget_eur, 'budget_reserve_eur': budget_reserve_eur, 'retries': retries}
     if provider == 'openai':
         if pricing_path is None:
             raise ValueError('OpenAI requires an explicit verified pricing file')

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from datetime import date, timedelta
 
@@ -17,6 +18,148 @@ def priced(**kwargs):
     values = dict(provider="openai", model="test", price_date=date.today().isoformat(), price_source_url="https://openai.com/api/pricing/",
                   fx_date=date.today().isoformat(), fx_source_url="https://www.ecb.europa.eu/", input_usd_per_million=0.1, output_usd_per_million=0.5)
     return ProviderConfig(**(values | kwargs))
+
+
+def response_sdk(responses):
+    def parse(**kwargs):
+        response = responses.parse(**kwargs)
+        counters = getattr(response, "usage", None)
+        text = getattr(response, "output_text", None)
+        data = {"status": response.status, "model": getattr(response, "model", None),
+                "usage": {"input_tokens": getattr(counters, "input_tokens", None),
+                          "output_tokens": getattr(counters, "output_tokens", None)},
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]
+                          if isinstance(text, str) else []}
+        return SimpleNamespace(status_code=200, http_response=SimpleNamespace(json=lambda: data), parse=lambda: response)
+
+    return SimpleNamespace(responses=SimpleNamespace(with_raw_response=SimpleNamespace(parse=parse)))
+
+
+def http_response_payload(text, *, status="completed", refusal=False, include_usage=True):
+    content = {"type": "refusal", "refusal": text} if refusal else {"type": "output_text", "text": text, "annotations": []}
+    return {"id": "resp-test", "object": "response", "created_at": 0, "status": status,
+            "model": "resolved-model", "metadata": {"private": "private-body-field"},
+            "output": [{"id": "msg-test", "type": "message", "role": "assistant", "status": "completed", "content": [content]}],
+            "usage": {"input_tokens": 50, "output_tokens": 20, "total_tokens": 70,
+                      "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}} if include_usage else None}
+
+
+@pytest.fixture
+def sdk_http_response():
+    import httpx
+    from openai import OpenAI
+
+    clients = []
+
+    def build(payload, *, status_code=200, raw_body=None):
+        calls = []
+
+        def respond(request):
+            calls.append(json.loads(request.content))
+            return httpx.Response(status_code, content=raw_body if raw_body is not None else json.dumps(payload),
+                                  headers={"content-type": "application/json", "x-private": "private-header"})
+
+        sdk = OpenAI(api_key="runtime-private-key", max_retries=0,
+                     http_client=httpx.Client(transport=httpx.MockTransport(respond)))
+        clients.append(sdk)
+        return sdk, calls
+
+    yield build
+    for client in clients:
+        client.close()
+
+
+@pytest.mark.parametrize("include_usage", [True, False])
+@pytest.mark.parametrize("original,status,refusal,error", [
+    (' \n { "text" : "answer" } \t\n', "completed", False, None),
+    (' { "text" : "unfinished"', "completed", False, "invalid_output"),
+    (' { "unexpected" : "answer" }\n', "completed", False, "invalid_output"),
+    (' { "text" : "partial"', "incomplete", False, "truncated_output"),
+    ("I cannot provide this output.\n", "completed", True, "refusal"),
+])
+def test_sdk_http200_keeps_output_and_usage_before_validation(tmp_path, sdk_http_response, original, status, refusal, error, include_usage):
+    sdk, calls = sdk_http_response(http_response_payload(original, status=status, refusal=refusal, include_usage=include_usage))
+    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=sdk)
+    if error:
+        with pytest.raises(ProviderError) as caught:
+            client.complete("Synthetic contract question", Output)
+        assert caught.value.code == error and len(caught.value.usage) == 1
+        assert caught.value.raw_payload == {"model_text": original}
+        usage = caught.value.usage[0]
+        assert "runtime-private-key" not in str(caught.value)
+    else:
+        parsed, usage = client.complete("Synthetic contract question", Output)
+        assert parsed.text == "answer"
+    assert len(calls) == 1
+    assert calls[0]["store"] is False and calls[0]["truncation"] == "disabled"
+    assert calls[0]["text"]["format"]["type"] == "json_schema"
+    assert calls[0]["text"]["format"]["strict"] is True
+    assert calls[0]["text"]["format"]["schema"]["additionalProperties"] is False
+    assert usage.returned_model == "resolved-model" and usage.raw_output == original
+    assert usage.input_tokens == (50 if include_usage else None)
+    assert usage.output_tokens == (20 if include_usage else None)
+    assert usage.cost_basis == ("conservative_estimate" if include_usage else "conservative_reservation")
+    assert client.ledger.snapshot()["spent_or_reserved_eur"] == pytest.approx(usage.cost_eur)
+    entry = json.loads(client.ledger.path.read_text())["entries"][0]
+    assert entry["state"] == ("settled" if include_usage else "uncertain")
+    if include_usage:
+        assert usage.cost_eur == pytest.approx(client.ledger.cost(50, 20))
+    else:
+        assert usage.cost_eur == entry["reserved_eur"]
+    for private in ("runtime-private-key", "private-header", "private-body-field"):
+        assert private not in str(usage.to_json_record())
+
+
+@pytest.mark.parametrize("status_code,payload,raw_body,error,retained", [
+    (200, None, "private-unreadable-envelope", "invalid_output", True),
+    (429, {"error": {"message": "private-http-error", "type": "insufficient_quota", "code": "insufficient_quota"}}, None, "http_429", False),
+])
+def test_sdk_invalid_envelope_and_quota_keep_only_safe_accounting(tmp_path, sdk_http_response, status_code, payload, raw_body, error, retained):
+    sdk, calls = sdk_http_response(payload, status_code=status_code, raw_body=raw_body)
+    client = OpenAIClient(priced(retries=0), ledger_path=tmp_path / "ledger.json", sdk=sdk)
+    with pytest.raises(ProviderError) as caught:
+        client.complete("Synthetic contract question", Output)
+    assert caught.value.code == error and len(calls) == 1 and len(caught.value.usage) == 1
+    usage = caught.value.usage[0]
+    assert usage.returned_model == "unknown" and usage.raw_output is None and caught.value.raw_payload is None
+    assert usage.input_tokens is None and usage.output_tokens is None
+    assert (usage.cost_eur > 0) == retained
+    assert client.ledger.snapshot()["spent_or_reserved_eur"] == usage.cost_eur
+    for private in ("runtime-private-key", "private-header", "private-http-error", "private-unreadable-envelope"):
+        assert private not in str(caught.value) and private not in str(usage.to_json_record())
+
+
+def test_sdk_budget_exhaustion_prevents_http_dispatch(tmp_path, sdk_http_response):
+    sdk, calls = sdk_http_response(http_response_payload('{"text":"answer"}'))
+    client = OpenAIClient(priced(budget_eur=.000001, budget_reserve_eur=0), ledger_path=tmp_path / "ledger.json", sdk=sdk)
+    with pytest.raises(ProviderError, match="budget_exceeded"):
+        client.complete("Synthetic contract question", Output)
+    assert not calls and client.ledger.snapshot()["entries"] == 0
+
+
+def test_sdk_envelope_validation_failure_preserves_captured_usage(tmp_path):
+    import httpx
+    from openai import APIResponseValidationError
+
+    original = '{"text":"answer"}'
+
+    def parse():
+        response = httpx.Response(200, request=httpx.Request("POST", "https://example.test/responses"))
+        raise APIResponseValidationError(response=response, body={"private": "private-parser-body"})
+
+    raw_response = SimpleNamespace(status_code=200,
+        http_response=SimpleNamespace(json=lambda: http_response_payload(original)), parse=parse)
+    sdk = SimpleNamespace(responses=SimpleNamespace(with_raw_response=SimpleNamespace(parse=lambda **kwargs: raw_response)))
+    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=sdk)
+    with pytest.raises(ProviderError) as caught:
+        client.complete("Synthetic contract question", Output)
+    assert caught.value.code == "invalid_output"
+    usage = caught.value.usage[0]
+    assert usage.returned_model == "resolved-model" and usage.raw_output == original
+    assert usage.input_tokens == 50 and usage.output_tokens == 20
+    assert usage.cost_eur == pytest.approx(client.ledger.snapshot()["spent_or_reserved_eur"])
+    assert caught.value.raw_payload == {"model_text": original}
+    assert "private-parser-body" not in str(caught.value) and "private-parser-body" not in str(usage.to_json_record())
 
 
 def test_persistent_budget_separates_experiment_and_validation(tmp_path):
@@ -84,7 +227,7 @@ def test_openai_uses_responses_and_accounts_actual_usage(tmp_path):
             return SimpleNamespace(status="completed", model="resolved-model", usage=SimpleNamespace(input_tokens=50, output_tokens=20), output_parsed=Output(text="answer"))
 
     responses = Responses()
-    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=SimpleNamespace(responses=responses))
+    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=response_sdk(responses))
     output, usage = client.complete("question", Output)
     assert output.text == "answer"
     assert responses.arguments["store"] is False
@@ -105,7 +248,7 @@ def test_openai_timeout_keeps_reservation_for_each_retry(tmp_path, monkeypatch):
         def parse(self, **kwargs):
             raise APITimeoutError("private-key")
 
-    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=SimpleNamespace(responses=Responses()))
+    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=response_sdk(Responses()))
     with pytest.raises(ProviderError, match="provider_error") as failure:
         client.complete("question", Output)
     summary = client.ledger.snapshot()
@@ -118,7 +261,7 @@ def test_openai_timeout_keeps_reservation_for_each_retry(tmp_path, monkeypatch):
 
 def test_openai_refusal_is_exposed_and_charged(tmp_path):
     response = SimpleNamespace(status="completed", model="test", usage=SimpleNamespace(input_tokens=10, output_tokens=5), output_parsed=None)
-    sdk = SimpleNamespace(responses=SimpleNamespace(parse=lambda **kwargs: response))
+    sdk = response_sdk(SimpleNamespace(parse=lambda **kwargs: response))
     client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=sdk)
     with pytest.raises(ProviderError, match="refusal") as failure:
         client.complete("question", Output)
@@ -143,7 +286,7 @@ def test_stale_prices_and_future_or_old_fx_prevent_paid_calls(tmp_path):
 def test_cost_bound_violation_blocks_later_runs_persistently(tmp_path):
     response = SimpleNamespace(status="completed", model="test", usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=10), output_parsed=Output(text="answer"))
     path = tmp_path / "ledger.json"
-    client = OpenAIClient(priced(), ledger_path=path, sdk=SimpleNamespace(responses=SimpleNamespace(parse=lambda **kwargs: response)))
+    client = OpenAIClient(priced(), ledger_path=path, sdk=response_sdk(SimpleNamespace(parse=lambda **kwargs: response)))
     with pytest.raises(ProviderError, match="cost_bound_exceeded"):
         client.complete("question", Output)
     reopened = BudgetLedger(path, priced())
@@ -158,7 +301,7 @@ def test_full_prompt_and_schema_limit_is_checked_before_dispatch(tmp_path):
         def parse(self, **kwargs):
             pytest.fail("An oversized prompt must never reach the provider")
 
-    client = OpenAIClient(priced(max_input_tokens=3000), ledger_path=tmp_path / "ledger.json", sdk=SimpleNamespace(responses=Responses()))
+    client = OpenAIClient(priced(max_input_tokens=3000), ledger_path=tmp_path / "ledger.json", sdk=response_sdk(Responses()))
     with pytest.raises(ProviderError, match="input_limit"):
         client.complete("question " * 500, Output)
     assert client.ledger.snapshot()["entries"] == 0
@@ -166,7 +309,7 @@ def test_full_prompt_and_schema_limit_is_checked_before_dispatch(tmp_path):
 
 def test_missing_returned_model_is_not_assumed_to_match_the_request(tmp_path):
     response = SimpleNamespace(status="completed", usage=SimpleNamespace(input_tokens=10, output_tokens=5), output_parsed=Output(text="answer"))
-    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=SimpleNamespace(responses=SimpleNamespace(parse=lambda **kwargs: response)))
+    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=response_sdk(SimpleNamespace(parse=lambda **kwargs: response)))
     _, usage = client.complete("question", Output)
     assert usage.returned_model == "unknown"
     session = SimpleNamespace(post=lambda *args, **kwargs: SimpleNamespace(status_code=200, json=lambda: {"message": {"content": '{"text":"answer"}'}}))
@@ -318,7 +461,7 @@ def test_chat_preserves_original_model_json_without_runtime_key(tmp_path, provid
         response = SimpleNamespace(status="completed" if completed else "incomplete", model="test", output_text=original,
                                    usage=SimpleNamespace(input_tokens=10, output_tokens=5), output_parsed=Output(text="answer"))
         client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", api_key="runtime-private-key",
-                              sdk=SimpleNamespace(responses=SimpleNamespace(parse=lambda **kwargs: response)))
+                              sdk=response_sdk(SimpleNamespace(parse=lambda **kwargs: response)))
     if completed:
         parsed, usage = client.complete("question", Output)
         assert parsed.text == "answer"
@@ -424,9 +567,9 @@ def test_openai_explicit_none_and_provider_default_reasoning_are_distinct(tmp_pa
             return SimpleNamespace(status="completed", model="test", usage=SimpleNamespace(input_tokens=10, output_tokens=5), output_parsed=Output(text="answer"))
 
     responses = Responses()
-    OpenAIClient(priced(reasoning_effort="none"), ledger_path=tmp_path / "one.json", sdk=SimpleNamespace(responses=responses)).complete("question", Output)
+    OpenAIClient(priced(reasoning_effort="none"), ledger_path=tmp_path / "one.json", sdk=response_sdk(responses)).complete("question", Output)
     assert responses.arguments["reasoning"] == {"effort": "none"}
-    OpenAIClient(priced(reasoning_effort=None), ledger_path=tmp_path / "two.json", sdk=SimpleNamespace(responses=responses)).complete("question", Output)
+    OpenAIClient(priced(reasoning_effort=None), ledger_path=tmp_path / "two.json", sdk=response_sdk(responses)).complete("question", Output)
     assert "reasoning" not in responses.arguments
 
 
@@ -445,7 +588,7 @@ def test_success_after_uncertain_retry_includes_retained_reservation_in_usage(tm
                 raise APITimeoutError()
             return SimpleNamespace(status="completed", model="test", usage=SimpleNamespace(input_tokens=10, output_tokens=5), output_parsed=Output(text="answer"))
 
-    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=SimpleNamespace(responses=Responses()))
+    client = OpenAIClient(priced(), ledger_path=tmp_path / "ledger.json", sdk=response_sdk(Responses()))
     _, usage = client.complete("question", Output)
     assert usage.cost_eur == pytest.approx(client.ledger.snapshot()["spent_or_reserved_eur"])
     assert usage.cost_basis == "conservative_estimate_including_retry_reservations"

@@ -371,3 +371,120 @@ def test_restore_uses_verified_seekable_instance_after_source_archive_changes(tm
     restored = tmp_path / 'restored'
     restore_bundle(archive_path, restored)
     assert (restored / 'snapshot/original.html').read_bytes() == b'raw bytes'
+
+
+def run_code_fixture(project, run):
+    source = project / 'src/legal_rag/example.py'
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'value = 1\n')
+    fingerprint = digest(f'src/legal_rag/example.py:{file_hash(source)}')
+    record = json.loads((run / 'manifest.json').read_bytes())
+    record['inputs']['code'] = {'commit': 'experimental', 'dirty': False, 'source_sha256': fingerprint}
+    write_json(run / 'manifest.json', record)
+    return source, fingerprint
+
+
+def test_bundle_code_identity_uses_selected_project_and_archived_paths(tmp_path, monkeypatch):
+    import legal_rag.reproducibility as reproducibility
+
+    source = snapshot_fixture(tmp_path / 'snapshot')
+    project = tmp_path / 'selected-project'
+    (project / 'src/legal_rag/nested').mkdir(parents=True)
+    first, second = project / 'src/legal_rag/a.py', project / 'src/legal_rag/nested/z.py'
+    first.write_bytes(b'a = 1\n')
+    second.write_bytes(b'z = 2\n')
+    (project / 'src/unrelated.py').write_bytes(b'other = 3\n')
+    expected = digest(f'src/legal_rag/a.py:{file_hash(first)}\nsrc/legal_rag/nested/z.py:{file_hash(second)}')
+    directories = []
+
+    def project_git(arguments, *, cwd, **kwargs):
+        directories.append(cwd)
+        return 'selected-commit\n' if arguments[1] == 'rev-parse' else ''
+
+    monkeypatch.setattr(reproducibility.subprocess, 'check_output', project_git)
+    archive = tmp_path / 'bundle.tar.gz'
+    create_bundle(source, archive, project_dir=project)
+    manifest = verify_bundle(archive)
+    assert manifest.code == {'commit': 'selected-commit', 'dirty': False, 'source_sha256': expected}
+    assert directories == [project, project]
+
+
+def test_matching_run_code_is_verified_and_restored(tmp_path):
+    source = snapshot_fixture(tmp_path / 'snapshot')
+    corpus, run = corpus_and_run_fixture(source, tmp_path)
+    project = tmp_path / 'project'
+    code, fingerprint = run_code_fixture(project, run)
+    archive = tmp_path / 'bundle.tar.gz'
+    result = create_bundle(source, archive, corpus_dir=corpus, run_dirs=[run], project_dir=project)
+    assert result['warnings'] == []
+    manifest = verify_bundle(archive)
+    assert manifest.code['source_sha256'] == fingerprint and manifest.warnings == []
+    restored = tmp_path / 'restored'
+    assert restore_bundle(archive, restored)['warnings'] == []
+    assert (restored / 'source/src/legal_rag/example.py').read_bytes() == code.read_bytes()
+
+
+def test_changed_experimental_code_rejects_bundle_before_archive_creation(tmp_path):
+    source = snapshot_fixture(tmp_path / 'snapshot')
+    corpus, run = corpus_and_run_fixture(source, tmp_path)
+    project = tmp_path / 'project'
+    code, _ = run_code_fixture(project, run)
+    code.write_bytes(b'value = 2\n')
+    archive = tmp_path / 'bundle.tar.gz'
+    with pytest.raises(ValueError, match='correct experimental checkout'):
+        create_bundle(source, archive, corpus_dir=corpus, run_dirs=[run], project_dir=project)
+    assert not archive.exists() and not archive.with_suffix('.gz.partial').exists()
+
+
+@pytest.mark.parametrize('mutation', ['source', 'source_and_bundle_identity', 'source_without_bundle_identity', 'run_identity'])
+def test_recomposed_bundle_checks_experimental_code_during_verify_and_restore(tmp_path, mutation):
+    source = snapshot_fixture(tmp_path / 'snapshot')
+    corpus, run = corpus_and_run_fixture(source, tmp_path)
+    project = tmp_path / 'project'
+    run_code_fixture(project, run)
+    archive = tmp_path / 'bundle.tar.gz'
+    create_bundle(source, archive, corpus_dir=corpus, run_dirs=[run], project_dir=project)
+
+    def alter_code(entries):
+        if mutation == 'run_identity':
+            record = json.loads(entries['runs/experiment/manifest.json'])
+            record['inputs']['code']['source_sha256'] = digest('different experimental code')
+            entries['runs/experiment/manifest.json'] = json.dumps(record).encode()
+        else:
+            entries['source/src/legal_rag/example.py'] = b'value = 2\n'
+            if mutation != 'source':
+                bundle = json.loads(entries['bundle.json'])
+                if mutation == 'source_and_bundle_identity':
+                    bundle['code']['source_sha256'] = digest(f"src/legal_rag/example.py:{digest(entries['source/src/legal_rag/example.py'])}")
+                else:
+                    bundle['code'].pop('source_sha256')
+                entries['bundle.json'] = json.dumps(bundle).encode()
+
+    recompose_bundle(archive, alter_code)
+    error = 'archived source bytes' if mutation == 'source' else 'correct experimental checkout'
+    with pytest.raises(ValueError, match=error):
+        verify_bundle(archive)
+    target = tmp_path / 'restored'
+    with pytest.raises(ValueError, match=error):
+        restore_bundle(archive, target)
+    assert not target.exists()
+
+
+def test_legacy_run_missing_code_fingerprint_remains_explicitly_unverified(tmp_path):
+    source = snapshot_fixture(tmp_path / 'snapshot')
+    corpus, run = corpus_and_run_fixture(source, tmp_path)
+    archive = tmp_path / 'bundle.tar.gz'
+    result = create_bundle(source, archive, corpus_dir=corpus, run_dirs=[run], project_dir=tmp_path / 'empty')
+    assert len(result['warnings']) == 1 and 'code provenance is unverified' in result['warnings'][0]
+
+    def remove_warning(entries):
+        record = json.loads(entries['bundle.json'])
+        record.pop('warnings')
+        entries['bundle.json'] = json.dumps(record).encode()
+
+    recompose_bundle(archive, remove_warning)
+    manifest = verify_bundle(archive)
+    assert manifest.warnings == result['warnings']
+    restored = tmp_path / 'restored'
+    assert restore_bundle(archive, restored)['warnings'] == result['warnings']
+    assert (restored / 'runs/experiment/results.jsonl').read_bytes() == (run / 'results.jsonl').read_bytes()

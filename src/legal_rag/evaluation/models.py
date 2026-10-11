@@ -8,7 +8,7 @@ from pydantic import Field, model_validator
 from legal_rag.contracts import AnswerResult, Record, Usage
 
 EVALUATION_SCHEMA_VERSION = "evaluation-v2"
-JUDGE_PROMPT_VERSION = "legal-judge-v1"
+JUDGE_PROMPT_VERSION = "legal-judge-v2"
 Grounding = Literal["supported", "partial", "unsupported", "not_applicable"]
 
 

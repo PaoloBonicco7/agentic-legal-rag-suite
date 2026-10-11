@@ -29,6 +29,9 @@ def _provider_args(parser):
     parser.add_argument('--ledger', type=Path, default=Path('data/budget/openai.json'))
     parser.add_argument('--max-output-tokens', type=int, default=4096)
     parser.add_argument('--timeout', type=int, default=180)
+    parser.add_argument('--budget-eur', type=float, default=20)
+    parser.add_argument('--budget-reserve-eur', type=float, default=4)
+    parser.add_argument('--retries', type=int, default=2)
     parser.add_argument('--context-window-tokens', type=int, help='Explicit provider context window; Utopia defaults to 32768.')
 
 
@@ -43,10 +46,15 @@ def _engine_args(parser):
     parser.add_argument('--local-files-only', action='store_true')
 
 
-def _engine(args):
-    config = provider_config(args.provider, args.model, pricing_path=args.pricing,
+def _configured_provider(args, *, provider=None, model=None):
+    return provider_config(provider or args.provider, model if model is not None else args.model, pricing_path=args.pricing,
                              max_output_tokens=args.max_output_tokens, timeout_seconds=args.timeout,
-                             context_window_tokens=args.context_window_tokens)
+                             context_window_tokens=args.context_window_tokens, budget_eur=args.budget_eur,
+                             budget_reserve_eur=args.budget_reserve_eur, retries=args.retries)
+
+
+def _engine(args):
+    config = _configured_provider(args)
     experiment = EngineConfig(profile=args.profile, context_tokens=args.context_tokens,
                               context_units=args.context_units, exclude_ceased=not args.include_ceased)
     return create_engine(config, experiment, index_dir=args.index, corpus_dir=args.corpus,
@@ -242,12 +250,13 @@ def _run(args):
         if args.profile == 'oracle' and args.oracle_evidence is None:
             raise ValueError('Oracle evaluation requires --oracle-evidence with approved supporting chunks')
         benchmark = load_benchmark(args.benchmark, view=args.view, review_path=args.reviews)
-        judge_config = provider_config(args.judge_provider, args.judge_model, pricing_path=args.pricing)
+        judge_config = _configured_provider(args, provider=args.judge_provider, model=args.judge_model or
+                                            ('gpt-6-luna' if args.judge_provider == 'openai' else 'SLURM.gpt-oss:120b'))
         judge = build_chat_client(judge_config, ledger_path=args.ledger)
         judge.preflight()
         control = None
         if not args.without_control:
-            control = build_chat_client(provider_config('openai', args.control_model, pricing_path=args.pricing), ledger_path=args.ledger, purpose='validation')
+            control = build_chat_client(_configured_provider(args, provider='openai', model=args.control_model), ledger_path=args.ledger, purpose='validation')
             control.preflight()
         engine, manifest = _engine(args)
         try:
@@ -268,13 +277,11 @@ def _run(args):
         from legal_rag.evaluation import load_benchmark, run_rejudge
         from legal_rag.providers import build_chat_client
         benchmark = load_benchmark(args.benchmark, view='current_approved', review_path=args.reviews)
-        judge = build_chat_client(provider_config(args.provider, args.model, pricing_path=args.pricing,
-            max_output_tokens=args.max_output_tokens, timeout_seconds=args.timeout,
-            context_window_tokens=args.context_window_tokens), ledger_path=args.ledger)
+        judge = build_chat_client(_configured_provider(args), ledger_path=args.ledger)
         judge.preflight()
         control = None
         if not args.without_control:
-            control = build_chat_client(provider_config('openai', args.control_model, pricing_path=args.pricing), ledger_path=args.ledger, purpose='validation')
+            control = build_chat_client(_configured_provider(args, provider='openai', model=args.control_model), ledger_path=args.ledger, purpose='validation')
             control.preflight()
         identity = dict(read_json(args.source_run / 'manifest.json')['inputs']['identity'])
         identity['judge'] = judge.identity
@@ -319,8 +326,7 @@ def _run(args):
         from legal_rag.providers import build_chat_client
         class Check(Record):
             ok: bool
-        config = provider_config(args.provider, args.model, pricing_path=args.pricing, max_output_tokens=args.max_output_tokens,
-                                 timeout_seconds=args.timeout, context_window_tokens=args.context_window_tokens)
+        config = _configured_provider(args)
         client = build_chat_client(config, ledger_path=args.ledger)
         from legal_rag.artifacts import utc_now
         from legal_rag.providers.errors import ProviderError
@@ -343,8 +349,7 @@ def _run(args):
     elif args.command == 'enrich':
         from legal_rag.corpus.enrichment import propose_enrichment
         from legal_rag.providers import build_chat_client
-        config = provider_config(args.provider, args.model, pricing_path=args.pricing, max_output_tokens=args.max_output_tokens,
-                                 timeout_seconds=args.timeout, context_window_tokens=args.context_window_tokens)
+        config = _configured_provider(args)
         client = build_chat_client(config, ledger_path=args.ledger)
         result = propose_enrichment(args.corpus, args.output, client, limit=args.limit)
         _json(result)
@@ -353,6 +358,8 @@ def _run(args):
         path = Path(__file__).parent / 'ui' / 'app.py'
         forwarded = ['--provider', args.provider, '--profile', args.profile, '--pricing', str(args.pricing), '--ledger', str(args.ledger),
                      '--context-tokens', str(args.context_tokens), '--context-units', str(args.context_units),
+                     '--budget-eur', str(args.budget_eur), '--budget-reserve-eur', str(args.budget_reserve_eur),
+                     '--retries', str(args.retries),
                      '--timeout', str(args.timeout), '--max-output-tokens', str(args.max_output_tokens)]
         for name in ('index', 'corpus', 'model'):
             if getattr(args, name) is not None:

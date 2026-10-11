@@ -183,6 +183,8 @@ class OpenAIClient:
 
     def complete(self, prompt: str, schema: type[T]) -> tuple[T, Usage]:
         self.preflight()
+        from openai import APIResponseValidationError
+
         schema_text, input_bound = input_token_bound(prompt, schema, self.config)
         bound = self.ledger.cost(input_bound, self.config.max_output_tokens)
         started = time.perf_counter()
@@ -195,7 +197,7 @@ class OpenAIClient:
                                  store=False, truncation="disabled", service_tier="default")
                 if self.config.reasoning_effort is not None:
                     arguments["reasoning"] = {"effort": self.config.reasoning_effort}
-                response = self._sdk.responses.parse(**arguments)
+                raw_response = self._sdk.responses.with_raw_response.parse(**arguments)
             except Exception as exc:
                 status = getattr(exc, "status_code", None)
                 rejected = status in {400, 401, 403, 404, 422, 429}
@@ -208,19 +210,50 @@ class OpenAIClient:
                     time.sleep(min(2 ** attempt, 2))
                     continue
                 raise ProviderError(f"http_{status}" if status else "provider_error", "OpenAI request failed; reservation was accounted for.", usage=failed_usage) from None
-            response_usage = getattr(response, "usage", None)
-            raw = {"model_text": response.output_text} if isinstance(getattr(response, "output_text", None), str) else None
-            actual = self.ledger.cost(response_usage.input_tokens, response_usage.output_tokens) if response_usage else None
+            try:
+                data = raw_response.http_response.json() if raw_response.status_code == 200 else None
+            except (ValueError, TypeError, AttributeError):
+                data = None
+            valid_envelope = isinstance(data, dict)
+            data = data if valid_envelope else {}
+            texts, refused = [], False
+            outputs = data.get("output")
+            for output in outputs if isinstance(outputs, list) else []:
+                if not isinstance(output, dict) or output.get("type") != "message":
+                    continue
+                content = output.get("content")
+                for item in content if isinstance(content, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "output_text" and isinstance(item.get("text"), str):
+                        texts.append(item["text"])
+                    elif item.get("type") == "refusal" and isinstance(item.get("refusal"), str):
+                        texts.append(item["refusal"])
+                        refused = True
+            raw = {"model_text": "".join(texts)} if texts else None
+            counters = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            input_tokens, output_tokens = (counters.get(name) if isinstance(counters.get(name), int)
+                and not isinstance(counters[name], bool) and counters[name] >= 0 else None
+                for name in ("input_tokens", "output_tokens"))
+            actual = self.ledger.cost(input_tokens, output_tokens) if input_tokens is not None and output_tokens is not None else None
             self.ledger.settle(reservation, actual)
-            usage = Usage(provider="openai", requested_model=self.config.model, returned_model=getattr(response, "model", None) or "unknown",
-                          input_tokens=getattr(response_usage, "input_tokens", None), output_tokens=getattr(response_usage, "output_tokens", None),
+            usage = Usage(provider="openai", requested_model=self.config.model, returned_model=data.get("model") if isinstance(data.get("model"), str) and data["model"] else "unknown",
+                          input_tokens=input_tokens, output_tokens=output_tokens,
                           elapsed_seconds=time.perf_counter() - started, cost_eur=actual if actual is not None else bound, ledger_entry_id=reservation,
                           cost_basis="conservative_estimate" if actual is not None else "conservative_reservation", price_date=self.config.price_date,
                           raw_output=raw["model_text"] if raw else None)
             if actual is not None and actual > bound + 1e-9:
                 raise ProviderError("cost_bound_exceeded", "Actual usage exceeded the reserved bound; further runs require review.", usage=[*failed_usage, usage], raw_payload=raw)
-            if getattr(response, "status", "completed") != "completed":
+            if not valid_envelope:
+                raise ProviderError("invalid_output", "OpenAI returned an invalid response envelope.", usage=[*failed_usage, usage])
+            if data.get("status") != "completed":
                 raise ProviderError("truncated_output", "OpenAI response did not complete.", usage=[*failed_usage, usage], raw_payload=raw)
+            if refused:
+                raise ProviderError("refusal", "OpenAI refused the requested structured object.", usage=[*failed_usage, usage], raw_payload=raw)
+            try:
+                response = raw_response.parse()
+            except (ValueError, TypeError, AttributeError, APIResponseValidationError):
+                raise ProviderError("invalid_output", "OpenAI structured output failed SDK validation.", usage=[*failed_usage, usage], raw_payload=raw) from None
             parsed = getattr(response, "output_parsed", None)
             if parsed is None:
                 raise ProviderError("refusal", "OpenAI did not return the requested structured object.", usage=[*failed_usage, usage], raw_payload=raw)

@@ -5,10 +5,43 @@ from urllib.parse import parse_qs, urlparse
 
 from ..artifacts import digest
 from ..contracts import Block, Document, Relation, SourceSpan, Unit
-from .parser import LAW_RE, law_identity, normalize_label
+from .parser import LABEL, LAW_RE, law_identity, normalize_label
 from .status import clauses, note_bindings
 
-GRAPH_VERSION = "explicit-graph-2"
+GRAPH_VERSION = "explicit-graph-3"
+ARTICLE_MARKER_RE = re.compile(r"\b(?:articoli|articolo|artt?\.)\s+", re.I)
+ARTICLE_ITEM_RE = re.compile(r"(?P<label>" + LABEL + r")\b(?P<comma>\s*,\s*comma\s+" + LABEL + r"\b)?", re.I)
+LAW_CONNECTOR_RE = re.compile(r"\b(?:della|alla|del|dell['’])(?:\s+(?:medesima|citata|predetta|suddetta|stessa))?\s*$", re.I)
+
+
+def attached_articles(preceding: str) -> tuple[list[str] | None, str]:
+    """Bind only a supported article expression directly governing this law."""
+    connector = LAW_CONNECTOR_RE.search(preceding)
+    markers = list(ARTICLE_MARKER_RE.finditer(preceding[:connector.start()])) if connector else []
+    if not markers:
+        return None, ""
+    marker = markers[-1]
+    citation = preceding[marker.start():].strip()
+    expression = re.sub(r",\s*$", "", preceding[marker.end():connector.start()].strip()).strip()
+    labels, cursor = [], 0
+    while cursor < len(expression):
+        item = ARTICLE_ITEM_RE.match(expression, cursor)
+        if not item:
+            return [], citation
+        labels.append(normalize_label(item["label"]))
+        cursor = item.end()
+        if cursor == len(expression):
+            break
+        separator = r"\s*,\s*e\s+" if item["comma"] else r"\s*(?:,\s*(?:e\s+)?|e\s+)"
+        match = re.match(separator, expression[cursor:], re.I)
+        if not match:
+            return [], citation
+        cursor += match.end()
+        if cursor == len(expression):
+            return [], citation
+    if len(labels) > 1 and marker[0].strip().lower() == "articolo":
+        return [], citation
+    return list(dict.fromkeys(labels)), citation
 
 
 def reference_registry(documents: list[Document], units: list[Unit]) -> dict:
@@ -80,19 +113,24 @@ def extract_relations(document: Document, blocks: list[Block], units: list[Unit]
                 if not any(a <= start < b or start <= a < end for a, b, _, _ in citations):
                     identity = law_identity(match[0])
                     citations.append((start, end, identity, by_identity.get(identity)))
+            previous_end = clause.start
             for start, end, reference, target_doc in sorted(citations):
                 preceding = block.text[clause.start:start]
-                target_id = target_doc.document_id if target_doc else None
-                article = list(re.finditer(r"(?:articolo|art\.)\s+(\d+\s*(?:bis|ter|quater|quinquies)?)\b", preceding, re.I))
-                governing_article = article and re.search(r"\b(?:della|alla|del|dell')\s*$", preceding, re.I)
-                if governing_article:
-                    label = normalize_label(article[-1][1])
-                    reference = (target_doc.document_id if target_doc else reference) + f"#art:{label}"
-                    targets = article_targets.get((target_doc.document_id, label), []) if target_doc else []
-                    target_id = targets[0].unit_id if len(targets) == 1 else None
+                labels, attached = attached_articles(block.text[previous_end:start])
+                previous_end = max(previous_end, end)
+                targets = [(reference, target_doc.document_id if target_doc else None)]
+                if labels is not None:
+                    targets = [(attached + " " + block.text[start:end], None)]
+                    if labels:
+                        targets = []
+                        for label in labels:
+                            articles = article_targets.get((target_doc.document_id, label), []) if target_doc else []
+                            article_reference = (target_doc.document_id if target_doc else reference) + f"#art:{label}"
+                            targets.append((article_reference, articles[0].unit_id if len(articles) == 1 else None))
                 evidence = clause.text
                 span = SourceSpan(block_id=block.block_id, start=clause.start, end=clause.end)
-                emit(source_id, target_id, reference, "references", evidence, span)
+                for target_reference, target_id in targets:
+                    emit(source_id, target_id, target_reference, "references", evidence, span)
                 if block.region in {"historical", "body_quote"} or re.search(r"\bnon\s+abrogat|eccetto|eccezion|illegittim|costituzional", preceding, re.I):
                     continue
                 passive_matches = list(re.finditer(r"\b(?:abrogat[oaie]|modificat[oaie]|sostituit[oaie]|inserit[oaie])\s+da(?:l|lla)", preceding, re.I))
@@ -101,12 +139,14 @@ def extract_relations(document: Document, blocks: list[Block], units: list[Unit]
                 active = active_matches[-1] if active_matches else None
                 if passive and active and active.start() > passive.start():
                     passive = None
-                if passive and target_doc:
-                    kind = "repeals" if "abrogat" in passive[0].lower() else "amends"
-                    emit(target_id or target_doc.document_id, source_id, source_id, kind, evidence, span)
-                elif active:
-                    kind = "repeals" if active[1].lower().startswith("abrog") else "amends"
-                    emit(source_id, target_id, reference, kind, evidence, span)
+                for target_reference, target_id in targets:
+                    if passive:
+                        if target_id:
+                            kind = "repeals" if "abrogat" in passive[0].lower() else "amends"
+                            emit(target_id, source_id, source_id, kind, evidence, span)
+                    elif active:
+                        kind = "repeals" if active[1].lower().startswith("abrog") else "amends"
+                        emit(source_id, target_id, target_reference, kind, evidence, span)
     return relations
 
 

@@ -22,6 +22,9 @@ def arguments():
     parser.add_argument('--ledger', default='data/budget/openai.json')
     parser.add_argument('--max-output-tokens', type=int, default=4096)
     parser.add_argument('--timeout', type=int, default=180)
+    parser.add_argument('--budget-eur', type=float, default=20)
+    parser.add_argument('--budget-reserve-eur', type=float, default=4)
+    parser.add_argument('--retries', type=int, default=2)
     parser.add_argument('--context-window-tokens', type=int)
     parser.add_argument('--context-tokens', type=int, default=4096)
     parser.add_argument('--context-units', type=int, default=12)
@@ -34,6 +37,8 @@ def arguments():
 def load_engine(values):
     config = provider_config(values['provider'], values['model'], pricing_path=values['pricing'],
                              max_output_tokens=values['max_output_tokens'], timeout_seconds=values['timeout'],
+                             budget_eur=values['budget_eur'], budget_reserve_eur=values['budget_reserve_eur'],
+                             retries=values['retries'],
                              context_window_tokens=values.get('context_window_tokens'))
     retrieval = EngineConfig(profile=values['profile'], context_tokens=values['context_tokens'],
                              context_units=values['context_units'], exclude_ceased=not values['include_ceased'])

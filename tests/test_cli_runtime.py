@@ -22,11 +22,26 @@ def test_ui_forwards_effective_provider_limits(monkeypatch):
     calls = []
     monkeypatch.setattr(cli.subprocess, 'run', lambda args, check: calls.append(args))
     assert cli.main(['ui', '--timeout', '23', '--max-output-tokens', '512', '--context-window-tokens', '16384',
-                     '--profile', 'no_rag']) == 0
+                     '--profile', 'no_rag', '--budget-eur', '0.5', '--budget-reserve-eur', '0.1', '--retries', '0']) == 0
     command = calls[0]
     assert command[command.index('--timeout') + 1] == '23'
     assert command[command.index('--max-output-tokens') + 1] == '512'
     assert command[command.index('--context-window-tokens') + 1] == '16384'
+    assert command[command.index('--budget-eur') + 1] == '0.5'
+    assert command[command.index('--budget-reserve-eur') + 1] == '0.1'
+    assert command[command.index('--retries') + 1] == '0'
+
+
+def test_provider_limits_apply_equally_to_generator_and_judge_configs():
+    args = cli._parser().parse_args(['evaluate', '--output', 'unused', '--provider', 'utopia', '--model', 'generator',
+                                    '--timeout', '25', '--max-output-tokens', '1024', '--budget-eur', '0.5',
+                                    '--budget-reserve-eur', '0.1', '--retries', '0'])
+    generator = cli._configured_provider(args)
+    judge = cli._configured_provider(args, provider='utopia', model='judge')
+    assert generator.model == 'generator' and judge.model == 'judge'
+    for config in (generator, judge):
+        assert config.budget_eur == 0.5 and config.budget_reserve_eur == 0.1
+        assert config.retries == 0 and config.timeout_seconds == 25 and config.max_output_tokens == 1024
 
 
 @pytest.mark.parametrize('capacity', [None, 16384])

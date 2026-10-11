@@ -6,6 +6,7 @@ from legal_rag.artifacts import file_hash, new_output, read_json, read_jsonl, ut
 from legal_rag.contracts import Block, Document, Event, Record, Relation
 from legal_rag.generation.enrichment import ENRICHMENT_PROMPT_VERSION, propose_enrichment as propose_document
 from legal_rag.providers import ProviderError
+from legal_rag.providers.errors import TERMINAL_CODES
 
 
 class EnrichmentManifest(Record):
@@ -58,8 +59,7 @@ def propose_enrichment(corpus_dir, output_dir, client, *, limit=20):
                        usage=[usage.to_json_record() for usage in getattr(error, 'usage', [])])
         rows.append(row)
         write_jsonl(output / 'proposals.jsonl', rows)
-        if row['status'] == 'error' and row['error'] in {'budget_exceeded', 'budget_review_required', 'cost_bound_exceeded',
-                'prices_stale', 'prices_missing', 'prices_invalid', 'http_403', 'http_401', 'http_404', 'model_mismatch', 'credentials_missing'}:
+        if row['status'] == 'error' and row['error'] in TERMINAL_CODES:
             break
     files = {'proposals.jsonl': file_hash(output / 'proposals.jsonl')}
     result = EnrichmentManifest(created_at=utc_now(), snapshot_id=manifest['snapshot_id'],

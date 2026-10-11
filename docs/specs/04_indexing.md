@@ -14,8 +14,9 @@ Interrupted output stays incomplete and cannot be resumed in place. Rebuild
 under a fresh index path; verified model/text cache entries avoid repeated
 embedding calls. An optional progress callback emits state initially, every
 approximately 100 processed chunks and after readiness verification. CLI emits
-these events to stderr; stdout is the final manifest. The monitoring changes
-made after the requested execution stop have not been run or tested.
+these events to stderr; stdout is the final manifest. The monitoring contract
+passed the offline suite on 2026-10-11; readiness still requires a completed
+build with reconciled payloads and counts.
 
 ## Pipeline
 - Verify recorded source file hashes and unique nonempty chunk identities.

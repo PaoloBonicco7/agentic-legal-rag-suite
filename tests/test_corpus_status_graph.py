@@ -3,7 +3,7 @@ import pytest
 from legal_rag.corpus.graph import extract_relations
 from legal_rag.corpus.status import assess_status
 
-from test_corpus_parser import fixture, law, parse
+from test_corpus_parser import FIXTURES, fixture, law, parse
 
 
 @pytest.mark.parametrize("clause", [
@@ -95,3 +95,89 @@ def test_unresolved_reference_is_preserved_and_historical_intervention_is_not_em
     relations = extract_relations(document, blocks, units, {document.document_id: document})
     historical = [r for r in relations if "3 gennaio 1999" in r.evidence]
     assert historical and all(r.kind == "references" and r.resolution == "unresolved" for r in historical)
+
+
+def target_law(identity, labels):
+    body = "".join(f"<p>Art. {label}</p><p>1. Disposizione regionale.</p>" for label in labels)
+    document, _, units = parse(f"<article><h1>{identity}</h1><p>Disciplina regionale.</p>{body}</article>")
+    return document, units
+
+
+def test_real_lr54_compound_reference_never_binds_unrelated_article23():
+    document, blocks, units = fixture("2517_LR-7-dicembre-1998-n54.html")
+    target, target_units = target_law("Legge regionale 23 ottobre 1995, n. 45", ["4", "5", "23"])
+    relations = extract_relations(document, blocks, units, {d.document_id: d for d in [document, target]}, units + target_units)
+    source_id = document.document_id + "#art:21#p:3"
+    edges = [r for r in relations if r.kind == "references" and r.source_id == source_id]
+    assert {r.target_id for r in edges} == {target.document_id + "#art:4", target.document_id + "#art:5"}
+    assert all(r.resolution == "confirmed" for r in edges)
+    block = next(b for b in blocks if "Fermo restando quanto disposto dal comma 1 e dall'articolo 23" in b.text)
+    assert all(r.span.block_id == block.block_id and block.text[r.span.start:r.span.end] == r.evidence for r in edges)
+
+
+def test_real_lr10_list_with_comma_qualifiers_and_medesima_law():
+    document, blocks, units = parse((FIXTURES / "current_11824.html").read_bytes().decode("iso-8859-1"))
+    target, target_units = target_law("Legge regionale 2 agosto 1999, n. 20", ["2", "3", "5", "6", "11", "13"])
+    relations = extract_relations(document, blocks, units, {d.document_id: d for d in [document, target]}, units + target_units)
+    edges = [r for r in relations if r.kind == "references" and r.source_id == document.document_id + "#art:9#p:1"]
+    assert len(edges) == 3
+    assert {r.target_id for r in edges} == {target.document_id + f"#art:{label}" for label in ["6", "13", "11"]}
+    assert all(r.resolution == "confirmed" for r in edges)
+    block = next(b for b in blocks if "I Comuni, entro novanta giorni" in b.text)
+    assert all(r.span.block_id == block.block_id and block.text[r.span.start:r.span.end] == r.evidence for r in edges)
+
+
+@pytest.mark.parametrize("expression", [
+    "articoli da 4 a 5 della",
+    "articoli 4, commi 1 e 2, e 5 della",
+    "articolo 4, comma 1 e 2 della",
+    "articoli 4, comma 1, 5 della",
+    "articolo 4 del regolamento adottato ai sensi della",
+])
+def test_unsupported_article_attachment_preserves_unresolved_literal(expression):
+    citation = "Legge regionale 23 ottobre 1995, n. 45"
+    document, blocks, units = parse(law(f"<p>Art. 1</p><p>1. Si applicano gli {expression} {citation}.</p>"))
+    target, target_units = target_law(citation, ["1", "2", "4", "5"])
+    relations = extract_relations(document, blocks, units, {d.document_id: d for d in [document, target]}, units + target_units)
+    edges = [r for r in relations if r.kind == "references"]
+    assert len(edges) == 1
+    assert edges[0].target_id is None and edges[0].resolution == "unresolved"
+    assert expression in edges[0].target_reference and citation in edges[0].target_reference
+
+
+def test_article_attachment_does_not_cross_previous_law_mention():
+    document, blocks, units = parse(law("<p>Art. 1</p><p>1. Si applica l'articolo 4 della legge regionale 23 ottobre 1995, n. 45, richiamata dalla legge regionale 2 agosto 1999, n. 20.</p>"))
+    first, first_units = target_law("Legge regionale 23 ottobre 1995, n. 45", ["4"])
+    second, second_units = target_law("Legge regionale 2 agosto 1999, n. 20", ["4"])
+    relations = extract_relations(document, blocks, units, {d.document_id: d for d in [document, first, second]}, units + first_units + second_units)
+    assert {r.target_id for r in relations if r.kind == "references"} == {first.document_id + "#art:4", second.document_id}
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_explicit_article_with_missing_or_duplicate_target_stays_unresolved(duplicate):
+    document, blocks, units = parse(law("<p>Art. 1</p><p>1. Si applica l'articolo 4 della legge regionale 23 ottobre 1995, n. 45.</p>"))
+    target, target_units = target_law("Legge regionale 23 ottobre 1995, n. 45", ["4"] if duplicate else ["5"])
+    if duplicate:
+        target_units.append(next(u for u in target_units if u.kind == "article").model_copy())
+    relations = extract_relations(document, blocks, units, {d.document_id: d for d in [document, target]}, units + target_units)
+    edge = next(r for r in relations if r.kind == "references")
+    assert edge.target_id is None and edge.resolution == "unresolved"
+    assert edge.target_reference == target.document_id + "#art:4"
+
+
+def test_supported_article_suffix_and_missing_law_retain_precise_references():
+    document, blocks, units = parse(law("<p>Art. 1</p><p>1. Si applica l'articolo 4 sexies della legge regionale 23 ottobre 1995, n. 45. Si applicano gli articoli 6, comma 3, e 13, comma 2, della legge regionale 2 agosto 1999, n. 20.</p>"))
+    target, target_units = target_law("Legge regionale 23 ottobre 1995, n. 45", ["4sexies"])
+    relations = extract_relations(document, blocks, units, {d.document_id: d for d in [document, target]}, units + target_units)
+    edges = [r for r in relations if r.kind == "references"]
+    assert any(r.target_id == target.document_id + "#art:4sexies" for r in edges)
+    missing = [r for r in edges if r.resolution == "unresolved"]
+    assert {r.target_reference for r in missing} == {"vda:lr:1999-08-02:20#art:6", "vda:lr:1999-08-02:20#art:13"}
+
+
+def test_passive_intervention_with_ambiguous_article_actor_never_falls_back_to_law():
+    document, blocks, units = parse(law("<p>Art. 1</p><p>1. Testo utile.</p><p>Articolo abrogato dall'articolo 4 del regolamento adottato ai sensi della legge regionale 23 ottobre 1995, n. 45.</p>"))
+    target, target_units = target_law("Legge regionale 23 ottobre 1995, n. 45", ["4", "5"])
+    relations = extract_relations(document, blocks, units, {d.document_id: d for d in [document, target]}, units + target_units)
+    assert any(r.kind == "references" and r.resolution == "unresolved" for r in relations)
+    assert not any(r.kind in {"repeals", "amends"} for r in relations)

@@ -56,14 +56,14 @@ def propose_enrichment(client, document: Document, blocks: list[Block]) -> Enric
     proposals, rejected, seen = [], [], set()
     for fact in payload.proposals:
         block = source.get(fact.block_id)
-        if block is None or not fact.quote.strip() or block.text.count(fact.quote) != 1:
+        start = block.text.find(fact.quote) if block is not None and fact.quote.strip() else -1
+        if start < 0 or block.text.find(fact.quote, start + 1) >= 0:
             rejected.append({"block_id": fact.block_id, "reason": "missing_or_ambiguous_exact_evidence"})
             continue
         identity = digest(document.document_id + fact.kind + fact.block_id + fact.quote)
         if identity in seen:
             continue
         seen.add(identity)
-        start = block.text.index(fact.quote)
         proposals.append(EvidenceProposal(proposal_id="proposal:" + identity[:20], document_id=document.document_id,
             kind=fact.kind, evidence=fact.quote, description=fact.description,
             span=SourceSpan(block_id=block.block_id, start=start, end=start + len(fact.quote))))

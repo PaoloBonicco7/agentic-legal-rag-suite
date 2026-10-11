@@ -19,6 +19,12 @@ variants, snapshot ID/acquisition date, usage, exact source quotations and expos
   prefetches and returns 100 through explicit RRF k=60, zero-based ranks.
 - Multi-query retains the original and exactly two distinct variants, then
   fuses the three hybrid lists to 100 using the same RRF convention.
+  rewrite-v2 preserves negations and constraints and forbids presumed answers,
+  new facts, conditions or asserted legal consequences. Real variants remain
+  inspectable; syntactic validation alone cannot certify semantic equivalence.
+  Invalid variants or recoverable rewriting failures expose an original-only
+  fallback in the trace. Terminal credentials, budget or identity failures stop
+  the pipeline before retrieval or generation; they never trigger a new call.
 - Graph experiments follow confirmed article references for one hop, adding
   at most two chunks. Unresolved edges never imply arbitrary law expansion.
   Verified graph artifacts are loaded once into source-to-relation and
@@ -37,8 +43,13 @@ variants, snapshot ID/acquisition date, usage, exact source quotations and expos
   Identity and uncertainty text count toward the same complete-context budget.
   Partial overlaps retain the complete chunk; repeated list introductions
   preserve meaning and count toward the same budget.
-- Citations must name an included context ID and quote an exact nonempty
-  substring of its source text. Source URLs and chunk IDs come from the corpus.
+- Citations must name an included context ID and quote a nonempty contiguous
+  source excerpt. An exact substring is accepted directly. Whitespace-only
+  differences are accepted only when they identify one unique contiguous match
+  within that ID's source text; the exported quotation is the original source
+  substring. Case, punctuation, words and numbers are never normalized. Ambiguous
+  or noncontiguous matches fail. Raw model quotations remain in the saved payload.
+  Source URLs and chunk IDs come from the corpus.
 - Oracle accepts only supplied verified source chunks. No gold answer enters
   retrieval or the answer prompt. No-RAG has no source citations.
   Oracle uses the same cessation policy; excluded evidence is traced and an
@@ -47,8 +58,11 @@ variants, snapshot ID/acquisition date, usage, exact source quotations and expos
 ## Contract
 Clients return a validated Pydantic object and Usage. Utopia uses structured
 Ollama output; OpenAI uses SDK Responses parsing with storage disabled.
-answer-v2 includes the corpus acquisition date in RAG prompts, explicitly
+answer-v3 includes the corpus acquisition date in RAG prompts, explicitly
 distinguishing acquisition provenance from certified legal applicability.
+It requires original wording/capitalization and prohibits joining distant excerpts.
+All profiles receive the same Valle d'Aosta task jurisdiction. This domain
+instruction supplies no legal rule, gold answer or retrieved evidence to No-RAG.
 No-RAG preserves the same snapshot metadata in its output but does not receive
 that date, corpus text or other new evidence in its model prompt.
 Requested and returned model identities are distinct; a missing returned ID is
@@ -70,6 +84,10 @@ the requested reasoning effort, including none; a null effort deliberately
 selects the provider default and never claims verified thinking settings.
 Usage.raw_output retains the original model text from successful and unsuccessful
 HTTP200 responses, including whitespace. Parsed output remains separate.
+OpenAI reads message text and usage from the public SDK raw-response wrapper,
+settles available counters before strict schema validation, and preserves
+diagnostics for invalid JSON/schema, refusal and truncation. Missing counters
+or an unreadable envelope retain the conservative reservation.
 HTTP error bodies and authorization headers are never exported.
 The stateless UI uses the same factory as the CLI, including timeout and output
 limits. Snapshot identity and acquisition dates are visible before submission;
@@ -96,9 +114,15 @@ Scientific provider identity excludes accounting dates, prices and ledger paths,
 so refreshing a quote does not invalidate a checkpoint. Separate accounting
 metadata and Usage link estimates/reservations to dated ledger entries. An
 uncertain retry is included in the reported conservative reservation cost.
+CLI and UI expose `--budget-eur`, `--budget-reserve-eur` and `--retries`.
+The limits apply to all generator/judge/control clients sharing the ledger;
+they are cumulative caps, not per-command allowances. Defaults remain 20/4 EUR
+and two retries. Small pilots explicitly lower the cap and set retries to zero.
 Optional propose_enrichment returns review-only facts with unique exact source
 quotations and deterministic spans. Unsupported proposals are recorded as
-rejected; neither accepted proposals nor LLM descriptions change status,
+rejected; overlapping occurrences also make an exact quote ambiguous and are
+rejected. Evidence uniqueness is checked within the declared block. Neither
+accepted proposals nor LLM descriptions change status,
 relations or retrieval filters automatically.
 
 ## Notebook Role
@@ -106,7 +130,8 @@ Thin notebooks call RagEngine and display the same trace and answer artifacts.
 
 ## Acceptance Criteria
 Test exact RRF, dense/sparse policy consistency, unknown retention, graph
-target resolution, complete-context budgets, invalid quotations, oracle
+target resolution, complete-context budgets, exact/canonical whitespace quotations,
+ambiguous and altered quotations, oracle
 validation, refusal/403/retries and persistent budget caps without paid calls.
 New profiles are promoted only after paired measurements at fixed context
 budget; graph construction/experimentation is required, benefit is not assumed.

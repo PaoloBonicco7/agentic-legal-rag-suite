@@ -138,6 +138,40 @@ def test_citation_validation_requires_displayed_exact_source_quote():
             validate_citations(invalid, context)
 
 
+def test_citation_whitespace_is_canonicalized_to_one_original_displayed_span():
+    source = "Importo massimo:\n\ta) 100 euro;\nb) 200 euro."
+    context = build_context(candidates([chunk("one", text=source)]), Words())
+    payload = answer("Importo massimo: a) 100 euro;")
+    raw = payload.to_json_record()
+    validated = validate_citations(payload, context)
+    assert validated[0].quote == "Importo massimo:\n\ta) 100 euro;"
+    assert validated[0].quote in context.text
+    assert payload.to_json_record() == raw
+
+
+@pytest.mark.parametrize("quote", ["importo massimo: a) 100 euro;", "Importo massimo: a) 101 euro;",
+                                  "Importo massimo: a) 100 euro.", "Importo massimo: ... b) 200 euro."])
+def test_citation_canonicalization_never_changes_words_numbers_case_or_punctuation(quote):
+    source = "Importo massimo:\na) 100 euro;\nb) 200 euro."
+    context = build_context(candidates([chunk("one", text=source)]), Words())
+    with pytest.raises(ValueError):
+        validate_citations(answer(quote), context)
+
+
+@pytest.mark.parametrize("source,quote", [("a\na\na", "a a"), ("100\teuro; 100\neuro", "100 euro")])
+def test_citation_whitespace_rejects_ambiguous_including_overlapping_matches(source, quote):
+    context = build_context(candidates([chunk("one", text=source)]), Words())
+    with pytest.raises(ValueError):
+        validate_citations(answer(quote), context)
+
+
+def test_citation_canonicalization_is_bound_to_the_declared_evidence_id():
+    context = build_context(candidates([chunk("one", text="Other source."), chunk("two", text="100\neuro.")]), Words())
+    with pytest.raises(ValueError):
+        validate_citations(answer("100 euro.", context_id="E1"), context)
+    assert validate_citations(answer("100 euro.", context_id="E2"), context)[0].chunk_id == "two"
+
+
 def test_no_rag_does_not_retrieve_and_rag_empty_context_does_not_generate():
     retriever = FixedRetriever([])
     client = Chat([AnswerPayload(answer="Knowledge answer", status="uncertain")])
@@ -149,6 +183,7 @@ def test_no_rag_does_not_retrieve_and_rag_empty_context_does_not_generate():
     assert retriever.calls == ["Question"]
     assert len(client.prompts) == 1
     assert "using your knowledge" in client.prompts[0][0]
+    assert "legislation of Valle d'Aosta" in client.prompts[0][0]
 
 
 def test_snapshot_date_is_rag_provenance_and_no_rag_output_only():
@@ -162,11 +197,12 @@ def test_snapshot_date_is_rag_provenance_and_no_rag_output_only():
     assert grounded.snapshot_id == no_rag.snapshot_id == "snapshot"
     assert grounded.snapshot_date == no_rag.snapshot_date == date
     assert f"Corpus acquisition date: {date}" in client.prompts[0][0]
+    assert all("legislation of Valle d'Aosta" in prompt for prompt, _ in client.prompts)
     assert "does not certify legal applicability" in client.prompts[0][0]
     assert date not in client.prompts[1][0] and "Corpus acquisition date:" not in client.prompts[1][0]
     assert retriever.hits[0].chunk.text not in client.prompts[1][0] and not no_rag.context.text
     assert retriever.calls == ["Question"]
-    assert engine.identity["prompts"]["answer"] == "answer-v2"
+    assert engine.identity["prompts"]["answer"] == "answer-v3"
 
 
 def test_snapshot_date_is_not_invented_for_existing_python_callers():
@@ -203,6 +239,40 @@ def test_invalid_multiquery_variants_use_visible_original_only_policy():
     assert result.status == "answered"
     assert result.queries == ["Original"]
     assert result.retrieval_trace["rewrite_fallback"] == "original_only"
+
+
+@pytest.mark.parametrize("code", ["http_401", "http_403", "model_mismatch", "budget_exceeded", "prices_stale"])
+def test_terminal_rewrite_failure_stops_without_retrieval_or_generation(code):
+    from legal_rag.providers.errors import ProviderError
+
+    usage = Usage(provider="fake", requested_model="test", returned_model="test")
+
+    def failed_rewrite(prompt):
+        raise ProviderError(code, "Terminal failure", usage=[usage])
+
+    client = Chat([failed_rewrite, answer()])
+    retriever = FixedRetriever([chunk("one")])
+    result = RagEngine(client, retriever, Words()).answer("Question", profile="multiquery")
+    assert result.status == "error" and result.errors[0].startswith(code + ":")
+    assert result.retrieval_trace["rewrite_fallback"] == "stopped"
+    assert result.usage == [usage]
+    assert len(client.prompts) == 1 and not retriever.calls
+
+
+def test_recoverable_rewrite_failure_retains_original_and_usage():
+    from legal_rag.providers.errors import ProviderError
+
+    failed_usage = Usage(provider="fake", requested_model="test", returned_model="test")
+
+    def failed_rewrite(prompt):
+        raise ProviderError("timeout", "Recoverable failure", usage=[failed_usage])
+
+    client = Chat([failed_rewrite, answer()])
+    retriever = FixedRetriever([chunk("one")])
+    result = RagEngine(client, retriever, Words()).answer("Question", profile="multiquery")
+    assert result.status == "answered" and result.queries == ["Question"]
+    assert result.retrieval_trace["rewrite_fallback"] == "original_only"
+    assert len(result.usage) == 2 and retriever.calls == ["Question"]
 
 
 def test_rerank_scores_exact_twenty_candidate_pool_and_uses_same_context_budget():
@@ -312,6 +382,16 @@ def test_optional_enrichment_only_proposes_verified_spans_and_never_changes_stat
     span = result.proposals[0].span
     assert block.text[span.start:span.end] == result.proposals[0].evidence
     assert document.status == "no_cessation_evidence"
+
+
+def test_enrichment_rejects_overlapping_exact_evidence_occurrences():
+    document = Document(document_id="law", source_id="source", snapshot_id="snapshot", source_url="https://example.org/law",
+                        source_path="law.html", identity="Law 1", title="Law", availability="body")
+    block = Block(block_id="b1", document_id="law", position=0, tag="p", text="a a a")
+    payload = ProposalPayload(proposals=[{"kind": "entity", "block_id": "b1", "quote": "a a", "description": "Ambiguous"}])
+    result = propose_enrichment(Chat([payload]), document, [block])
+    assert not result.proposals
+    assert result.rejected == [{"block_id": "b1", "reason": "missing_or_ambiguous_exact_evidence"}]
 
 
 def test_oracle_respects_operative_policy_and_abstains_without_eligible_evidence():

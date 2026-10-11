@@ -56,7 +56,17 @@ snapshot/manifest identity; every recorded corpus artifact hash is verified.
 2. Give the engine only the question and optional MCQ options. Gold answers and
    expected references never enter retrieval, rewriting or generation.
 3. Score MCQ labels exactly. Score open answers with a frozen 0/1/2 rubric:
-   wrong/contradictory, partial without contradiction, fully correct.
+   wrong/contradictory or abstention, partial without contradiction, fully correct.
+   `legal-judge-v2` requires semantic coverage of every essential reference element,
+   including actors, conditions, mandatory outcomes, amounts and timing when given.
+   Keyword overlap is insufficient. Mandatory conditions or consequences cannot
+   become merely possible, optional or dependent on an unspecified measure.
+   Material contradictions, including added conditions conflicting with the
+   reference, receive zero; a noncontradictory omission may receive one.
+   The judge receives `answer_status` and the exact candidate text. It distinguishes
+   an answer to the actual case from abstention or a generic hypothetical answer.
+   Status alone does not determine the score: justified caution can accompany a
+   complete answer when all essential conclusions are still clearly asserted.
 4. Assess grounding separately using the answer and the actual context. Check
    citation IDs and quoted substrings deterministically; semantic support remains
    a judge assessment. Grounding is not applicable to no-RAG.
@@ -84,6 +94,15 @@ when a revised gold has no unique match among the unchanged original choices.
 The original candidate pool and final selection are reported separately when a
 rerank or graph transformation changes their composition.
 Unknown statuses remain visible; references to confirmed cessation receive a flag.
+
+Correctness uses the question and reference answer independently of retrieved
+context. Additional detail must not contradict the reference, but a short gold
+cannot verify every added legal claim. The judge must identify this limitation
+rather than invent supporting law or evidence; unverified detail cannot substitute
+for missing essential elements. Grounding separately assesses material claims
+against the actual supplied context. No-RAG receives its empty context and
+`not_applicable` grounding, never fabricated evidence. A prompt change creates a
+new judge identity; existing scores and answer checkpoints are not rewritten.
 
 Comparisons require identical QIDs, benchmark/view, generator, judge, answer/judge
 prompts, corpus, embedding, filters, tokenizer and candidate/context budgets.
@@ -125,6 +144,9 @@ QIDs when the reviewed view is smaller. MCQ and pilot subsets cannot be promoted
 - Empty answers, invalid labels, unknown/ceased references and invalid quotes are
   inspectable in focused fake-client tests.
 - No API calls are made by unit tests or report generation.
+- Judge-input tests preserve status and candidate wording for both judges, exclude
+  MCQ options/reference annotations, and verify that a prompt-version change blocks
+  checkpoint resume. Rubric tests use synthetic cases, not pilot questions.
 
 ## Notebook Role
 
@@ -137,6 +159,9 @@ Fake-client tests verify aligned inputs, failed/missing scores, exact MCQ labels
 separate correctness/grounding, checkpoint integrity, oracle approval and corpus
 hashes, snapshot-bound reviews and corrected-gold rejudging without regeneration.
 All tests run without credentials, remote model calls or source CSV changes.
+Fake-client tests verify the judge input and version contract, not whether an LLM
+will obey the rubric or produce better grades. Robustness still requires an
+independent review of saved judgments; no gain follows from a prompt edit alone.
 The monitoring callback was initially left unexecuted under the setup-only
 restriction. The 2026-10-11 offline suite and authorized eight-intent pilot
 verified it; the full 100-intent benchmark remains unexecuted.

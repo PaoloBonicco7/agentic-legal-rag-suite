@@ -7,7 +7,8 @@ import pytest
 from legal_rag.artifacts import file_hash, write_json, write_jsonl
 from legal_rag.contracts import AnswerResult, Candidate, Chunk, Citation, Context, Evidence, Usage
 from legal_rag.evaluation import compare_runs, load_benchmark, load_diagnostics, load_results, run_evaluation, run_rejudge, run_retrieval_diagnostics, select_control_qids, write_review_proposals
-from legal_rag.evaluation.models import Review
+from legal_rag.evaluation.models import JUDGE_PROMPT_VERSION, Review
+from legal_rag.evaluation.runner import build_judge_prompt
 
 REVIEW_PROVENANCE = {"note": "Synthetic fixture: the cited source supports this review decision.",
                      "source_urls": ["https://example.test/primary-source"], "evidence": "Synthetic supporting passage for a contract test."}
@@ -80,6 +81,74 @@ class FakeControlJudge(FakeJudge):
     def complete(self, *args):
         payload, usage = super().complete(*args)
         return payload, usage.model_copy(update={"requested_model": "control", "returned_model": "control"})
+
+
+@pytest.mark.parametrize("status", ["answered", "uncertain", "insufficient_evidence"])
+@pytest.mark.parametrize("profile", ["no_rag", "dense"])
+def test_judge_receives_answer_status_without_automatic_score_penalty(tmp_path, status, profile):
+    benchmark = load_benchmark(sources(tmp_path / "sources"), expected_count=2)
+
+    class StatusEngine(FakeEngine):
+        def answer(self, *args, **kwargs):
+            answer = super().answer(*args, **kwargs)
+            answer.status = status
+            return answer
+
+    judge, control = FakeJudge(), FakeControlJudge()
+    manifest = run_evaluation(benchmark, StatusEngine(), judge, tmp_path / "run", profile=profile,
+        identity=identity(), qids=[benchmark.questions[0].qid], judge_control=control)
+    row = load_results(tmp_path / "run")[0]
+    assert manifest["complete"] and row.score == 2
+    assert row.answer.status == status
+    assert manifest["inputs"]["identity"]["judge_prompt_version"] == JUDGE_PROMPT_VERSION
+    for client in (judge, control):
+        assert len(client.calls) == 1
+        data = json.loads(client.calls[0].split("\n")[-1])
+        assert data == {"question": row.question, "reference_answer": row.correct_answer,
+            "candidate_answer": row.answer.answer, "answer_status": status,
+            "context": row.answer.context.text,
+            "citations": [citation.to_json_record() for citation in row.answer.citations],
+            "grounding_applicable": profile != "no_rag"}
+        if profile == "no_rag":
+            assert not data["context"] and not data["citations"]
+
+
+def test_judge_rubric_requires_semantic_completeness_and_records_limits(tmp_path):
+    benchmark = load_benchmark(sources(tmp_path / "sources"), expected_count=2)
+    question = benchmark.questions[0].model_copy(update={
+        "question": "Quando la commissione deve notificare il provvedimento?",
+        "correct_answer": "La commissione deve notificare il provvedimento entro cinque giorni."})
+    answer = AnswerResult(question=question.question, profile="no_rag", status="uncertain",
+        answer="Non posso determinare il termine.\nLa commissione potrebbe inviare una notifica.")
+    instructions, serialized = build_judge_prompt(question, answer).rsplit("\n", 1)
+    assert "all essential elements with equivalent meaning" in instructions
+    assert "keyword overlap is insufficient" in instructions
+    assert "Mandatory conditions or outcomes must not become merely possible or optional" in instructions
+    assert "including an added conflicting condition" in instructions
+    assert "abstention or a generic hypothetical answer" in instructions
+    assert "Status alone does not determine correctness" in instructions
+    assert "A short reference cannot verify every added legal claim" in instructions
+    assert "never invent supporting law or evidence" in instructions
+    assert "Grounding is separate" in instructions
+    data = json.loads(serialized)
+    assert data["candidate_answer"] == answer.answer and data["answer_status"] == "uncertain"
+    assert data["reference_answer"] == question.correct_answer and not data["grounding_applicable"]
+
+
+def test_resume_rejects_old_judge_rubric_before_any_new_calls(tmp_path, monkeypatch):
+    benchmark = load_benchmark(sources(tmp_path / "sources"), expected_count=2)
+    engine, judge = FakeEngine(), FakeJudge()
+    monkeypatch.setattr("legal_rag.evaluation.runner.JUDGE_PROMPT_VERSION", "legal-judge-v1")
+    manifest = run_evaluation(benchmark, engine, judge, tmp_path / "run", identity=identity())
+    assert manifest["inputs"]["identity"]["judge_prompt_version"] == "legal-judge-v1"
+    saved = {name: (tmp_path / "run" / name).read_bytes()
+        for name in ("manifest.json", "answers.jsonl", "results.jsonl", "metrics.json")}
+    assert JUDGE_PROMPT_VERSION == "legal-judge-v2"
+    monkeypatch.setattr("legal_rag.evaluation.runner.JUDGE_PROMPT_VERSION", JUDGE_PROMPT_VERSION)
+    with pytest.raises(ValueError, match="Resume identities"):
+        run_evaluation(benchmark, engine, judge, tmp_path / "run", identity=identity(), resume=True)
+    assert len(engine.calls) == len(judge.calls) == 2
+    assert saved == {name: (tmp_path / "run" / name).read_bytes() for name in saved}
 
 
 @pytest.fixture(autouse=True)

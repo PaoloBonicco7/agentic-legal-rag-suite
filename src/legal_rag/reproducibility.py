@@ -4,6 +4,7 @@ import gzip
 import io
 import json
 import shutil
+import subprocess
 import tarfile
 import tempfile
 from contextlib import contextmanager
@@ -11,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import Field
 
-from legal_rag.artifacts import code_identity, digest, file_hash, new_output, utc_now
+from legal_rag.artifacts import digest, file_hash, new_output, utc_now
 from legal_rag.contracts import Record, SourceRecord
 
 
@@ -21,6 +22,7 @@ class BundleManifest(Record):
     snapshot_id: str
     code: dict
     files: dict[str, str]
+    warnings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=lambda: ['LLM outputs are preserved; regenerated responses need not be identical.',
         'Indexes can be rebuilt; local model weights are identified by revision and are not bundled.'])
 
@@ -81,6 +83,34 @@ def _directory_reader(directory):
         return raw
 
     return read
+
+
+def _packaged_source_hash(files):
+    names = sorted(name for name in files if name.startswith('source/src/legal_rag/') and name.endswith('.py'))
+    return digest('\n'.join(f"{name.removeprefix('source/')}:{files[name]}" for name in names))
+
+
+def _project_code_identity(project, files):
+    try:
+        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=project, text=True, stderr=subprocess.DEVNULL).strip()
+        dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=project, text=True, stderr=subprocess.DEVNULL))
+    except (OSError, subprocess.CalledProcessError):
+        commit, dirty = None, True
+    return {'commit': commit, 'dirty': dirty, 'source_sha256': _packaged_source_hash(files)}
+
+
+def _run_code_warnings(run_reads, source_sha256):
+    warnings = []
+    for name, read in run_reads:
+        code = json.loads(read('manifest.json'))['inputs'].get('code') or {}
+        if not isinstance(code, dict):
+            raise ValueError(f'Run {name} has an invalid code identity')
+        declared = code.get('source_sha256')
+        if declared is None:
+            warnings.append(f'Run {name}: code provenance is unverified; legacy inputs.code.source_sha256 is missing.')
+        elif declared != source_sha256:
+            raise ValueError(f'Run {name} source code differs from packaged code; use the correct experimental checkout.')
+    return warnings
 
 
 def _verify_provenance(source_read, corpus_read=None, run_reads=(), *, benchmark_read=None, review_read=None):
@@ -187,8 +217,10 @@ def create_bundle(snapshot_dir, output_path, *, corpus_dir=None, run_dirs=(), pr
             entries['source/' + name] = path
     for name, path in reviews.items():
         entries['source/reviews/' + name] = path
-    bundle = BundleManifest(created_at=utc_now(), snapshot_id=manifest['snapshot_id'], code=code_identity(),
-                            files={name: file_hash(path) for name, path in entries.items()})
+    files = {name: file_hash(path) for name, path in entries.items()}
+    code = _project_code_identity(project, files)
+    warnings = _run_code_warnings([(Path(directory).name, _directory_reader(directory)) for directory in run_dirs], code['source_sha256'])
+    bundle = BundleManifest(created_at=utc_now(), snapshot_id=manifest['snapshot_id'], code=code, files=files, warnings=warnings)
     encoded = json.dumps(bundle.to_json_record(), ensure_ascii=False, indent=2, sort_keys=True).encode()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + '.partial')
@@ -206,7 +238,7 @@ def create_bundle(snapshot_dir, output_path, *, corpus_dir=None, run_dirs=(), pr
         temporary.replace(output)
     finally:
         temporary.unlink(missing_ok=True)
-    return {'path': str(output.resolve()), 'sha256': file_hash(output), 'files': len(entries), 'snapshot_id': manifest['snapshot_id']}
+    return {'path': str(output.resolve()), 'sha256': file_hash(output), 'files': len(entries), 'snapshot_id': manifest['snapshot_id'], 'warnings': warnings}
 
 
 def _verify_archive(archive):
@@ -253,6 +285,13 @@ def _verify_archive(archive):
                                   benchmark_read=subtree('source/data/evaluation'), review_read=subtree('source/reviews'))
     if snapshot['snapshot_id'] != manifest.snapshot_id:
         raise ValueError('Bundle snapshot identity disagrees with its packaged snapshot')
+    source_sha256 = _packaged_source_hash(manifest.files)
+    if manifest.code.get('source_sha256') is None:
+        manifest.warnings.append('Bundle code provenance is unverified; legacy code.source_sha256 is missing.')
+    elif manifest.code['source_sha256'] != source_sha256:
+        raise ValueError('Bundle code identity disagrees with its archived source bytes')
+    warnings = _run_code_warnings([(prefix.removeprefix('runs/'), subtree(prefix)) for prefix in sorted(run_prefixes)], source_sha256)
+    manifest.warnings = list(dict.fromkeys([*manifest.warnings, *warnings]))
     return manifest
 
 
@@ -289,4 +328,4 @@ def restore_bundle(archive_path, output_dir):
         except Exception:
             shutil.rmtree(output)
             raise
-    return {'path': str(output.resolve()), 'files_verified': len(manifest.files), 'snapshot_id': manifest.snapshot_id}
+    return {'path': str(output.resolve()), 'files_verified': len(manifest.files), 'snapshot_id': manifest.snapshot_id, 'warnings': manifest.warnings}
