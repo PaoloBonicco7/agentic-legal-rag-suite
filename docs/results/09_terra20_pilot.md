@@ -198,3 +198,17 @@ the expected template. Twenty automatic comments persist outside the report.
 This checks saved artifacts; browser pixel review and human legal review have
 not been performed. Existing software validation is 313 offline tests, with no
 Python source change in this expansion.
+
+Portable archive: `data/bundles/terra20_20261011.tar.gz`, SHA-256
+`adfc71f97be0127f1909024f8e1bb409f3695cea7931c6e4649e3b051f580287`.
+Packaging/restoration verified 7,782 files without provenance warnings. The
+archive contains snapshot, corpus, benchmark, source/documentation from commit
+`25620a2`, seven evaluation runs and the 80-record retrieval diagnostic run;
+its Python source fingerprint matches the experimental freeze. Credentials,
+the private ledger, model weights and index are excluded.
+
+The restored source regenerated all 21 comparisons without API calls. All
+3,449 HTML pages were reproduced: 3,429 are byte-identical and 20 differ only
+in rendered run paths. All 10,566 local links resolve. The restored file set
+and checksums remain exact, with no added caches or credential matches. The
+verification record is `data/diagnostics/terra20_20261011/restored_report_qa.json`.

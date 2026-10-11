@@ -54,6 +54,10 @@ than invoices. A cumulative 5 EUR cap and 0.50 EUR reserve bounded this batch.
 The latest report is `data/reports/terra20_20261011/index.html`; retrieval-only
 diagnostics contain 80 records for the same 20 QIDs and four profiles. No new
 paid embedding, Utopia, Sol, control-judge, MCQ or enrichment call was made.
+The latest portable archive is `data/bundles/terra20_20261011.tar.gz`: 7,782
+verified files, no provenance warnings and exact restoration. Restored source
+reproduced the 21 comparisons and 3,449 report pages without API calls; only
+rendered run paths differ in 20 pages. Source remains unchanged.
 
 The following four-case validation and its accounting remain historical records.
 
@@ -102,7 +106,7 @@ All three notebooks were executed through Jupyter with build/paid switches
 left false and zero API calls; executed copies and HTML previews are under
 `data/notebooks/validated_20261011`. Browser pixel review has **not** been done.
 
-Portable packaging and restoration passed with 7,795 verified files and no
+The four-case packaging and restoration passed with 7,795 verified files and no
 provenance warnings. Rebuilding the main report from restored source reproduced
 all 21 comparisons without API calls. The frozen delivery archive is
 `data/bundles/validated_20261011.tar.gz`; its restored copy is under

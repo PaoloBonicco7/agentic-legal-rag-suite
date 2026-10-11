@@ -109,7 +109,7 @@ validation remain unexecuted.
 
 ```bash
 uv run --no-sync legal-rag bundle --snapshot data/snapshots/current_20261010 --corpus data/corpora/validated_20261011 --output data/bundles/manual01.tar.gz
-uv run --no-sync legal-rag restore data/bundles/validated_20261011.tar.gz --output data/restored/manual02
+uv run --no-sync legal-rag restore data/bundles/terra20_20261011.tar.gz --output data/restored/manual02
 ```
 
 When packaging revised runs, add `--review-files /path/to/reviews.jsonl`; the raw

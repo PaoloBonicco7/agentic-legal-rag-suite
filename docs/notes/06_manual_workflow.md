@@ -18,24 +18,27 @@ artifact directories are immutable: choose a fresh path for every new build/run.
 | Separate MCQ report | `data/reports/validated_20261011_mcq/index.html`, one QID and three profiles |
 | Retrieval-only diagnostics | `data/diagnostics/validated_20261011/retrieval`, 16 records / four QIDs |
 | Latest retrieval-only diagnostics | `data/diagnostics/terra20_20261011/retrieval`, 80 records / 20 QIDs |
+| Latest portable archive | `data/bundles/terra20_20261011.tar.gz`, 7,782 files verified and restored |
 | Executed notebook previews | `data/notebooks/validated_20261011`, three notebooks and HTML previews |
 
 These local generated assets are ignored by Git. The current code passed
 313 offline tests. All three notebooks were executed with build/paid switches
 false and made zero API calls. Their HTML previews are available, but browser
-pixel review was not performed. Portable packaging/restoration verified 7,795
-files, and restored source reproduced the 21 main comparisons without API
-calls. Report links, checksums and offline resources passed static QA. See the
+pixel review was not performed. The previous four-case archive verified 7,795
+files; the latest twenty-case archive verified 7,782 files. Both restorations
+reproduced their 21 comparisons without API calls. Latest restored report
+pages agree except for rendered run paths, with all local links resolving.
+Report links, checksums and offline resources passed static QA. See the
 [delivery note](../results/00_delivery.md) for the package scope and limits.
 
 To restore the frozen package into a fresh directory:
 
 ```bash
-uv run --no-sync legal-rag restore data/bundles/validated_20261011.tar.gz --output data/restored/manual02
+uv run --no-sync legal-rag restore data/bundles/terra20_20261011.tar.gz --output data/restored/manual02
 ```
 
-The archive includes source, benchmark, snapshot, corpus, ten evaluation runs
-and retrieval diagnostics. It excludes credentials, the provider ledger,
+The latest archive includes source, benchmark, snapshot, corpus, seven evaluation
+runs and the 80-record retrieval diagnostics. It excludes credentials, the provider ledger,
 indexes and model weights; index reconstruction requires the pinned local
 model and explicit device/dtype. Saved responses do not require regeneration.
 
