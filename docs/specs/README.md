@@ -15,5 +15,6 @@ Each specification defines Purpose, Inputs, Outputs, Pipeline, Contract, Quality
 | 08 | [Retrieval diagnostics](08_retrieval_diagnostics.md) | Error localization and isolated ablations. |
 | 09 | [Benchmark reviews](09_benchmark_reviews.md) | Human-approved revisions and frozen-answer rejudging. |
 | 10 | [Reproducibility](10_reproducibility.md) | Verified packaging, restoration and delivery. |
+| 11 | [Retrieval optimization — planned](11_retrieval_optimization.md) | Evidence-driven changes, isolated tests and a conditional combined candidate. |
 
 Progress only after the preceding input gates pass. Technical tests do not establish a QA improvement. Negative or incomplete experiments remain visible. Runtime retrieval and generation cannot read benchmark gold. Notes explain decisions; results distinguish measured findings from future work.

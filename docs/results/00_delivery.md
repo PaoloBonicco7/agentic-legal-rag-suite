@@ -59,7 +59,26 @@ verified files, no provenance warnings and exact restoration. Restored source
 reproduced the 21 comparisons and 3,449 report pages without API calls; only
 rendered run paths differ in 20 pages. Source remains unchanged.
 
-The following four-case validation and its accounting remain historical records.
+## Subsequent strategy review
+
+The [strategy review](10_strategy_review.md) completed 400 local retrieval-only
+records on all 100 original intents, with zero retrieval errors or new API calls.
+Expected-article presence in the context is Dense 75/100, Sparse 78/100,
+Hybrid 81/100 and Graph 79/100. These incomplete-reference proxies do not update
+the twenty-intent answer scores. Six source-inspected before/after cases and
+counterexamples document the mechanisms and limits.
+
+An exact replay of the twenty saved multi-query contexts found no context-article
+gain from giving more weight to the original query. Runtime source, benchmark,
+corpus/index and prior outputs remain unchanged; the ledger is still
+425 entries / 1.963799125 EUR. The new report is
+`data/reports/strategy_review_20261011/index.html`. The
+[optimization specification](../specs/11_retrieval_optimization.md) is planned,
+not implemented; no new paid answer batch was launched.
+
+## Historical four-case validation
+
+The following validation and its accounting remain historical records.
 
 The bounded Luna pilot used four original no-hint intents, one per difficulty
 level and three laws, with seven separate profiles. Generator and judge were

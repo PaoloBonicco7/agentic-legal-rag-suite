@@ -67,5 +67,8 @@ The monitoring callback was initially left unexecuted under the setup-only
 restriction. Its focused fake-retriever tests passed in the 2026-10-11 offline
 suite. The later bounded validation saved 16 real diagnostic records for four
 QIDs and four profiles, without LLM calls. Local query embeddings were computed.
-The full 100-intent retrieval
-ablation remains separate future work.
+The 2026-10-11 strategy review then completed 400 retrieval-only records across
+all 100 intents and four profiles, with no retrieval errors or LLM usage. See
+the [measured review](../results/10_strategy_review.md) and the separate
+[planned optimization](11_retrieval_optimization.md); generated-answer evaluation
+on all 100 intents remains outstanding.

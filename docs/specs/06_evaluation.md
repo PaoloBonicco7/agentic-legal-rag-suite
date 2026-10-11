@@ -18,7 +18,8 @@ require recorded supporting evidence; validators do not certify the proposed gol
 An approved historical/unresolved row is omitted from that view, never deleted.
 Approved current reviews must name the exact corpus snapshot used by the run.
 
-Oracle is a diagnostic ceiling, not an ordinary retrieval treatment. Its separate
+Oracle is a diagnostic reference, not an ordinary retrieval treatment or a
+theoretical performance ceiling. Its separate
 human-approved JSONL maps QIDs to existing chunk IDs and records `snapshot_id`,
 `corpus_manifest_sha256` and a named `reviewer`. The runner resolves those IDs in
 the frozen corpus and passes only chunks to the engine, never gold answers or

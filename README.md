@@ -10,6 +10,7 @@ One package contains `corpus`, `indexing`, `retrieval`, `generation`, `evaluatio
 - [Architecture decisions](docs/notes/00_architecture.md): reasons, alternatives and limits.
 - [Implementation status](docs/results/00_delivery.md): actual artifacts and outstanding empirical work.
 - [Twenty-intent Luna/Terra pilot](docs/results/09_terra20_pilot.md): five cases per level, seven profiles and source/judge audits.
+- [Strategy review and six source-inspected cases](docs/results/10_strategy_review.md): all-100 local retrieval diagnostics and the [planned optimization](docs/specs/11_retrieval_optimization.md).
 - [Bounded Luna validation](docs/results/08_pipeline_validation.md): seven profiles, case audits and costs.
 - [Preprocessing walkthrough](docs/notes/05_preprocessing_walkthrough.html): real source examples, transformations and limits.
 - [Manual workflow](docs/notes/06_manual_workflow.md): stages to launch and inspect yourself.
@@ -102,8 +103,13 @@ uses fresh Luna answers and Terra judgments: No-RAG 9/20, Dense 16/20,
 Hybrid/Graph/Rerank 17/20, Sparse 14/20 and Multi-query 15/20. It made 310 new
 calls, conservatively accounted at 1.89508825 EUR. Citation failures and
 gold/temporal/judge concerns remain visible. None of these pilots authorizes
-promotion; the full 100-intent benchmark and independent control-judge
-validation remain unexecuted.
+promotion; the full 100-intent generated-answer benchmark and independent
+control-judge validation remain unexecuted. The subsequent
+[local retrieval review](docs/results/10_strategy_review.md) completed 400
+diagnostics without model calls: expected-article presence in the context is
+75/100 Dense, 78/100 Sparse, 81/100 Hybrid and 79/100 Graph. These are reference
+proxies, not new answer accuracies. Six inspected cases, regressions and a
+negative weighted multi-query replay justify the next planned experiments.
 
 ## Portable experiment package
 
