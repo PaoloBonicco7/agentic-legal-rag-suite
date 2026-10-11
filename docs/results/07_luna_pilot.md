@@ -149,3 +149,9 @@ Artefatti locali, ignorati da Git:
 Questo pilot verifica l'accesso reale e il motore su pochi casi. Non sostituisce
 la baseline sui 100 intenti, le ablation Advanced complete o un controllo umano
 e indipendente del giudice. I risultati negativi restano parte della ricerca.
+
+La verifica statica del report (`report_qa.json`) passa: 3.213 pagine HTML,
+9.662 link locali, 19 checksum di input e 3.215 di output; otto confronti per
+QID, 24 pagine di caso e tre esperimenti. I payload respinti sono visibili,
+nessuna credenziale privata è presente negli export controllati e tutte le
+voci del ledger sono riconciliate. Nessuna verifica visiva nel browser effettuata.
