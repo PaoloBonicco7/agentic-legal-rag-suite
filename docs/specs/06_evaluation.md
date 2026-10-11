@@ -53,6 +53,12 @@ snapshot/manifest identity; every recorded corpus artifact hash is verified.
 ## Pipeline
 
 1. Freeze selected QIDs and hash source questions/configuration before calls.
+   An expanded pilot may retain prior QIDs and add a seeded sample per level;
+   record the inclusion rule before calls and use the same selection for all
+   profiles. New runs may regenerate the whole panel with a different primary
+   judge; prior outputs remain immutable and are not pooled into the new scores.
+   A primary judge different from the generator is still one judge, not an
+   independent control assessment or authorization to promote a pilot.
 2. Give the engine only the question and optional MCQ options. Gold answers and
    expected references never enter retrieval, rewriting or generation.
 3. Score MCQ labels exactly. Score open answers with a frozen 0/1/2 rubric:
