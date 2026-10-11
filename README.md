@@ -9,6 +9,7 @@ One package contains `corpus`, `indexing`, `retrieval`, `generation`, `evaluatio
 - [Numbered workflow](docs/specs/README.md): inputs, outputs and quality gates.
 - [Architecture decisions](docs/notes/00_architecture.md): reasons, alternatives and limits.
 - [Implementation status](docs/results/00_delivery.md): actual artifacts and outstanding empirical work.
+- [Bounded Luna validation](docs/results/08_pipeline_validation.md): seven profiles, case audits and costs.
 - [Preprocessing walkthrough](docs/notes/05_preprocessing_walkthrough.html): real source examples, transformations and limits.
 - [Manual workflow](docs/notes/06_manual_workflow.md): stages to launch and inspect yourself.
 - [Literature](docs/notes/01_literature.md): primary references and what they support.
@@ -50,11 +51,10 @@ CPU, float32 and batch 2 are portable defaults. GPU execution is explicit (`--em
 ## Ask and inspect
 
 ```bash
-uv run --no-sync legal-rag preflight --live --output data/diagnostics/utopia.json
-uv run --no-sync legal-rag ask --index data/indexes/current-bge --corpus data/corpora/current-final 'Quali sono i requisiti previsti dalla legge?'
-uv run --no-sync legal-rag ui --index data/indexes/current-bge --corpus data/corpora/current-final
-uv run --no-sync legal-rag diagnose --index data/indexes/current-bge --output data/diagnostics/retrieval-manual01
-uv run --no-sync legal-rag report --corpus data/corpora/current-final --diagnostics data/diagnostics/retrieval-manual01 --output data/reports/retrieval-manual01
+uv run --no-sync legal-rag ask --index data/indexes/validated-bge_20261011 --corpus data/corpora/validated_20261011 --provider openai --model gpt-6-luna --retries 0 --budget-eur 0.5 --budget-reserve-eur 0.1 'Quali sono i requisiti previsti dalla legge?'
+uv run --no-sync legal-rag ui --index data/indexes/validated-bge_20261011 --corpus data/corpora/validated_20261011 --provider openai --model gpt-6-luna --retries 0 --budget-eur 0.5 --budget-reserve-eur 0.1
+uv run --no-sync legal-rag diagnose --index data/indexes/validated-bge_20261011 --output data/diagnostics/retrieval-manual01
+uv run --no-sync legal-rag report --corpus data/corpora/validated_20261011 --diagnostics data/diagnostics/retrieval-manual01 --output data/reports/retrieval-manual01
 ```
 
 Profiles: `no_rag`, `dense`, `sparse`, `hybrid`, `multiquery`, `graph`, `rerank`, `oracle`. Every profile uses the same context builder (4096 BGE tokens, 12 units). Current retrieval excludes only confirmed cessations with resolved scope. Unknown cases remain included. `--include-ceased` is an explicit alternative policy and must match across compared runs.
@@ -71,11 +71,11 @@ live smoke test after access is restored.
 ## Controlled experiments
 
 ```bash
-uv run --no-sync legal-rag evaluate --index data/indexes/current-bge --corpus data/corpora/current-final --profile no_rag --output data/runs/no_rag
-uv run --no-sync legal-rag evaluate --index data/indexes/current-bge --corpus data/corpora/current-final --profile dense --output data/runs/dense
-uv run --no-sync legal-rag evaluate --index data/indexes/current-bge --corpus data/corpora/current-final --profile hybrid --output data/runs/hybrid
+uv run --no-sync legal-rag evaluate --index data/indexes/validated-bge_20261011 --corpus data/corpora/validated_20261011 --profile no_rag --output data/runs/no_rag
+uv run --no-sync legal-rag evaluate --index data/indexes/validated-bge_20261011 --corpus data/corpora/validated_20261011 --profile dense --output data/runs/dense
+uv run --no-sync legal-rag evaluate --index data/indexes/validated-bge_20261011 --corpus data/corpora/validated_20261011 --profile hybrid --output data/runs/hybrid
 uv run --no-sync legal-rag compare data/runs/no_rag data/runs/dense data/runs/hybrid --output data/comparison.json
-uv run --no-sync legal-rag report --corpus data/corpora/current-final --runs data/runs/no_rag data/runs/dense data/runs/hybrid --output data/reports/baseline
+uv run --no-sync legal-rag report --corpus data/corpora/validated_20261011 --runs data/runs/no_rag data/runs/dense data/runs/hybrid --output data/reports/baseline
 ```
 
 Utopia is the default generator; OpenAI Luna judges and Sol checks a fixed stratified sample of 20 QID. OpenAI requires a key and prices verified **today** in `configs/openai-pricing.json`, with a recent sourced exchange rate. The shared persistent ledger caps all attempts and retries at 20 EUR (16 experiment + 4 validation). Accounted amounts are conservative estimates/reservations, not invoiced costs. No fallback changes provider or model. `--without-control` runs a diagnostic comparison that cannot justify promotion.
@@ -91,20 +91,24 @@ profile; a pilot cannot authorize promotion.
 Acquisition, preprocessing, indexing and evaluation expose stage/count progress
 on stderr. stdout remains the final JSON result; dependencies may also print
 diagnostics on stderr. Progress is observational, not proof of completion: use
-the final manifest and quality gates. The offline suite passed 251 tests before
-the [eight-intent Luna pilot](docs/results/07_luna_pilot.md) on 2026-10-11.
-That pilot compares No-RAG, Dense and Hybrid; the full 100-intent benchmark
-and Advanced ablations remain unexecuted.
+the final manifest and quality gates. The latest offline suite passed 313 tests.
+The [eight-intent pilot](docs/results/07_luna_pilot.md) remains frozen; the
+[four-intent validation](docs/results/08_pipeline_validation.md) compares seven
+profiles on the rebuilt graph/index. Hybrid scores 4/4, Dense 3/4 and No-RAG 2/4
+according to Luna, with provider/citation failures and judge inconsistencies
+exposed. Neither pilot authorizes promotion; the full 100-intent benchmark and
+independent judge validation remain unexecuted.
 
 ## Portable experiment package
 
 ```bash
-uv run --no-sync legal-rag bundle --snapshot data/snapshots/current_20261010 --corpus data/corpora/current-final --output data/bundles/current_20261010.tar.gz
-uv run --no-sync legal-rag restore data/bundles/current_20261010.tar.gz --output data/restored/current
+uv run --no-sync legal-rag bundle --snapshot data/snapshots/current_20261010 --corpus data/corpora/validated_20261011 --output data/bundles/manual01.tar.gz
+uv run --no-sync legal-rag restore data/bundles/validated_20261011.tar.gz --output data/restored/manual02
 ```
 
 When packaging revised runs, add `--review-files /path/to/reviews.jsonl`; the raw
-review file must match the run hash. Add `--runs` for saved evaluation, diagnostic
-or annotation artifacts.
+review file must match the run's `source_hashes["review"]`. Add `--runs` for saved evaluation or
+retrieval-diagnostic directories with verified corpus provenance. Interpretive
+case comments in `docs/results/` are packaged with the documentation.
 
 Bundles verify source, benchmark, corpus and run provenance before export and every checksum before restoration. They include frozen bytes, benchmark, source, lockfile and documentation; they exclude keys and model weights. Indexes are rebuilt from the restored corpus. Re-downloading a site does not recreate the experimental snapshot. Generated data, indexes, caches, runs and reports are ignored by Git. Keep the archive beside the source checkout when sharing a reproducible experiment.

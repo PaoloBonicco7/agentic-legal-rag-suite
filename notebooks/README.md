@@ -31,10 +31,11 @@ metrics or prompts. Missing run directories mean results are unmeasured.
 Source metadata and structural gates do not certify legal applicability, and
 article matches do not establish answer correctness.
 
-The updated notebook structure is validated with `nbformat`; code cells compile
-without execution. Stored outputs are intentionally cleared. Top-to-bottom
-execution and visual inspection are pending the new artifacts. With the optional
-notebook dependencies and all execution switches disabled, validate locally:
+All three notebooks passed `nbformat` validation and top-to-bottom execution
+in the project Jupyter kernel with all switches disabled. The budget ledger was
+unchanged. Source notebooks keep outputs cleared; executed copies and HTML
+previews are saved under `data/notebooks/validated_20261011`. Browser pixel-layout
+inspection was unavailable. With the optional dependencies, validate locally:
 
 ```bash
 python -m pip install -e '.[notebooks]'

@@ -65,4 +65,7 @@ no-gold leakage and report labels. A real run may execute all 100 questions with
 the indexed local embeddings even when generation providers are unavailable.
 The monitoring callback was initially left unexecuted under the setup-only
 restriction. Its focused fake-retriever tests passed in the 2026-10-11 offline
-suite; no full retrieval ablation was run.
+suite. The later bounded validation saved 16 real diagnostic records for four
+QIDs and four profiles, without LLM calls. Local query embeddings were computed.
+The full 100-intent retrieval
+ablation remains separate future work.

@@ -1,99 +1,103 @@
 # Rebuild delivery
 
-## Software and source
+## Delivered software and sources
 
-The isolated branch is `feature/legal-rag-rebuild`. The original checkout was
-preserved and a private source/research archive was verified before replacing
-the implementation. Original evaluation CSVs are byte-identical; no gold was
-corrected or approved by an agent.
+The isolated branch is `feature/legal-rag-rebuild`. The original checkout and
+verified private source/research backup remain preserved. Original evaluation
+CSVs and gold are unchanged; no agent approved a benchmark revision.
 
-The package provides acquisition, deterministic preprocessing, conservative
-status evidence, a JSONL graph, dense/sparse/hybrid retrieval, bounded graph
-expansion, multi-query, LLM reranking, structured answers, citation validation,
-checkpointed evaluation, paired comparisons, offline reports, a stateless UI
-and thin notebooks. OpenAI requests use one persistent budget ledger with a
-20 EUR ceiling and a 4 EUR validation reserve.
+The package implements acquisition, deterministic preprocessing, conservative
+status evidence, a JSONL graph, local dense/sparse/hybrid retrieval, bounded
+multi-query/graph/reranking ablations, structured answers, citation validation,
+checkpointed evaluation, paired comparisons, offline HTML, a stateless UI and
+thin notebooks. CLI, UI and notebooks call the same Python modules.
 
-The current snapshot is `vda-efe319281d52e13a`, acquired on 2026-10-10 between
-12:22:15 and 13:26:27 UTC. Both 318-page catalogue passes contain the same
-3,176 source IDs. Every acquired file hash was verified. Catalogue agreement
-does not establish an atomic view or certify legal applicability.
+Snapshot `vda-efe319281d52e13a` was acquired on 2026-10-10, between 12:22:15 and
+13:26:27 UTC. Two 318-page catalogue passes agreed on 3,176 source IDs; source
+file hashes were verified. This records provenance, not an atomic legal view
+or certified current applicability.
 
-`data/corpora/current-final` contains 3,176 documents, 76,912 units, 119,630
-relations and 21,322 chunks. All 17 structural gates pass; complete embedding
-inputs have at most 510 tokens. Seven JSONL files and `quality.json` are
-byte-identical to an independent repeat. Semantic annotation accuracy still
-requires human sampling. See the [source audit](../notes/03_current_snapshot.md)
-for observed warnings and limits.
+The delivered corpus is `data/corpora/validated_20261011`: 3,176 documents,
+76,912 units, 21,322 chunks and 119,398 relations. All 17 structural gates pass;
+eight canonical files are byte-identical across two builds. Texts, chunks and
+status are unchanged from the previous corpus. Compound-reference corrections
+were applied; 4,010 destinations remain unresolved and are visible. Graph
+traversal uses the three documented relation types; correct
+structure does not establish semantic correctness. See the
+[source audit](../notes/03_current_snapshot.md) and
+[reference review](../notes/07_reference_review.md).
 
-Manual inspection also identified compound references that need separate
-article targets or may attach an article to the wrong law. The
-[reference review](../notes/07_reference_review.md) records exact source evidence
-and IDs. Graph expansion remains experimental until those cases are reviewed;
-structural gates alone do not establish correct links.
+The new index, `data/indexes/validated-bge_20261011`, contains 21,322 points with
+1,024-dimensional dense and native sparse BGE-M3 vectors. All document vectors
+were reused from the verified local cache; no new document embedding inference
+or paid embedding call was required. Payloads and corpus identity were reconciled.
 
-## Execution status
+## Verified execution
 
-The initial 2026-10-10 delivery was restricted to setup and documentation,
-as requested after the provider preflight. No complete answer benchmark or
-retrieval ablation was run at that time.
-Before the execution stop, the implementation subsequently committed as
-`b92c857` passed 246 offline software tests, including Streamlit AppTest, local
-Qdrant integration and portable-archive checks. Tests use controlled fixtures;
-they do not establish answer quality on the real benchmark. Progress callbacks,
-CLI wiring and the explanatory HTML were added afterwards without executing
-tests, compilation, rendering or pipeline runs. The newly authorized work on
-2026-10-11 passed 251 offline tests, including that wiring, and completed the
-[small Luna pilot](07_luna_pilot.md). See the [manual workflow](../notes/06_manual_workflow.md).
+The current implementation passed **313 offline tests**. Controlled tests verify
+software contracts, including provider failures, local Qdrant, UI, checkpoints
+and archive validation; they do not establish legal answer quality.
 
-The offline corpus report is `data/reports/current-final/index.html`. It records
-the definitive corpus and separately stored audit comments. Its generator
-uses no model or new retrieval. Browser visual verification was unavailable;
-static checks and their scope are recorded in
-`data/diagnostics/current_report_static_qa.json`: 3,178 HTML pages, 9,533 local
-links and all recorded input/output hashes passed before the later stop.
+The bounded Luna pilot used four original no-hint intents, one per difficulty
+level and three laws, with seven separate profiles. Generator and judge were
+both `gpt-6-luna`, with no retry or independent control judge.
 
-The already-running BGE-M3 job completed successfully in
-`data/indexes/current-bge`: 21,322 points, 1,024 dense dimensions and native
-sparse vectors, with `ready_for_retrieval=true`. It used MPS/float16, inference
-batch 8, upload groups of 64 and no cached vectors. The measured job duration
-was 3,874.72 seconds; this is local execution evidence, not a retrieval-quality
-result. Every payload, ID, dimension and count was reconciled by the build.
-The record is `data/diagnostics/current_index_completed.json`. Its manifest
-retains the actual build-time commit/dirty/source-hash identity; later code
-edits do not retroactively rewrite it. Older partial indexes and parser outputs
-are diagnostic artifacts, not the delivered index.
-The [local execution note](../notes/04_local_embedding.md) explains the measured
-hardware calibration and its limits.
+| Profile | Fully correct / four intents |
+| --- | --- |
+| No-RAG | 2/4 |
+| Dense | 3/4 |
+| Sparse | 3/4 |
+| Hybrid | 4/4 |
+| Multi-query | 2/4 |
+| Graph | 3/4 |
+| Rerank | 3/4 |
 
-Utopia's live model-inspection preflight returned HTTP 403 on 2026-10-10; the
-configured endpoint, requested 32,768-token window and model are recorded in
-`data/diagnostics/utopia_final_preflight.json`. Model identity/capabilities
-therefore remain unverified. OpenAI was unavailable at the initial delivery;
-the user subsequently configured the private key and authorized limited Luna
-tests. The 2026-10-11 pilot made 46 calls for a conservative 0.02172325 EUR.
-No-RAG, Dense and Hybrid each achieved 5/8 fully correct answers: no aggregate
-improvement was observed. Full Advanced ablations and independent judge
-validation remain unexecuted.
+One No-RAG provider failure and one Graph quotation-of-header failure remain
+operational zeros in the fixed denominator. Judge inconsistencies and a
+health-law source identity conflict limit interpretation. Four explored cases
+cannot support promotion or an unseen-test claim. The
+[validation note](08_pipeline_validation.md) records exact cases, metrics and
+limits; the [earlier eight-intent pilot](07_luna_pilot.md) remains unchanged.
 
-No new phase was launched during the setup-only restriction. The later pilot
-was explicitly authorized. The portable bundle and restore commands are ready;
-no final bundle or restoration was run in this pilot. The previously
-verified private backup preserves the original research checkout.
+Additional checks remain separate: bounded retrieval diagnostics produced
+16 records for four questions and four profiles without LLM calls; an MCQ
+smoke on one QID achieved 1/1 for No-RAG, Dense and Hybrid without an LLM judge.
+CLI and UI smoke checks completed. Enrichment produced four evidence-backed
+proposals, with **zero adopted facts** and no corpus mutation.
 
-## Remaining empirical work
+The new work made **69 calls**, accounted at **0.046987625 EUR**. Including the
+first pilot, the ledger records **115 calls and 0.068710875 EUR**: 114 settled
+entries and one uncertain reservation. These are conservative estimates and
+reservations, not invoices. The bounded authorization used a cumulative
+0.50 EUR ceiling and 0.10 EUR reserve; the normal 20 EUR/4 EUR defaults were
+not the pilot limits. No Sol or Utopia model call and no paid BGE embedding
+was used in this validation. Utopia's earlier live preflight returned HTTP 403;
+its model identity and capacity still need verification if that provider is used.
 
-First address the citation-format and evidence-selection failures diagnosed
-by the pilot, and validate judge behavior without changing frozen scores.
-Verify Utopia model identity and context capacity if using that provider,
-refresh sourced OpenAI prices/exchange rates before further paid batches,
-and run the full 100-intent
-No-RAG/Dense/Sparse/Hybrid baseline with common judges and frozen settings.
-Then inspect errors, seek human approval for any benchmark changes and measure
-individual ablations before combinations. Graph, reranking and LLM enrichment
-are implemented experiments, not adopted accuracy improvements.
+## Review artifacts and remaining work
 
-The [numbered specs](../specs/README.md) define the commands and acceptance gates.
-The [evaluation protocol](06_experiment_protocol.md) separates software behavior from
-scientific evidence. Missing judgments, provider failures and negative results
-remain visible; they cannot justify a final promotion decision.
+The main report is `data/reports/validated_20261011/index.html`; MCQ results are
+separate at `data/reports/validated_20261011_mcq/index.html`. Reports read frozen
+artifacts and durable audit comments without retrieval or model calls.
+All three notebooks were executed through Jupyter with build/paid switches
+left false and zero API calls; executed copies and HTML previews are under
+`data/notebooks/validated_20261011`. Browser pixel review has **not** been done.
+
+Portable packaging and restoration passed with 7,795 verified files and no
+provenance warnings. Rebuilding the main report from restored source reproduced
+all 21 comparisons without API calls. The frozen delivery archive is
+`data/bundles/validated_20261011.tar.gz`; its restored copy is under
+`data/restored/validated_20261011`. It includes source, benchmark, snapshot,
+corpus, seven no-hint runs, three MCQ runs and retrieval diagnostics. Model
+weights, indexes, credentials and the private provider ledger are excluded.
+Report links, checksums and offline resources passed static QA; this does not
+replace the outstanding browser pixel review. The original private research
+backup remains available.
+
+Next empirical work requires human review of gold, source identity and judge
+behavior, then the full 100-intent comparison with an independent judge and
+frozen settings. Verify Utopia access only if needed, and refresh sourced
+prices/exchange rates before another authorized paid batch. Graph, reranking,
+multi-query and enrichment remain experiments, not adopted improvements.
+Follow the [manual workflow](../notes/06_manual_workflow.md),
+[evaluation protocol](06_experiment_protocol.md) and [numbered specs](../specs/README.md).
